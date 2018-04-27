@@ -5,9 +5,6 @@ layout: documentation
 
 # Operator HTTP API
 
-Mesos 1.0.0 added **experimental** support for v1 Operator HTTP API.
-
-
 ## Overview
 
 Both masters and agents provide the `/api/v1` endpoint as the base URL for performing operator-related operations.
@@ -677,6 +674,10 @@ Content-Type: application/json
       },
       {
         "name": "master/tasks_lost",
+        "value": 0.0
+      },
+      {
+        "name": "master/messages_reconcile_operations",
         "value": 0.0
       },
       {
@@ -2324,6 +2325,41 @@ HTTP/1.1 202 Accepted
 
 ```
 
+### MARK_AGENT_GONE
+
+This call can be used by operators to assert that an agent instance has
+failed and is never coming back (e.g., ephemeral instance from cloud provider).
+The master would shutdown the agent and send `TASK_GONE_BY_OPERATOR` updates
+for all the running tasks. This signal can be used by stateful frameworks to
+re-schedule their workloads (volumes, reservations etc.) to other agent
+instances. It is possible that the tasks might still be running if the
+operator's assertion was wrong and the agent was partitioned away from
+the master. The agent would be shutdown when it tries to reregister with the
+master when the partition heals. This call is idempotent.
+
+```
+MARK_AGENT_GONE HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: masterhost:5050
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "MARK_AGENT_GONE",
+  "mark_agent_gone": {
+    "agent_id": {
+      "value": "3192b9d1-db71-4699-ae25-e28dfbf42de1"
+    }
+  }
+}
+
+MARK_AGENT_GONE HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
 ## Events
 
 Currently, the only call that results in a streaming response is the `SUBSCRIBE` call sent to the master API.
@@ -2366,9 +2402,22 @@ The following events are currently sent by the master. The canonical source of t
 
 The first event sent by the master when a client sends a `SUBSCRIBE` request on the persistent connection. This includes a snapshot of the cluster state. See `SUBSCRIBE` above for details. Subsequent changes to the cluster state can result in more events (currently only `TASK_ADDED` and `TASK_UPDATED` are supported).
 
+### HEARTBEAT
+
+Periodically sent by the master to the subscriber according to 'Subscribed.heartbeat_interval_seconds'. If the subscriber does not receive any events (including heartbeats) for an extended period of time (e.g., 5 x heartbeat_interval_seconds), it is likely that the connection is lost or there is a network partition. In that case, the subscriber should close the existing subscription connection and resubscribe using a backoff strategy.
+
+```
+HEARTBEAT Event (JSON)
+
+<event-length>
+{
+  "type": "HEARTBEAT",
+}
+```
+
 ### TASK_ADDED
 
-Sent whenever a task has been added to the master. This can happen either when a new task launch is processed by the master or when an agent re-registers with a failed over master.
+Sent whenever a task has been added to the master. This can happen either when a new task launch is processed by the master or when an agent reregisters with a failed over master.
 
 ```
 TASK_ADDED Event (JSON)
@@ -2430,6 +2479,192 @@ TASK_UPDATED Event (JSON)
 }
 ```
 
+### FRAMEWORK_ADDED
+
+Sent whenever a framework becomes known to the master. This can happen when a new framework registers with the master.
+
+```
+FRAMEWORK_ADDED Event (JSON)
+
+<event-length>
+{
+  "type": "FRAMEWORK_ADDED",
+
+  "framework_added": {
+    "framework": {
+      "active": true,
+      "allocated_resources": [],
+      "connected": true,
+      "framework_info": {
+        "capabilities": [
+          {
+            "type": "RESERVATION_REFINEMENT"
+          }
+        ],
+        "checkpoint": true,
+        "failover_timeout": 0,
+        "id": {
+          "value": "a9ba2984-99c4-4183-8cd1-f7313426e21c-0147"
+        },
+        "name": "inverse-offer-example-framework",
+        "role": "*",
+        "user": "root"
+      },
+      "inverse_offers": [],
+      "recovered": false,
+      "registered_time": {
+        "nanoseconds": 1501191957829317120
+      },
+      "reregistered_time": {
+        "nanoseconds": 1501191957829317120
+      }
+    }
+  }
+}
+```
+
+### FRAMEWORK_UPDATED
+
+Sent whenever a framework reregisters with the master upon a disconnection (network error) or upon a master failover.
+
+```
+FRAMEWORK_UPDATED Event (JSON)
+
+<event-length>
+{
+  "type": "FRAMEWORK_UPDATED",
+
+  "framework_updated": {
+    "framework": {
+      "active": true,
+      "allocated_resources": [],
+      "connected": true,
+      "framework_info": {
+        "capabilities": [
+          {
+            "type": "RESERVATION_REFINEMENT"
+          }
+        ],
+        "checkpoint": true,
+        "failover_timeout": 0,
+        "id": {
+          "value": "a9ba2984-99c4-4183-8cd1-f7313426e21c-0147"
+        },
+        "name": "inverse-offer-example-framework",
+        "role": "*",
+        "user": "root"
+      },
+      "inverse_offers": [],
+      "recovered": false,
+      "registered_time": {
+        "nanoseconds": 1501191957829317120
+      },
+      "reregistered_time": {
+        "nanoseconds": 1501191957829317120
+      }
+    }
+  }
+}
+```
+
+### FRAMEWORK_REMOVED
+
+Sent whenever a framework is removed. This can happen when a framework is explicitly teardown by the operator or if it fails to reregister with the master within the failover timeout.
+
+```
+FRAMEWORK_REMOVED Event (JSON)
+
+<event-length>
+{
+  "type": "FRAMEWORK_REMOVED",
+
+  "framework_removed": {
+    "framework_info": {
+      "capabilities": [
+        {
+          "type": "RESERVATION_REFINEMENT"
+        }
+      ],
+      "checkpoint": true,
+      "failover_timeout": 0,
+      "id": {
+        "value": "a9ba2984-99c4-4183-8cd1-f7313426e21c-0147"
+      },
+      "name": "inverse-offer-example-framework",
+      "role": "*",
+      "user": "root"
+    }
+  }
+}
+```
+
+### AGENT_ADDED
+
+Sent whenever an agent becomes known to it. This can happen when an agent registered for the first time, or reregistered after a master failover.
+
+```
+AGENT_ADDED Event (JSON)
+
+<event-length>
+{
+  "type": "AGENT_ADDED",
+
+  "agent_added": {
+    "agent": {
+      "active": true,
+      "agent_info": {
+        "hostname": "172.31.2.24",
+        "id": {
+          "value": "c3946a13-75b4-4d3c-9d0e-fc10038dca85-S3"
+        },
+        "port": 5051,
+        "resources": [],
+      },
+      "allocated_resources": [],
+      "capabilities": [
+        {
+          "type": "MULTI_ROLE"
+        },
+        {
+          "type": "HIERARCHICAL_ROLE"
+        },
+        {
+          "type": "RESERVATION_REFINEMENT"
+        }
+      ],
+      "offered_resources": [],
+      "pid": "slave(1)@172.31.2.24:5051",
+      "registered_time": {
+        "nanoseconds": 1500993262264135000
+      },
+      "reregistered_time": {
+        "nanoseconds": 1500993263019321000
+      },
+      "total_resources": [],
+      "version": "1.4.0"
+    }
+  }
+}
+```
+
+### AGENT_REMOVED
+
+Sent whenever a agent is removed. This can happen when the agent is scheduled for maintenance. (NOTE: It's possible that an agent might become active once it has been removed, i.e. if the master has gc'ed its list of known "dead" agents. See MESOS-5965 for context).
+
+```
+AGENT_REMOVED Event (JSON)
+
+<event-length>
+{
+  "type": "AGENT_REMOVED",
+
+  "agent_removed": {
+    "agent_id": {
+      "value": "c3946a13-75b4-4d3c-9d0e-fc10038dca85-S3"
+    }
+  }
+}
+```
 
 ## Agent API
 
@@ -2938,6 +3173,11 @@ Content-Type: application/json
 This call retrieves information about containers running on this agent. It contains
 ContainerStatus and ResourceStatistics along with some metadata of the containers.
 
+There are two knobs in the request to control the types of the containers this
+API will return:
+* `show_nested`: Whether to show nested containers [default: false].
+* `show_standalone`: Whether to show standalone containers [default: false].
+
 ```
 GET_CONTAINERS HTTP Request (JSON):
 
@@ -2948,7 +3188,11 @@ Content-Type: application/json
 Accept: application/json
 
 {
-  "type": "GET_CONTAINERS"
+  "type": "GET_CONTAINERS",
+  "get_containers": {
+    "show_nested": true,
+    "show_standalone": false
+  }
 }
 
 
@@ -3605,6 +3849,234 @@ Accept: application/json
 }
 
 REMOVE_NESTED_CONTAINER HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
+### ADD_RESOURCE_PROVIDER_CONFIG
+
+This call launches a Local Resource Provider on the agent with the specified
+`ResourceProviderInfo`.
+
+```
+ADD_RESOURCE_PROVIDER_CONFIG HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "ADD_RESOURCE_PROVIDER_CONFIG",
+  "add_resource_provider_config": {
+    "info": {
+      "type": "org.apache.mesos.rp.local.storage",
+      "name": "test_slrp",
+      "default_reservations": [
+        {
+          "type": "DYNAMIC",
+          "role": "test-role"
+        }
+      ],
+      "storage": {
+        "plugin": {
+          "type": "org.apache.mesos.csi.test",
+          "name": "test_plugin",
+          "containers": [
+            {
+              "services": [
+                "CONTROLLER_SERVICE",
+                "NODE_SERVICE"
+              ],
+              "command": {
+                "shell": true,
+                "value": "./test-csi-plugin --available_capacity=2GB --work_dir=workdir",
+                "uris": [
+                  {
+                    "value": "/PATH/TO/test-csi-plugin",
+                    "executable": true
+                  }
+                ]
+              },
+              "resources": [
+                { "name": "cpus", "type": "SCALAR", "scalar": { "value": 0.1 } },
+                { "name": "mem", "type": "SCALAR", "scalar": { "value": 200.0 } }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+
+ADD_RESOURCE_PROVIDER_CONFIG HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
+Possible responses:
+
+* `200 OK`: If a new config file is created.
+* `400 Bad Request`: If the request is not well-formed.
+* `401 Unauthorized`: If HTTP authentication fails.
+* `403 Forbidden`: If the call is not authorized.
+* `409 Conflict`: If another config file that describes a resource provider of the same type and name exists.
+* `500 Internal Server Error`: If an unexpected error occurs.
+
+
+### UPDATE_RESOURCE_PROVIDER_CONFIG
+
+This call updates a Local Resource Provider on the agent with the specified
+`ResourceProviderInfo`.
+
+```
+UPDATE_RESOURCE_PROVIDER_CONFIG HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "UPDATE_RESOURCE_PROVIDER_CONFIG",
+  "update_resource_provider_config": {
+    "info": {
+      "type": "org.apache.mesos.rp.local.storage",
+      "name": "test_slrp",
+      "default_reservations": [
+        {
+          "type": "DYNAMIC",
+          "role": "test-role"
+        }
+      ],
+      "storage": {
+        "plugin": {
+          "type": "org.apache.mesos.csi.test",
+          "name": "test_plugin",
+          "containers": [
+            {
+              "services": [
+                "CONTROLLER_SERVICE",
+                "NODE_SERVICE"
+              ],
+              "command": {
+                "shell": true,
+                "value": "./test-csi-plugin --available_capacity=2GB --work_dir=workdir",
+                "uris": [
+                  {
+                    "value": "/PATH/TO/test-csi-plugin",
+                    "executable": true
+                  }
+                ]
+              },
+              "resources": [
+                { "name": "cpus", "type": "SCALAR", "scalar": { "value": 0.1 } },
+                { "name": "mem", "type": "SCALAR", "scalar": { "value": 200.0 } }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+
+UPDATE_RESOURCE_PROVIDER_CONFIG HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
+Possible responses:
+
+* `200 OK`: If an existing config file is updated.
+* `400 Bad Request`: If the request is not well-formed.
+* `401 Unauthorized`: If HTTP authentication fails.
+* `403 Forbidden`: If the call is not authorized.
+* `404 Not Found`: If no config file describes a resource provider of the same type and name exists.
+* `500 Internal Server Error`: If an unexpected error occurs.
+
+
+### REMOVE_RESOURCE_PROVIDER_CONFIG
+
+This call terminates a given Local Resource Provider on the agent and prevents
+it from being launched again until the config is added back. The master and the
+agent will think the resource provider has disconnected, similar to agent
+disconnection.
+
+If there exists a task that is using the resources provided by the resource
+provider, its execution will not be affected. However, offer operations for the
+local resource provider will not be successful. In fact, if a local resource
+provider is disconnected, the master will rescind the offers related to that
+local resource provider, effectively disallowing frameworks to perform
+operations on the disconnected local resource provider.
+
+The local resource provider can be re-added after its removal using
+[`ADD_RESOURCE_PROVIDER_CONFIG`](#add_resource_provider_config). Note that
+removing a local resource provider is different than marking a local resource
+provider as gone, in which case the local resource provider will not be allowed
+to be re-added.  Marking a local resource provider as gone is not yet supported.
+
+```
+REMOVE_RESOURCE_PROVIDER_CONFIG HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "REMOVE_RESOURCE_PROVIDER_CONFIG",
+  "remove_resource_provider_config": {
+    "type": "org.apache.mesos.rp.local.storage",
+    "name": "test_slrp"
+  }
+}
+
+REMOVE_RESOURCE_PROVIDER_CONFIG HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
+Possible responses:
+
+* `200 OK`: If the config file is removed.
+* `400 Bad Request`: If the request is not well-formed.
+* `401 Unauthorized`: If HTTP authentication fails.
+* `403 Forbidden`: If the call is not authorized.
+* `404 Not Found`: If the config file does not exist.
+* `500 Internal Server Error`: If an unexpected error occurs.
+
+
+### PRUNE_IMAGES
+
+This call triggers garbage collection for container images. This call can
+only be made when all running containers are launched with Mesos version 1.5
+or newer. An optional list of excluded images from GC can be speficied via
+`prune_images.excluded_images` field.
+
+```
+PRUNE_IMAGES HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "PRUNE_IMAGES",
+  "prune_images": {
+    "excluded_images": [
+      {"type":"DOCKER","docker":{"name":"mysql:latest"}}
+    ]
+  }
+}
+
+PRUNE_IMAGES HTTP Response (JSON):
 
 HTTP/1.1 200 OK
 ```

@@ -410,7 +410,7 @@ unhealthy or that they are not able to connect to the elected master.
 </tr>
 <tr>
   <td>
-  <code>master/slaves_inactive</code>
+  <code>master/slaves_unreachable</code>
   </td>
   <td>Number of unreachable agents. Unreachable agents are periodically
       garbage collected from the registry, which will cause this value to
@@ -574,6 +574,13 @@ messages may indicate that there is a problem with the network.
 </tr>
 <tr>
   <td>
+  <code>master/invalid_operation_status_update_acknowledgements</code>
+  </td>
+  <td>Number of invalid operation status update acknowledgements</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
   <code>master/invalid_status_update_acknowledgements</code>
   </td>
   <td>Number of invalid status update acknowledgements</td>
@@ -647,6 +654,20 @@ messages may indicate that there is a problem with the network.
   <code>master/messages_launch_tasks</code>
   </td>
   <td>Number of launch task messages</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/messages_operation_status_update_acknowledgement</code>
+  </td>
+  <td>Number of operation status update acknowledgement messages</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/messages_reconcile_operations</code>
+  </td>
+  <td>Number of reconcile operations messages</td>
   <td>Counter</td>
 </tr>
 <tr>
@@ -737,7 +758,7 @@ messages may indicate that there is a problem with the network.
   <td>
   <code>master/recovery_slave_removals</code>
   </td>
-  <td>Number of agents not re-registered during master failover</td>
+  <td>Number of agents not reregistered during master failover</td>
   <td>Counter</td>
 </tr>
 <tr>
@@ -766,6 +787,13 @@ messages may indicate that there is a problem with the network.
   <code>master/valid_framework_to_executor_messages</code>
   </td>
   <td>Number of valid framework to executor messages</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/valid_operation_status_update_acknowledgements</code>
+  </td>
+  <td>Number of valid operation status update acknowledgement messages</td>
   <td>Counter</td>
 </tr>
 <tr>
@@ -1270,6 +1298,27 @@ the agent and their current usage.
 </tr>
 <tr>
   <td>
+  <code>gc/path_removals_failed</code>
+  </td>
+  <td>Number of times the agent garbage collection process has failed to remove a sandbox path.</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>gc/path_removals_pending</code>
+  </td>
+  <td>Number of sandbox paths that are currently pending agent garbage collection.</td>
+  <td>Gauge</td>
+</tr>
+<tr>
+  <td>
+  <code>gc/path_removals_succeeded</code>
+  </td>
+  <td>Number of sandbox paths the agent successfully removed.</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
   <code>slave/cpus_percent</code>
   </td>
   <td>Percentage of allocated CPUs</td>
@@ -1533,9 +1582,9 @@ on the agent.
 </tr>
 <tr>
   <td>
-  <code>containerizer/fetcher/task_fetches_total</code>
+  <code>containerizer/fetcher/task_fetches_succeeded</code>
   </td>
-  <td>Total number of times the Mesos fetcher tried to fetch URIs for a task.</td>
+  <td>Total number of times the Mesos fetcher successfully fetched all the URIs for a task.</td>
   <td>Counter</td>
 </tr>
 <tr>
@@ -1606,6 +1655,14 @@ on the agent.
   <code>slave/recovery_errors</code>
   </td>
   <td>Number of errors encountered during agent recovery</td>
+  <td>Gauge</td>
+</tr>
+<tr>
+  <td>
+  <code>slave/recovery_time_secs</code>
+  </td>
+  <td>Agent recovery time in seconds. This value is only available after agent
+  recovery succeeded and remains constant for the life of the Mesos agent.</td>
   <td>Gauge</td>
 </tr>
 </table>

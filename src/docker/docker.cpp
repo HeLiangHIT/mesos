@@ -15,6 +15,8 @@
 // limitations under the License.
 
 #include <map>
+#include <mutex>
+#include <utility>
 #include <vector>
 
 #include <stout/error.hpp>
@@ -56,8 +58,13 @@ using namespace process;
 
 using std::list;
 using std::map;
+using std::mutex;
+using std::pair;
+using std::shared_ptr;
 using std::string;
 using std::vector;
+
+using mesos::internal::ContainerDNSInfo;
 
 
 template <typename T>
@@ -146,8 +153,10 @@ Try<Owned<Docker>> Docker::create(
 
 void commandDiscarded(const Subprocess& s, const string& cmd)
 {
-  VLOG(1) << "'" << cmd << "' is being discarded";
-  os::killtree(s.pid(), SIGKILL);
+  if (s.status().isPending()) {
+    VLOG(1) << "'" << cmd << "' is being discarded";
+    os::killtree(s.pid(), SIGKILL);
+  }
 }
 
 
@@ -165,7 +174,7 @@ Future<Version> Docker::version() const
     return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
   }
 
-  return s.get().status()
+  return s->status()
     .then(lambda::bind(&Docker::_version, cmd, s.get()));
 }
 
@@ -274,7 +283,7 @@ Try<Docker::Container> Docker::Container::create(const string& output)
     return Error("Error finding Id in container: " + idValue.error());
   }
 
-  string id = idValue.get().value;
+  string id = idValue->value;
 
   Result<JSON::String> nameValue = json.find<JSON::String>("Name");
   if (nameValue.isNone()) {
@@ -283,7 +292,7 @@ Try<Docker::Container> Docker::Container::create(const string& output)
     return Error("Error finding Name in container: " + nameValue.error());
   }
 
-  string name = nameValue.get().value;
+  string name = nameValue->value;
 
   Result<JSON::Object> stateValue = json.find<JSON::Object>("State");
   if (stateValue.isNone()) {
@@ -292,14 +301,14 @@ Try<Docker::Container> Docker::Container::create(const string& output)
     return Error("Error finding State in container: " + stateValue.error());
   }
 
-  Result<JSON::Number> pidValue = stateValue.get().find<JSON::Number>("Pid");
+  Result<JSON::Number> pidValue = stateValue->find<JSON::Number>("Pid");
   if (pidValue.isNone()) {
     return Error("Unable to find Pid in State");
   } else if (pidValue.isError()) {
     return Error("Error finding Pid in State: " + pidValue.error());
   }
 
-  pid_t pid = pid_t(pidValue.get().as<int64_t>());
+  pid_t pid = pid_t(pidValue->as<int64_t>());
 
   Option<pid_t> optionalPid;
   if (pid != 0) {
@@ -307,21 +316,24 @@ Try<Docker::Container> Docker::Container::create(const string& output)
   }
 
   Result<JSON::String> startedAtValue =
-    stateValue.get().find<JSON::String>("StartedAt");
+    stateValue->find<JSON::String>("StartedAt");
   if (startedAtValue.isNone()) {
     return Error("Unable to find StartedAt in State");
   } else if (startedAtValue.isError()) {
     return Error("Error finding StartedAt in State: " + startedAtValue.error());
   }
 
-  bool started = startedAtValue.get().value != "0001-01-01T00:00:00Z";
+  bool started = startedAtValue->value != "0001-01-01T00:00:00Z";
 
   Option<string> ipAddress;
+  Option<string> ip6Address;
   bool findDeprecatedIP = false;
+
   Result<JSON::String> networkMode =
     json.find<JSON::String>("HostConfig.NetworkMode");
+
   if (!networkMode.isSome()) {
-    // We need to fail back to the old field as Docker added NetworkMode
+    // We need to fallback to the old field as Docker added NetworkMode
     // since Docker remote API 1.15.
     VLOG(1) << "Unable to detect HostConfig.NetworkMode, "
             << "attempting deprecated IP field";
@@ -339,13 +351,29 @@ Try<Docker::Container> Docker::Container::create(const string& output)
       json.find<JSON::String>(addressLocation);
 
     if (!ipAddressValue.isSome()) {
-      // We also need to failback to the old field as the IP Address
+      // We also need to fallback to the old field as the IP Address
       // field location also changed since Docker remote API 1.20.
       VLOG(1) << "Unable to detect IP Address at '" << addressLocation << "',"
               << " attempting deprecated field";
       findDeprecatedIP = true;
     } else if (!ipAddressValue->value.empty()) {
       ipAddress = ipAddressValue->value;
+    }
+
+    // Check if the container has an IPv6 address.
+    //
+    // NOTE: For IPv6 we don't need to worry about the old method of
+    // looking at the deprecated "NetworkSettings.IPAddress" since we
+    // want to support IPv6 addresses for docker versions that support
+    // USER mode networking, which is a relatively recent feature.
+    string address6Location = "NetworkSettings.Networks." +
+                              networkMode->value + ".GlobalIPv6Address";
+
+    Result<JSON::String> ip6AddressValue =
+      json.find<JSON::String>(address6Location);
+
+    if (ip6AddressValue.isSome() && !ip6AddressValue->value.empty()) {
+      ip6Address = ip6AddressValue->value;
     }
   }
 
@@ -407,7 +435,80 @@ Try<Docker::Container> Docker::Container::create(const string& output)
     }
   }
 
-  return Container(output, id, name, optionalPid, started, ipAddress, devices);
+  vector<string> dns;
+
+  Result<JSON::Array> dnsArray =
+    json.find<JSON::Array>("HostConfig.Dns");
+
+  if (dnsArray.isError()) {
+    return Error("Failed to parse HostConfig.Dns: " + dnsArray.error());
+  }
+
+  if (dnsArray.isSome()) {
+    foreach (const JSON::Value& entry, dnsArray->values) {
+      if (!entry.is<JSON::String>()) {
+        return Error("Malformed HostConfig.Dns"
+                     " entry '" + stringify(entry) + "'");
+      }
+
+      dns.push_back(entry.as<JSON::String>().value);
+    }
+  }
+
+  vector<string> dnsOptions;
+
+  Result<JSON::Array> dnsOptionArray =
+    json.find<JSON::Array>("HostConfig.DnsOptions");
+
+  if (dnsOptionArray.isError()) {
+    return Error("Failed to parse HostConfig.DnsOptions: " +
+                 dnsOptionArray.error());
+  }
+
+  if (dnsOptionArray.isSome()) {
+    foreach (const JSON::Value& entry, dnsOptionArray->values) {
+      if (!entry.is<JSON::String>()) {
+        return Error("Malformed HostConfig.DnsOptions"
+                     " entry '" + stringify(entry) + "'");
+      }
+
+      dnsOptions.push_back(entry.as<JSON::String>().value);
+    }
+  }
+
+  vector<string> dnsSearch;
+
+  Result<JSON::Array> dnsSearchArray =
+    json.find<JSON::Array>("HostConfig.DnsSearch");
+
+  if (dnsSearchArray.isError()) {
+    return Error("Failed to parse HostConfig.DnsSearch: " +
+                 dnsSearchArray.error());
+  }
+
+  if (dnsSearchArray.isSome()) {
+    foreach (const JSON::Value& entry, dnsSearchArray->values) {
+      if (!entry.is<JSON::String>()) {
+        return Error("Malformed HostConfig.DnsSearch"
+                     " entry '" + stringify(entry) + "'");
+      }
+
+      dnsSearch.push_back(entry.as<JSON::String>().value);
+    }
+  }
+
+  return Container(
+      output,
+      id,
+      name,
+      optionalPid,
+      started,
+      ipAddress,
+      ip6Address,
+      devices,
+      dns,
+      dnsOptions,
+      dnsSearch);
 }
 
 
@@ -426,13 +527,12 @@ Try<Docker::Image> Docker::Image::create(const JSON::Object& json)
 
   Option<vector<string>> entrypointOption = None();
 
-  if (!entrypoint.get().is<JSON::Null>()) {
-    if (!entrypoint.get().is<JSON::Array>()) {
+  if (!entrypoint->is<JSON::Null>()) {
+    if (!entrypoint->is<JSON::Array>()) {
       return Error("Unexpected type found for 'ContainerConfig.Entrypoint'");
     }
 
-    const vector<JSON::Value>& values =
-        entrypoint.get().as<JSON::Array>().values;
+    const vector<JSON::Value>& values = entrypoint->as<JSON::Array>().values;
     if (values.size() != 0) {
       vector<string> result;
 
@@ -459,12 +559,12 @@ Try<Docker::Image> Docker::Image::create(const JSON::Object& json)
 
   Option<map<string, string>> envOption = None();
 
-  if (!env.get().is<JSON::Null>()) {
-    if (!env.get().is<JSON::Array>()) {
+  if (!env->is<JSON::Null>()) {
+    if (!env->is<JSON::Array>()) {
       return Error("Unexpected type found for 'ContainerConfig.Env'");
     }
 
-    const vector<JSON::Value>& values = env.get().as<JSON::Array>().values;
+    const vector<JSON::Value>& values = env->as<JSON::Array>().values;
     if (values.size() != 0) {
       map<string, string> result;
 
@@ -505,7 +605,8 @@ Try<Docker::RunOptions> Docker::RunOptions::create(
     const Option<Resources>& resources,
     bool enableCfsQuota,
     const Option<map<string, string>>& env,
-    const Option<vector<Device>>& devices)
+    const Option<vector<Device>>& devices,
+    const Option<ContainerDNSInfo>& defaultContainerDNS)
 {
   if (!containerInfo.has_docker()) {
     return Error("No docker info found in container info");
@@ -518,20 +619,21 @@ Try<Docker::RunOptions> Docker::RunOptions::create(
 
   if (resources.isSome()) {
     // TODO(yifan): Support other resources (e.g. disk).
-    Option<double> cpus = resources.get().cpus();
+    Option<double> cpus = resources->cpus();
     if (cpus.isSome()) {
-      options.cpuShares =
-        std::max((uint64_t) (CPU_SHARES_PER_CPU * cpus.get()), MIN_CPU_SHARES);
+      options.cpuShares = std::max(
+          static_cast<uint64_t>(CPU_SHARES_PER_CPU * cpus.get()),
+          MIN_CPU_SHARES);
 
       if (enableCfsQuota) {
         const Duration quota =
           std::max(CPU_CFS_PERIOD * cpus.get(), MIN_CPU_CFS_QUOTA);
 
-        options.cpuQuota = quota.us();
+        options.cpuQuota = static_cast<uint64_t>(quota.us());
       }
     }
 
-    Option<Bytes> mem = resources.get().mem();
+    Option<Bytes> mem = resources->mem();
     if (mem.isSome()) {
       options.memory = std::max(mem.get(), MIN_MEMORY);
     }
@@ -546,7 +648,7 @@ Try<Docker::RunOptions> Docker::RunOptions::create(
   foreach (const Environment::Variable& variable,
            commandInfo.environment().variables()) {
     if (env.isSome() &&
-        env.get().find(variable.name()) != env.get().end()) {
+        env->find(variable.name()) != env->end()) {
       // Skip to avoid duplicate environment variables.
       continue;
     }
@@ -643,10 +745,43 @@ Try<Docker::RunOptions> Docker::RunOptions::create(
 
   options.volumeDriver = volumeDriver;
 
-  switch (dockerInfo.network()) {
-    case ContainerInfo::DockerInfo::HOST: options.network = "host"; break;
-    case ContainerInfo::DockerInfo::BRIDGE: options.network = "bridge"; break;
-    case ContainerInfo::DockerInfo::NONE: options.network = "none"; break;
+  ContainerInfo::DockerInfo::Network network;
+  if (dockerInfo.has_network()) {
+    network = dockerInfo.network();
+  } else {
+    // If no network was given, then use the OS specific default.
+#ifdef __WINDOWS__
+    network = ContainerInfo::DockerInfo::BRIDGE;
+#else
+    network = ContainerInfo::DockerInfo::HOST;
+#endif // __WINDOWS__
+  }
+
+  // See https://docs.microsoft.com/en-us/virtualization/windowscontainers/manage-containers/container-networking // NOLINT(whitespace/line_length)
+  // and https://docs.docker.com/engine/userguide/networking/ on what network
+  // modes are supported for Windows and Linux docker respectively.
+  switch (network) {
+    case ContainerInfo::DockerInfo::HOST: {
+#ifdef __WINDOWS__
+      return Error("Unsupported Network mode: " + stringify(network));
+#else
+      options.network = "host";
+      break;
+#endif // __WINDOWS__
+    }
+    case ContainerInfo::DockerInfo::BRIDGE: {
+#ifdef __WINDOWS__
+      // Windows "nat" network mode is equivalent to Linux "bridge" mode.
+      options.network = "nat";
+#else
+      options.network = "bridge";
+#endif // __WINDOWS__
+      break;
+    }
+    case ContainerInfo::DockerInfo::NONE: {
+      options.network = "none";
+      break;
+    }
     case ContainerInfo::DockerInfo::USER: {
       if (containerInfo.network_infos_size() == 0) {
         return Error("No network info found in container info");
@@ -657,15 +792,14 @@ Try<Docker::RunOptions> Docker::RunOptions::create(
       }
 
       const NetworkInfo& networkInfo = containerInfo.network_infos(0);
-      if(!networkInfo.has_name()){
+      if (!networkInfo.has_name()) {
         return Error("No network name found in network info");
       }
 
       options.network = networkInfo.name();
       break;
     }
-    default: return Error("Unsupported Network mode: " +
-                          stringify(dockerInfo.network()));
+    default: return Error("Unsupported Network mode: " + stringify(network));
   }
 
   if (containerInfo.has_hostname()) {
@@ -687,7 +821,7 @@ Try<Docker::RunOptions> Docker::RunOptions::create(
       return Error("Port mappings require resources");
     }
 
-    Option<Value::Ranges> portRanges = resources.get().ports();
+    Option<Value::Ranges> portRanges = resources->ports();
 
     if (!portRanges.isSome()) {
       return Error("Port mappings require port resources");
@@ -696,7 +830,7 @@ Try<Docker::RunOptions> Docker::RunOptions::create(
     foreach (const ContainerInfo::DockerInfo::PortMapping& mapping,
              dockerInfo.port_mappings()) {
       bool found = false;
-      foreach (const Value::Range& range, portRanges.get().range()) {
+      foreach (const Value::Range& range, portRanges->range()) {
         if (mapping.host_port() >= range.begin() &&
             mapping.host_port() <= range.end()) {
           found = true;
@@ -727,9 +861,71 @@ Try<Docker::RunOptions> Docker::RunOptions::create(
 
   options.name = name;
 
+  bool dnsSpecified = false;
   foreach (const Parameter& parameter, dockerInfo.parameters()) {
     options.additionalOptions.push_back(
         "--" + parameter.key() + "=" + parameter.value());
+
+    // In Docker 1.13.0, `--dns-option` was added and `--dns-opt` was hidden
+    // (but it can still be used), so here we need to check both of them.
+    if (!dnsSpecified &&
+        (parameter.key() == "dns" ||
+         parameter.key() == "dns-search" ||
+         parameter.key() == "dns-opt" ||
+         parameter.key() == "dns-option")) {
+      dnsSpecified = true;
+    }
+  }
+
+  if (!dnsSpecified && defaultContainerDNS.isSome()) {
+    Option<ContainerDNSInfo::DockerInfo> bridgeDNS;
+    Option<ContainerDNSInfo::DockerInfo> defaultUserDNS;
+    hashmap<string, ContainerDNSInfo::DockerInfo> userDNSMap;
+
+    foreach (const ContainerDNSInfo::DockerInfo& dnsInfo,
+             defaultContainerDNS->docker()) {
+      // Currently we only support setting DNS for containers which join
+      // Docker bridge network or user-defined network.
+      if (dnsInfo.network_mode() == ContainerDNSInfo::DockerInfo::BRIDGE) {
+        bridgeDNS = dnsInfo;
+      } else if (dnsInfo.network_mode() == ContainerDNSInfo::DockerInfo::USER) {
+        if (!dnsInfo.has_network_name()) {
+          // The DNS info which has network node set as `USER` and has no
+          // network name set is considered as the default DNS for all
+          // user-defined networks. It applies to the Docker container which
+          // joins a user-defined network but that network can not be found in
+          // `defaultContainerDNS`.
+          defaultUserDNS = dnsInfo;
+        } else {
+          userDNSMap[dnsInfo.network_name()] = dnsInfo;
+        }
+      }
+    }
+
+    auto setDNSInfo = [&](const ContainerDNSInfo::DockerInfo& dnsInfo) {
+      options.dns.assign(
+          dnsInfo.dns().nameservers().begin(),
+          dnsInfo.dns().nameservers().end());
+
+      options.dnsSearch.assign(
+          dnsInfo.dns().search().begin(),
+          dnsInfo.dns().search().end());
+
+      options.dnsOpt.assign(
+          dnsInfo.dns().options().begin(),
+          dnsInfo.dns().options().end());
+    };
+
+    if (dockerInfo.network() == ContainerInfo::DockerInfo::BRIDGE &&
+        bridgeDNS.isSome()) {
+      setDNSInfo(bridgeDNS.get());
+    } else if (dockerInfo.network() == ContainerInfo::DockerInfo::USER) {
+      if (userDNSMap.contains(options.network.get())) {
+        setDNSInfo(userDNSMap.at(options.network.get()));
+      } else if (defaultUserDNS.isSome()) {
+        setDNSInfo(defaultUserDNS.get());
+      }
+    }
   }
 
   options.image = dockerInfo.image();
@@ -827,14 +1023,48 @@ Future<Option<int>> Docker::run(
     if (network != "host" &&
         network != "bridge" &&
         network != "none") {
-      // User defined networks require docker version >= 1.9.0.
+      // User defined networks require Docker version >= 1.9.0.
       Try<Nothing> validateVer = validateVersion(Version(1, 9, 0));
-
       if (validateVer.isError()) {
         return Failure("User defined networks require Docker "
                        "version 1.9.0 or higher");
       }
     }
+
+    if (network == "host" && !options.dns.empty()) {
+      // `--dns` option with host network requires Docker version >= 1.12.0,
+      // see https://github.com/moby/moby/pull/22408 for details.
+      Try<Nothing> validateVer = validateVersion(Version(1, 12, 0));
+      if (validateVer.isError()) {
+        return Failure("--dns option with host network requires Docker "
+                       "version 1.12.0 or higher");
+      }
+    }
+  }
+
+  foreach (const string& dns, options.dns) {
+    argv.push_back("--dns");
+    argv.push_back(dns);
+  }
+
+  foreach (const string& search, options.dnsSearch) {
+    argv.push_back("--dns-search");
+    argv.push_back(search);
+  }
+
+  if (!options.dnsOpt.empty()) {
+    // `--dns-opt` option requires Docker version >= 1.9.0,
+    // see https://github.com/moby/moby/pull/16031 for details.
+    Try<Nothing> validateVer = validateVersion(Version(1, 9, 0));
+    if (validateVer.isError()) {
+      return Failure("--dns-opt option requires Docker "
+                     "version 1.9.0 or higher");
+    }
+  }
+
+  foreach (const string& opt, options.dnsOpt) {
+    argv.push_back("--dns-opt");
+    argv.push_back(opt);
   }
 
   if (options.hostname.isSome()) {
@@ -963,14 +1193,15 @@ Future<Nothing> Docker::stop(
     return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
   }
 
-  return s.get().status()
+  return s->status()
     .then(lambda::bind(
         &Docker::_stop,
         *this,
         containerName,
         cmd,
         s.get(),
-        remove));
+        remove))
+    .onDiscard(lambda::bind(&commandDiscarded, s.get(), cmd));
 }
 
 
@@ -1052,20 +1283,29 @@ Future<Docker::Container> Docker::inspect(
 {
   Owned<Promise<Docker::Container>> promise(new Promise<Docker::Container>());
 
-  const string cmd =  path + " -H " + socket + " inspect " + containerName;
-  _inspect(cmd, promise, retryInterval);
+  // Holds a callback used for cleanup in case this call to 'docker inspect' is
+  // discarded, and a mutex to control access to the callback.
+  auto callback = std::make_shared<pair<lambda::function<void()>, mutex>>();
 
-  return promise->future();
+  const string cmd = path + " -H " + socket + " inspect " + containerName;
+  _inspect(cmd, promise, retryInterval, callback);
+
+  return promise->future()
+    .onDiscard([callback]() {
+      synchronized (callback->second) {
+        callback->first();
+      }
+    });
 }
 
 
 void Docker::_inspect(
     const string& cmd,
     const Owned<Promise<Docker::Container>>& promise,
-    const Option<Duration>& retryInterval)
+    const Option<Duration>& retryInterval,
+    shared_ptr<pair<lambda::function<void()>, mutex>> callback)
 {
   if (promise->future().hasDiscard()) {
-    promise->discard();
     return;
   }
 
@@ -1082,13 +1322,32 @@ void Docker::_inspect(
     return;
   }
 
+  // Set the `onDiscard` callback which will clean up the subprocess if the
+  // caller discards the `Future` that we returned.
+  synchronized (callback->second) {
+    // It's possible that the caller has discarded their future while we were
+    // creating a new subprocess, so we clean up here if necessary.
+    if (promise->future().hasDiscard()) {
+      commandDiscarded(s.get(), cmd);
+      return;
+    }
+
+    callback->first = [promise, s, cmd]() {
+      promise->discard();
+      CHECK_SOME(s);
+      commandDiscarded(s.get(), cmd);
+    };
+  }
+
   // Start reading from stdout so writing to the pipe won't block
   // to handle cases where the output is larger than the pipe
   // capacity.
-  const Future<string> output = io::read(s.get().out().get());
+  const Future<string> output = io::read(s->out().get());
 
-  s.get().status()
-    .onAny([=]() { __inspect(cmd, promise, retryInterval, output, s.get()); });
+  s->status()
+    .onAny([=]() {
+      __inspect(cmd, promise, retryInterval, output, s.get(), callback);
+    });
 }
 
 
@@ -1097,11 +1356,10 @@ void Docker::__inspect(
     const Owned<Promise<Docker::Container>>& promise,
     const Option<Duration>& retryInterval,
     Future<string> output,
-    const Subprocess& s)
+    const Subprocess& s,
+    shared_ptr<pair<lambda::function<void()>, mutex>> callback)
 {
   if (promise->future().hasDiscard()) {
-    promise->discard();
-    output.discard();
     return;
   }
 
@@ -1119,7 +1377,7 @@ void Docker::__inspect(
       VLOG(1) << "Retrying inspect with non-zero status code. cmd: '"
               << cmd << "', interval: " << stringify(retryInterval.get());
       Clock::timer(retryInterval.get(),
-                   [=]() { _inspect(cmd, promise, retryInterval); } );
+                   [=]() { _inspect(cmd, promise, retryInterval, callback); });
       return;
     }
 
@@ -1141,7 +1399,7 @@ void Docker::__inspect(
   CHECK_SOME(s.out());
   output
     .onAny([=](const Future<string>& output) {
-      ___inspect(cmd, promise, retryInterval, output);
+      ___inspect(cmd, promise, retryInterval, output, callback);
     });
 }
 
@@ -1150,10 +1408,10 @@ void Docker::___inspect(
     const string& cmd,
     const Owned<Promise<Docker::Container>>& promise,
     const Option<Duration>& retryInterval,
-    const Future<string>& output)
+    const Future<string>& output,
+    shared_ptr<pair<lambda::function<void()>, mutex>> callback)
 {
   if (promise->future().hasDiscard()) {
-    promise->discard();
     return;
   }
 
@@ -1170,11 +1428,11 @@ void Docker::___inspect(
     return;
   }
 
-  if (retryInterval.isSome() && !container.get().started) {
+  if (retryInterval.isSome() && !container->started) {
     VLOG(1) << "Retrying inspect since container not yet started. cmd: '"
             << cmd << "', interval: " << stringify(retryInterval.get());
     Clock::timer(retryInterval.get(),
-                 [=]() { _inspect(cmd, promise, retryInterval); } );
+                 [=]() { _inspect(cmd, promise, retryInterval, callback); } );
     return;
   }
 
@@ -1203,9 +1461,9 @@ Future<list<Docker::Container>> Docker::ps(
   // Start reading from stdout so writing to the pipe won't block
   // to handle cases where the output is larger than the pipe
   // capacity.
-  const Future<string>& output = io::read(s.get().out().get());
+  const Future<string>& output = io::read(s->out().get());
 
-  return s.get().status()
+  return s->status()
     .then(lambda::bind(&Docker::_ps, *this, cmd, s.get(), prefix, output));
 }
 
@@ -1374,11 +1632,11 @@ Future<Docker::Image> Docker::pull(
   // Start reading from stdout so writing to the pipe won't block
   // to handle cases where the output is larger than the pipe
   // capacity.
-  const Future<string> output = io::read(s.get().out().get());
+  const Future<string> output = io::read(s->out().get());
 
   // We assume docker inspect to exit quickly and do not need to be
   // discarded.
-  return s.get().status()
+  return s->status()
     .then(lambda::bind(
         &Docker::_pull,
         *this,
@@ -1388,7 +1646,8 @@ Future<Docker::Image> Docker::pull(
         path,
         socket,
         config,
-        output));
+        output))
+    .onDiscard(lambda::bind(&commandDiscarded, s.get(), cmd));
 }
 
 
@@ -1478,10 +1737,19 @@ Future<Docker::Image> Docker::__pull(
   // provided which is a docker config file we want docker to be
   // able to pick it up from the sandbox directory where we store
   // all the URI downloads.
+  //
+  // NOTE: On Windows, Docker users $USERPROFILE instead of $HOME.
+  // See MESOS-8619 for more details.
+  //
   // TODO(gilbert): Deprecate the fetching docker config file
   // specified as URI method on 0.30.0 release.
+#ifdef __WINDOWS__
+  const std::string HOME = "USERPROFILE";
+#else
+  const std::string HOME = "HOME";
+#endif // __WINDOWS__
   map<string, string> environment = os::environment();
-  environment["HOME"] = directory;
+  environment[HOME] = directory;
 
   bool configExisted =
     os::exists(path::join(directory, ".docker", "config.json")) ||
@@ -1492,7 +1760,7 @@ Future<Docker::Image> Docker::__pull(
   // and another docker config file is specified using the
   // '--docker_config' agent flag.
   if (!configExisted && home.isSome()) {
-    environment["HOME"] = home.get();
+    environment[HOME] = home.get();
   }
 
   Try<Subprocess> s_ = subprocess(
@@ -1511,7 +1779,7 @@ Future<Docker::Image> Docker::__pull(
   // Docker pull can run for a long time due to large images, so
   // we allow the future to be discarded and it will kill the pull
   // process.
-  return s_.get().status()
+  return s_->status()
     .then(lambda::bind(
         &Docker::___pull,
         docker,

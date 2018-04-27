@@ -415,8 +415,8 @@ class Device
 {
 public:
   constexpr Device(dev_t device) : value(device) {}
-  inline unsigned int getMajor() const { return major(value); }
-  inline unsigned int getMinor() const { return minor(value); }
+  unsigned int getMajor() const;
+  unsigned int getMinor() const;
 
   inline bool operator==(const Device& that) const
   {
@@ -998,6 +998,18 @@ Try<Nothing> classid(
     const uint32_t handle);
 
 } // namespace net_cls {
+
+
+// Named hierarchy.
+namespace named {
+
+// Returns the cgroup that the specified pid is a member of within the
+// given named hierarchy is mounted or None if the named hierarchy is
+// not mounted or the pid is not a member of a cgroup.
+Result<std::string> cgroup(const std::string& hierarchyName, pid_t pid);
+
+} // namespace named {
+
 
 } // namespace cgroups {
 

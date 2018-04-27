@@ -30,6 +30,8 @@
 
 #include <mesos/mesos.hpp>
 
+#include <mesos/slave/containerizer.hpp>
+
 #ifdef __linux__
 #include "linux/ns.hpp"
 #endif
@@ -45,6 +47,7 @@ using std::string;
 using process::Future;
 using process::Owned;
 
+using mesos::internal::slave::Containerizer;
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::MesosContainerizer;
 
@@ -63,13 +66,20 @@ public:
     MesosTest::SetUp();
 
     directory = os::getcwd(); // We're inside a temporary sandbox.
-    containerId.set_value(UUID::random().toString());
+    containerId.set_value(id::UUID::random().toString());
   }
 
-  Try<Owned<MesosContainerizer>> createContainerizer(const string& isolation)
+  Try<Owned<MesosContainerizer>> createContainerizer(
+      const string& isolation,
+      const Option<bool>& disallowSharingAgentPidNamespace = None())
   {
     slave::Flags flags = CreateSlaveFlags();
     flags.isolation = isolation;
+
+    if (disallowSharingAgentPidNamespace.isSome()) {
+      flags.disallow_sharing_agent_pid_namespace =
+        disallowSharingAgentPidNamespace.get();
+    }
 
     fetcher.reset(new Fetcher(flags));
 
@@ -105,23 +115,24 @@ TEST_F(NamespacesIsolatorTest, ROOT_PidNamespace)
 {
   Try<Owned<MesosContainerizer>> containerizer =
     createContainerizer("filesystem/linux,namespaces/pid");
+
   ASSERT_SOME(containerizer);
 
   // Write the command's pid namespace inode and init name to files.
   const string command =
-    "stat -c %i /proc/self/ns/pid > ns && (cat /proc/1/comm > init)";
+    "stat -Lc %i /proc/self/ns/pid > ns && (cat /proc/1/comm > init)";
 
-  process::Future<bool> launch = containerizer.get()->launch(
-      containerId,
-      createContainerConfig(
-          None(),
-          createExecutorInfo("executor", command),
-          directory),
-      std::map<string, string>(),
-      None());
+  process::Future<Containerizer::LaunchResult> launch =
+    containerizer.get()->launch(
+        containerId,
+        createContainerConfig(
+            None(),
+            createExecutorInfo("executor", command),
+            directory),
+        std::map<string, string>(),
+        None());
 
-  AWAIT_READY(launch);
-  ASSERT_TRUE(launch.get());
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   // Wait on the container.
   Future<Option<ContainerTermination>> wait =
@@ -135,7 +146,7 @@ TEST_F(NamespacesIsolatorTest, ROOT_PidNamespace)
   EXPECT_EQ(0, wait->get().status());
 
   // Check that the command was run in a different pid namespace.
-  Try<ino_t> testPidNamespace = ns::getns(::getpid(), "pid");
+  Result<ino_t> testPidNamespace = ns::getns(::getpid(), "pid");
   ASSERT_SOME(testPidNamespace);
 
   Try<string> containerPidNamespace = os::read(path::join(directory, "ns"));
@@ -154,6 +165,95 @@ TEST_F(NamespacesIsolatorTest, ROOT_PidNamespace)
 }
 
 
+// This test verifies a top-level container can share pid namespace
+// with the agent when the field `share_pid_namespace` is set as
+// true in `ContainerInfo.linux_info`. Please note that the agent flag
+// `--disallow_sharing_agent_pid_namespace` is set to
+// false by default, that means top-level container is allowed to share
+// pid namespace with agent.
+TEST_F(NamespacesIsolatorTest, ROOT_SharePidNamespace)
+{
+  Try<Owned<MesosContainerizer>> containerizer =
+    createContainerizer("filesystem/linux,namespaces/pid");
+
+  ASSERT_SOME(containerizer);
+
+  // Write the command's pid namespace inode to file.
+  const string command = "stat -Lc %i /proc/self/ns/pid > ns";
+
+  mesos::slave::ContainerConfig containerConfig = createContainerConfig(
+      None(),
+      createExecutorInfo("executor", command),
+      directory);
+
+  ContainerInfo* container = containerConfig.mutable_container_info();
+  container->set_type(ContainerInfo::MESOS);
+  container->mutable_linux_info()->set_share_pid_namespace(true);
+
+  process::Future<Containerizer::LaunchResult> launch =
+    containerizer.get()->launch(
+        containerId,
+        containerConfig,
+        std::map<string, string>(),
+        None());
+
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
+
+  // Wait on the container.
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
+  AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
+
+  // Check the executor exited correctly.
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
+
+  // Check that the command was run in the same pid namespace.
+  Result<ino_t> testPidNamespace = ns::getns(::getpid(), "pid");
+  ASSERT_SOME(testPidNamespace);
+
+  Try<string> containerPidNamespace = os::read(path::join(directory, "ns"));
+  ASSERT_SOME(containerPidNamespace);
+
+  EXPECT_EQ(stringify(testPidNamespace.get()),
+            strings::trim(containerPidNamespace.get()));
+}
+
+
+// This test verifies launching a top-level container to share
+// pid namespace with agent will fail when the agent flag
+// `--disallow_sharing_agent_pid_namespace` is set to true.
+TEST_F(NamespacesIsolatorTest, ROOT_SharePidNamespaceWhenDisallow)
+{
+  Try<Owned<MesosContainerizer>> containerizer =
+    createContainerizer("filesystem/linux,namespaces/pid", true);
+
+  ASSERT_SOME(containerizer);
+
+  const string command = "sleep 1000";
+
+  mesos::slave::ContainerConfig containerConfig = createContainerConfig(
+      None(),
+      createExecutorInfo("executor", command),
+      directory);
+
+  ContainerInfo* container = containerConfig.mutable_container_info();
+  container->set_type(ContainerInfo::MESOS);
+  container->mutable_linux_info()->set_share_pid_namespace(true);
+
+  process::Future<Containerizer::LaunchResult> launch =
+    containerizer.get()->launch(
+        containerId,
+        containerConfig,
+        std::map<string, string>(),
+        None());
+
+  AWAIT_FAILED(launch);
+}
+
+
 // The IPC namespace has its own copy of the svipc(7) tunables. We verify
 // that we are correctly entering the IPC namespace by verifying that we
 // can set shmmax some different value than that of the host namespace.
@@ -161,6 +261,7 @@ TEST_F(NamespacesIsolatorTest, ROOT_IPCNamespace)
 {
   Try<Owned<MesosContainerizer>> containerizer =
     createContainerizer("namespaces/ipc");
+
   ASSERT_SOME(containerizer);
 
   // Value we will set the child namespace shmmax to.
@@ -173,21 +274,21 @@ TEST_F(NamespacesIsolatorTest, ROOT_IPCNamespace)
   ASSERT_NE(hostShmmax.get(), shmmaxValue);
 
   const string command =
-    "stat -c %i /proc/self/ns/ipc > ns;"
+    "stat -Lc %i /proc/self/ns/ipc > ns;"
     "echo " + stringify(shmmaxValue) + " > /proc/sys/kernel/shmmax;"
     "cp /proc/sys/kernel/shmmax shmmax";
 
-  process::Future<bool> launch = containerizer.get()->launch(
-      containerId,
-      createContainerConfig(
-          None(),
-          createExecutorInfo("executor", command),
-          directory),
-      std::map<string, string>(),
-      None());
+  process::Future<Containerizer::LaunchResult> launch =
+    containerizer.get()->launch(
+        containerId,
+        createContainerConfig(
+            None(),
+            createExecutorInfo("executor", command),
+            directory),
+        std::map<string, string>(),
+        None());
 
-  AWAIT_READY(launch);
-  ASSERT_TRUE(launch.get());
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   // Wait on the container.
   Future<Option<ContainerTermination>> wait =
@@ -201,7 +302,7 @@ TEST_F(NamespacesIsolatorTest, ROOT_IPCNamespace)
   EXPECT_EQ(0, wait->get().status());
 
   // Check that the command was run in a different IPC namespace.
-  Try<ino_t> testIPCNamespace = ns::getns(::getpid(), "ipc");
+  Result<ino_t> testIPCNamespace = ns::getns(::getpid(), "ipc");
   ASSERT_SOME(testIPCNamespace);
 
   Try<string> containerIPCNamespace = os::read(path::join(directory, "ns"));

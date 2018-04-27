@@ -14,13 +14,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "slave/gc.hpp"
+
 #include <list>
 
-#include <process/async.hpp>
 #include <process/check.hpp>
 #include <process/defer.hpp>
 #include <process/delay.hpp>
 #include <process/dispatch.hpp>
+
+#include <process/metrics/metrics.hpp>
 
 #include <stout/foreach.hpp>
 #include <stout/lambda.hpp>
@@ -29,7 +32,7 @@
 
 #include "logging/logging.hpp"
 
-#include "slave/gc.hpp"
+#include "slave/gc_process.hpp"
 
 using namespace process;
 
@@ -39,9 +42,37 @@ using std::list;
 using std::map;
 using std::string;
 
+using process::metrics::Counter;
+
 namespace mesos {
 namespace internal {
 namespace slave {
+
+GarbageCollectorProcess::Metrics::Metrics(GarbageCollectorProcess *gc)
+  : path_removals_succeeded("gc/path_removals_succeeded"),
+    path_removals_failed("gc/path_removals_failed"),
+    path_removals_pending("gc/path_removals_pending", [gc]() {
+      // Multimap size is defined to take constant time, which means it
+      // basically has to be tracked as a member variable, which means we
+      // can safely do concurrent reads while the map is being updated.
+      return static_cast<double>(gc->paths.size());
+    })
+{
+  process::metrics::add(path_removals_succeeded);
+  process::metrics::add(path_removals_failed);
+  process::metrics::add(path_removals_pending);
+}
+
+
+GarbageCollectorProcess::Metrics::~Metrics()
+{
+  process::metrics::remove(path_removals_succeeded);
+  process::metrics::remove(path_removals_failed);
+
+  // Wait for the metric to be removed to protect against asynchronous
+  // evaluation referencing a deleted object.
+  process::metrics::remove(path_removals_pending).await();
+}
 
 
 GarbageCollectorProcess::~GarbageCollectorProcess()
@@ -160,7 +191,14 @@ void GarbageCollectorProcess::remove(const Timeout& removalTime)
       info->removing = true;
     }
 
-    auto rmdirs = [infos]() {
+    Counter _succeeded = metrics.path_removals_succeeded;
+    Counter _failed = metrics.path_removals_failed;
+
+    auto rmdirs = [_succeeded, _failed, infos]() {
+      // Make mutable copies of the counters to work around MESOS-7907.
+      Counter succeeded = _succeeded;
+      Counter failed = _failed;
+
       foreach (const Owned<PathInfo>& info, infos) {
         // Run the removal operation with 'continueOnError = true'.
         // It's possible for tasks and isolators to lay down files
@@ -174,16 +212,23 @@ void GarbageCollectorProcess::remove(const Timeout& removalTime)
           LOG(WARNING) << "Failed to delete '" << info->path << "': "
                        << rmdir.error();
           info->promise.fail(rmdir.error());
+
+          ++failed;
         } else {
           LOG(INFO) << "Deleted '" << info->path << "'";
           info->promise.set(rmdir.get());
+
+          ++succeeded;
         }
       }
 
       return Nothing();
     };
 
-    async(rmdirs)
+    // NOTE: All `rmdirs` calls are dispatched to one executor so that:
+    //   1. They do not block other dispatches (MESOS-6549).
+    //   2. They do not occupy all worker threads (MESOS-7964).
+    executor.execute(rmdirs)
       .onAny(defer(self(), &Self::_remove, lambda::_1, infos));
   } else {
     // This occurs when either:

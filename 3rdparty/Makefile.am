@@ -37,6 +37,12 @@ CONFIGURE_ARGS = @CONFIGURE_ARGS@ --enable-shared=no --with-pic --srcdir=.
 #   `make install DESTDIR=${MESOS-PREFIX}/lib/mesos/3rdparty install`
 CONFIGURE_ARGS += --prefix=/
 
+# Set up building flags for non-bundled libraries.
+SSL_INCLUDE_FLAGS = @SSL_CPPFLAGS@
+SSL_LINKER_FLAGS = @SSL_LINKERFLAGS@
+ZLIB_INCLUDE_FLAGS = @ZLIB_CPPFLAGS@
+ZLIB_LINKER_FLAGS = @ZLIB_LINKERFLAGS@
+
 # Directory where bundled 3rdparty module dependencies are installed.
 pkg3rdpartydir = $(pkglibdir)/3rdparty
 
@@ -44,13 +50,16 @@ include versions.am
 
 BOOST = boost-$(BOOST_VERSION)
 CONCURRENTQUEUE = concurrentqueue-$(CONCURRENTQUEUE_VERSION)
+CSI = csi-$(CSI_VERSION)
 ELFIO = elfio-$(ELFIO_VERSION)
 GLOG = glog-$(GLOG_VERSION)
 GOOGLETEST = googletest-release-$(GOOGLETEST_VERSION)
 GMOCK = $(GOOGLETEST)/googlemock
 GPERFTOOLS = gperftools-$(GPERFTOOLS_VERSION)
+GRPC = grpc-$(GRPC_VERSION)
 GTEST = $(GOOGLETEST)/googletest
 HTTP_PARSER = http-parser-$(HTTP_PARSER_VERSION)
+JEMALLOC = jemalloc-$(JEMALLOC_VERSION)
 LEVELDB = leveldb-$(LEVELDB_VERSION)
 LIBEV = libev-$(LIBEV_VERSION)
 NVML = nvml-$(NVML_VERSION)
@@ -64,11 +73,14 @@ ZOOKEEPER = zookeeper-$(ZOOKEEPER_VERSION)
 EXTRA_DIST =			\
   $(BOOST).tar.gz		\
   $(CONCURRENTQUEUE).tar.gz	\
+  $(CSI).tar.gz			\
   $(ELFIO).tar.gz		\
   $(GLOG).tar.gz		\
   $(GOOGLETEST).tar.gz		\
   $(GPERFTOOLS).tar.gz		\
+  $(GRPC).tar.gz		\
   $(HTTP_PARSER).tar.gz		\
+  $(JEMALLOC).tar.gz		\
   $(LEVELDB).tar.gz		\
   $(LIBEV).tar.gz		\
   $(NVML).tar.gz		\
@@ -100,11 +112,14 @@ EXTRA_DIST +=		\
 CLEAN_EXTRACTED =		\
   $(BOOST)			\
   $(CONCURRENTQUEUE)		\
+  $(CSI)			\
   $(ELFIO)			\
   $(GLOG)			\
   $(GOOGLETEST)			\
   $(GPERFTOOLS)			\
+  $(GRPC)			\
   $(HTTP_PARSER)		\
+  $(JEMALLOC)			\
   $(LEVELDB)			\
   $(LIBEV)			\
   $(NVML)			\
@@ -237,6 +252,23 @@ $(HTTP_PARSER)-build-stamp: libry_http_parser.la
 	touch $@
 endif
 
+
+if WITH_BUNDLED_JEMALLOC
+JEMALLOC_CONFIGURE_ARGS = \
+    --enable-stats --enable-prof --with-malloc-conf="prof:true,prof_active:false"
+
+LIB_JEMALLOC = $(JEMALLOC)/libjemalloc.la
+
+$(LIB_JEMALLOC): $(JEMALLOC)-build-stamp
+
+$(JEMALLOC)-build-stamp: $(JEMALLOC)-stamp
+	cd $(JEMALLOC) && ./configure $(JEMALLOC_CONFIGURE_ARGS) $(CONFIGURE_ARGS)
+	cd $(JEMALLOC) && $(MAKE) $(AM_MAKEFLAGS)
+	touch $@
+
+ALL_LOCAL += $(LIB_JEMALLOC)
+endif
+
 if WITH_BUNDLED_LIBEV
 $(LIBEV)/libev.la: $(LIBEV)-build-stamp
 $(LIBEV)-build-stamp: $(LIBEV)-stamp
@@ -263,13 +295,73 @@ endif
 if WITH_BUNDLED_PROTOBUF
 $(PROTOBUF)/src/protoc $(PROTOBUF)/src/libprotobuf.la: $(PROTOBUF)-build-stamp
 
+# NOTE: The `--with-zlib` flag works differently between Mesos and
+# Protobuf. Protobuf uses `--with-zlib` as an on/off switch for data
+# compression instead of a path specifier for ZLib, so we need to set up
+# the `CPPFLAGS` and `LDFLAGS` if `--with-zlib=DIR` is given.
 $(PROTOBUF)-build-stamp: $(PROTOBUF)-stamp
-	cd $(PROTOBUF) && ./configure $(CONFIGURE_ARGS) && \
-        $(MAKE) $(AM_MAKEFLAGS)
+	cd $(PROTOBUF) &&				\
+	  ./configure $(CONFIGURE_ARGS)			\
+	              CPPFLAGS="$(ZLIB_INCLUDE_FLAGS)"	\
+	              LDFLAGS="$(ZLIB_LINKER_FLAGS)" &&	\
+	  $(MAKE) $(AM_MAKEFLAGS)
 	touch $@
 ALL_LOCAL += $(PROTOBUF)/src/libprotobuf.la
 ALL_LOCAL += $(PROTOBUF)/src/protoc
+
+PROTOBUF_INCLUDE_FLAGS = -I$(abs_builddir)/$(PROTOBUF)/src
+PROTOBUF_LINKER_FLAGS = -L$(abs_builddir)/$(PROTOBUF)/src/.libs
+PROTOC = $(abs_builddir)/$(PROTOBUF)/src/protoc
+else
+$(PROTOBUF)-build-stamp:
+	touch $@
+
+PROTOBUF_INCLUDE_FLAGS = @PROTOBUF_CPPFLAGS@
+PROTOBUF_LINKER_FLAGS = @PROTOBUF_LINKERFLAGS@
+PROTOC = @PROTOCOMPILER@
 endif
+
+if ENABLE_GRPC
+if WITH_BUNDLED_GRPC
+LIB_GRPC = $(GRPC)/libs/opt/libgrpc++.a			\
+           $(GRPC)/libs/opt/libgrpc.a			\
+           $(GRPC)/libs/opt/libgpr.a
+
+$(LIB_GRPC): $(GRPC)-build-stamp
+
+# NOTE: The `-Wno-deprecated-declarations` flag is added so that gRPC
+# can be built with OpenSSL 1.1.0. See:
+# https://github.com/grpc/grpc/pull/11496
+# NOTE: The `-Wno-unused-function` flag is added to address errors when
+# compling `src/core/tsi/ssl_transport_security.cc`. See:
+# https://github.com/grpc/grpc/pull/11675
+$(GRPC)-build-stamp: $(GRPC)-stamp			\
+                     $(PROTOBUF)-build-stamp
+	cd $(GRPC) &&					\
+	  CPPFLAGS="-Wno-deprecated-declarations	\
+	            -Wno-unused-function		\
+	            $(PROTOBUF_INCLUDE_FLAGS)		\
+	            $(SSL_INCLUDE_FLAGS)		\
+	            $(ZLIB_INCLUDE_FLAGS)"		\
+	  LDFLAGS="$(PROTOBUF_LINKER_FLAGS)		\
+	           $(SSL_LINKER_FLAGS)			\
+	           $(ZLIB_LINKER_FLAGS)"		\
+	  $(MAKE) $(AM_MAKEFLAGS)			\
+	          HAS_PKG_CONFIG=false			\
+	          NO_PROTOC=false			\
+	          PROTOC=$(PROTOC)
+	touch $@
+
+ALL_LOCAL += $(LIB_GRPC)
+else
+$(GRPC)-build-stamp:
+	touch $@
+endif
+endif
+
+# NOTE: We extract `csi.proto` even if gRPC is disabled because it is
+# imported by other proto files.
+ALL_LOCAL += $(CSI)-stamp
 
 # Convenience library for gmock/gtest.
 check_LTLIBRARIES = libgmock.la

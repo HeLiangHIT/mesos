@@ -31,6 +31,7 @@ using process::http::Connection;
 using std::map;
 using std::shared_ptr;
 using std::string;
+using std::vector;
 
 using testing::_;
 using testing::Invoke;
@@ -86,7 +87,7 @@ public:
     return Nothing();
   }
 
-  Future<bool> launch(
+  Future<slave::Containerizer::LaunchResult> launch(
       const ContainerID& containerId,
       const ContainerConfig& containerConfig,
       const map<string, string>& environment,
@@ -110,7 +111,7 @@ public:
     if (containerId.has_parent()) {
       // Launching a nested container via the test containerizer is a
       // no-op for now.
-      return true;
+      return slave::Containerizer::LaunchResult::SUCCESS;
     }
 
     CHECK(executors.contains(containerConfig.executor_info().executor_id()))
@@ -196,7 +197,7 @@ public:
       }
     }
 
-    return true;
+    return slave::Containerizer::LaunchResult::SUCCESS;
   }
 
   Future<Nothing> update(
@@ -241,11 +242,11 @@ public:
       .then(Option<ContainerTermination>::some);
   }
 
-  Future<bool> destroy(
+  Future<Option<mesos::slave::ContainerTermination>> destroy(
       const ContainerID& containerId)
   {
     if (!containers_.contains(containerId)) {
-      return false;
+      return None();
     }
 
     const Owned<ContainerData>& containerData = containers_.at(containerId);
@@ -273,12 +274,12 @@ public:
     containers_.erase(containerId);
     terminatedContainers[containerId] = termination;
 
-    return true;
+    return termination;
   }
 
   // Additional destroy method for testing because we won't know the
   // ContainerID created for each container.
-  Future<bool> destroy(
+  Future<Option<mesos::slave::ContainerTermination>> destroy(
       const FrameworkID& frameworkId,
       const ExecutorID& executorId)
   {
@@ -297,15 +298,26 @@ public:
       LOG(WARNING) << "Ignoring destroy of unknown container"
                    << " for executor '" << executorId << "'"
                    << " of framework " << frameworkId;
-      return false;
+      return None();
     }
 
     return destroy(containerId.get());
   }
 
+  Future<bool> kill(const ContainerID& containerId, int /* signal */)
+  {
+    return destroy(containerId)
+      .then([]() { return true; });
+  }
+
   Future<hashset<ContainerID>> containers()
   {
     return containers_.keys();
+  }
+
+  Future<Nothing> pruneImages(const vector<Image>& excludedImages)
+  {
+    return Nothing();
   }
 
 private:
@@ -429,6 +441,12 @@ void TestContainerizer::setup()
 
   EXPECT_CALL(*this, destroy(_))
     .WillRepeatedly(Invoke(this, &TestContainerizer::_destroy));
+
+  EXPECT_CALL(*this, kill(_, _))
+    .WillRepeatedly(Invoke(this, &TestContainerizer::_kill));
+
+  EXPECT_CALL(*this, pruneImages(_))
+    .WillRepeatedly(Invoke(this, &TestContainerizer::_pruneImages));
 }
 
 
@@ -442,7 +460,7 @@ Future<Nothing> TestContainerizer::_recover(
 }
 
 
-Future<bool> TestContainerizer::_launch(
+Future<slave::Containerizer::LaunchResult> TestContainerizer::_launch(
     const ContainerID& containerId,
     const ContainerConfig& containerConfig,
     const map<string, string>& environment,
@@ -510,12 +528,13 @@ Future<Option<mesos::slave::ContainerTermination>> TestContainerizer::_wait(
 }
 
 
-Future<bool> TestContainerizer::_destroy(
+Future<Option<mesos::slave::ContainerTermination>> TestContainerizer::_destroy(
     const ContainerID& containerId)
 {
   // Need to disambiguate for the compiler.
-  Future<bool> (TestContainerizerProcess::*destroy)(
-      const ContainerID&) = &TestContainerizerProcess::destroy;
+  Future<Option<mesos::slave::ContainerTermination>> (
+      TestContainerizerProcess::*destroy)(const ContainerID&) =
+        &TestContainerizerProcess::destroy;
 
   return process::dispatch(
       process.get(),
@@ -524,14 +543,27 @@ Future<bool> TestContainerizer::_destroy(
 }
 
 
-Future<bool> TestContainerizer::destroy(
+Future<bool> TestContainerizer::_kill(
+    const ContainerID& containerId,
+    int signal)
+{
+  return process::dispatch(
+      process.get(),
+      &TestContainerizerProcess::kill,
+      containerId,
+      signal);
+}
+
+
+Future<Option<mesos::slave::ContainerTermination>> TestContainerizer::destroy(
     const FrameworkID& frameworkId,
     const ExecutorID& executorId)
 {
   // Need to disambiguate for the compiler.
-  Future<bool> (TestContainerizerProcess::*destroy)(
-      const FrameworkID&,
-      const ExecutorID&) = &TestContainerizerProcess::destroy;
+  Future<Option<mesos::slave::ContainerTermination>> (
+      TestContainerizerProcess::*destroy)(
+          const FrameworkID&, const ExecutorID&) =
+            &TestContainerizerProcess::destroy;
 
   return process::dispatch(
       process.get(),
@@ -546,6 +578,16 @@ Future<hashset<ContainerID>> TestContainerizer::containers()
   return process::dispatch(
       process.get(),
       &TestContainerizerProcess::containers);
+}
+
+
+Future<Nothing> TestContainerizer::_pruneImages(
+    const vector<Image>& excludedImages)
+{
+  return process::dispatch(
+      process.get(),
+      &TestContainerizerProcess::pruneImages,
+      excludedImages);
 }
 
 } // namespace tests {

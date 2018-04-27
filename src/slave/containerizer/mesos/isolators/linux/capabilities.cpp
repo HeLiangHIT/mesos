@@ -74,6 +74,18 @@ Try<Isolator*> LinuxCapabilitiesIsolatorProcess::create(const Flags& flags)
 }
 
 
+bool LinuxCapabilitiesIsolatorProcess::supportsNesting()
+{
+  return true;
+}
+
+
+bool LinuxCapabilitiesIsolatorProcess::supportsStandalone()
+{
+  return true;
+}
+
+
 Future<Option<ContainerLaunchInfo>> LinuxCapabilitiesIsolatorProcess::prepare(
     const ContainerID& containerId,
     const ContainerConfig& containerConfig)

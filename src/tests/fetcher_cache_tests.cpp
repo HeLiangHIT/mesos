@@ -30,6 +30,7 @@
 #include <process/collect.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
+#include <process/gtest.hpp>
 #include <process/latch.hpp>
 #include <process/message.hpp>
 #include <process/owned.hpp>
@@ -74,6 +75,7 @@ using mesos::internal::slave::FetcherProcess;
 
 using mesos::master::detector::MasterDetector;
 
+using process::TEST_AWAIT_TIMEOUT;
 using process::Future;
 using process::HttpEvent;
 using process::Latch;
@@ -374,7 +376,7 @@ void FetcherCacheTest::setupArchiveAsset()
   archivePath = path::join(assetsDirectory, ARCHIVE_NAME);
 
   // Make the archive file read-only, so we can tell if it becomes
-  // executable by acccident.
+  // executable by accident.
   ASSERT_SOME(os::chmod(archivePath, S_IRUSR | S_IRGRP | S_IROTH));
 }
 
@@ -452,11 +454,7 @@ Try<FetcherCacheTest::Task> FetcherCacheTest::launchTask(
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(DeclineOffers());
 
-  // The default timeout in AWAIT_READY is 15 seconds,
-  // so we use that amount here.
-  // TODO(bernd-mesos): Make this a symbolic constant in "gtest.hpp"
-  // that we can reference here.
-  offers.await(Seconds(15));
+  offers.await(TEST_AWAIT_TIMEOUT);
   if (!offers.isReady()) {
     return Error("Failed to wait for resource offers: " +
            (offers.isFailed() ? offers.failure() : "discarded"));
@@ -565,17 +563,13 @@ Try<vector<FetcherCacheTest::Task>> FetcherCacheTest::launchTasks(
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(DeclineOffers());
 
-  // The default timeout in AWAIT_READY is 15 seconds,
-  // so we use that amount here.
-  // TODO(bernd-mesos): Make this a symbolic constant in "gtest.hpp"
-  // that we can reference here.
-  offers.await(Seconds(15));
+  offers.await(TEST_AWAIT_TIMEOUT);
   if (!offers.isReady()) {
     return Error("Failed to wait for resource offers: " +
            (offers.isFailed() ? offers.failure() : "discarded"));
   }
 
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
   const Offer offer = offers.get()[0];
 
   vector<TaskInfo> tasks;
@@ -659,7 +653,7 @@ TEST_F(FetcherCacheTest, LocalUncached)
 
   EXPECT_EQ(0u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
-  EXPECT_EQ(0u, fetcherProcess->cacheFiles()->size());
+  EXPECT_TRUE(fetcherProcess->cacheFiles()->empty());
 
   const string path = path::join(task->runDirectory.string(), COMMAND_NAME);
   EXPECT_TRUE(isExecutable(path));
@@ -837,7 +831,7 @@ TEST_F(FetcherCacheTest, CachedFallback)
 
   EXPECT_EQ(0u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
-  EXPECT_EQ(0u, fetcherProcess->cacheFiles()->size());
+  EXPECT_TRUE(fetcherProcess->cacheFiles()->empty());
 
   verifyCacheMetrics();
 }
@@ -876,7 +870,7 @@ TEST_F(FetcherCacheTest, LocalUncachedExtract)
 
   EXPECT_EQ(0u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
-  EXPECT_EQ(0u, fetcherProcess->cacheFiles()->size());
+  EXPECT_TRUE(fetcherProcess->cacheFiles()->empty());
 
   verifyCacheMetrics();
 }
@@ -960,7 +954,7 @@ public:
       return "http://" + stringify(self().address) + "/" + self().id + "/";
     }
 
-    // Stalls the execution of future HTTP requests inside visit().
+    // Stalls the execution of future HTTP requests inside consume().
     void pause()
     {
       // If there is no latch or if the existing latch has already been
@@ -977,7 +971,7 @@ public:
       }
     }
 
-    virtual void visit(const HttpEvent& event)
+    virtual void consume(HttpEvent&& event)
     {
       if (latch.get() != nullptr) {
         latch->await();
@@ -993,7 +987,7 @@ public:
         countArchiveRequests++;
       }
 
-      ProcessBase::visit(event);
+      ProcessBase::consume(std::move(event));
     }
 
     void resetCounts()
@@ -1355,7 +1349,7 @@ TEST_F(FetcherCacheHttpTest, DISABLED_HttpCachedRecovery)
   containerizer.reset(_containerizer.get());
 
   // Set up so we can wait until the new slave updates the container's
-  // resources (this occurs after the executor has re-registered).
+  // resources (this occurs after the executor has reregistered).
   Future<Nothing> update =
     FUTURE_DISPATCH(_, &MesosContainerizerProcess::update);
 

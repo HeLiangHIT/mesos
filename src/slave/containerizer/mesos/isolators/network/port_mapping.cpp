@@ -55,6 +55,7 @@
 #include <stout/os/stat.hpp>
 
 #include "common/status_utils.hpp"
+#include "common/values.hpp"
 
 #include "linux/fs.hpp"
 #include "linux/ns.hpp"
@@ -106,6 +107,8 @@ using std::string;
 using std::vector;
 
 using filter::ip::PortRange;
+
+using mesos::internal::values::rangesToIntervalSet;
 
 using mesos::slave::ContainerConfig;
 using mesos::slave::ContainerLaunchInfo;
@@ -370,20 +373,6 @@ static string getSymlinkPath(const ContainerID& containerId)
 static string getNamespaceHandlePath(const string& bindMountRoot, pid_t pid)
 {
   return path::join(bindMountRoot, stringify(pid));
-}
-
-
-// Converts from value ranges to interval set.
-static IntervalSet<uint16_t> getIntervalSet(const Value::Ranges& ranges)
-{
-  IntervalSet<uint16_t> set;
-
-  for (int i = 0; i < ranges.range_size(); i++) {
-    set += (Bound<uint16_t>::closed(ranges.range(i).begin()),
-            Bound<uint16_t>::closed(ranges.range(i).end()));
-  }
-
-  return set;
 }
 
 /////////////////////////////////////////////////
@@ -1377,7 +1366,8 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
 
   // Verify that the network namespace is available by checking the
   // existence of the network namespace handle of the current process.
-  if (ns::namespaces().count("net") == 0) {
+  Try<bool> netSupported = ns::supported(CLONE_NEWNET);
+  if (netSupported.isError() || !netSupported.get()) {
     return Error(
         "Using network isolator requires network namespace. "
         "Make sure your kernel is newer than 3.4");
@@ -1423,14 +1413,34 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
   // treated as non-ephemeral ports.
   IntervalSet<uint16_t> nonEphemeralPorts;
   if (resources.get().ports().isSome()) {
-    nonEphemeralPorts = getIntervalSet(resources.get().ports().get());
+    Try<IntervalSet<uint16_t>> ports = rangesToIntervalSet<uint16_t>(
+        resources.get().ports().get());
+
+    if (ports.isError()) {
+      return Error(
+          "Invalid ports resource '" +
+          stringify(resources.get().ports().get()) +
+          "': " + ports.error());
+    }
+
+    nonEphemeralPorts = ports.get();
   }
 
   // Get 'ephemeral_ports' resource from 'resources' flag. These ports
   // will be allocated to each container as ephemeral ports.
   IntervalSet<uint16_t> ephemeralPorts;
   if (resources.get().ephemeral_ports().isSome()) {
-    ephemeralPorts = getIntervalSet(resources.get().ephemeral_ports().get());
+    Try<IntervalSet<uint16_t>> ports = rangesToIntervalSet<uint16_t>(
+        resources.get().ephemeral_ports().get());
+
+    if (ports.isError()) {
+      return Error(
+          "Invalid ephemeral ports resource '" +
+          stringify(resources.get().ephemeral_ports().get()) +
+          "': " + ports.error());
+    }
+
+    ephemeralPorts = ports.get();
   }
 
   // Each container requires at least one ephemeral port for slave
@@ -2485,13 +2495,13 @@ Future<Option<ContainerLaunchInfo>> PortMappingIsolatorProcess::prepare(
   }
 
   const ExecutorInfo& executorInfo = containerConfig.executor_info();
-
-  Resources resources(executorInfo.resources());
+  const Resources resources(containerConfig.resources());
 
   IntervalSet<uint16_t> nonEphemeralPorts;
 
   if (resources.ports().isSome()) {
-    nonEphemeralPorts = getIntervalSet(resources.ports().get());
+    nonEphemeralPorts = rangesToIntervalSet<uint16_t>(
+        resources.ports().get()).get();
 
     // Sanity check to make sure that the assigned non-ephemeral ports
     // for the container are part of the non-ephemeral ports specified
@@ -2976,7 +2986,8 @@ Future<Nothing> PortMappingIsolatorProcess::update(
   IntervalSet<uint16_t> nonEphemeralPorts;
 
   if (resources.ports().isSome()) {
-    nonEphemeralPorts = getIntervalSet(resources.ports().get());
+    nonEphemeralPorts = rangesToIntervalSet<uint16_t>(
+        resources.ports().get()).get();
 
     // Sanity check to make sure that the assigned non-ephemeral ports
     // for the container are part of the non-ephemeral ports specified
@@ -3955,8 +3966,9 @@ string PortMappingIsolatorProcess::scripts(Info* info)
   // checksum offloading ensures the TCP layer will checksum and drop
   // it.
   script << "ethtool -K " << eth0 << " rx off\n";
-  script << "ip link set " << eth0 << " address " << hostMAC << " up\n";
-  script << "ip addr add " << hostIPNetwork  << " dev " << eth0 << "\n";
+  script << "ip link set " << eth0 << " address " << hostMAC
+         << " mtu " << hostEth0MTU << " up\n";
+  script << "ip addr add " << hostIPNetwork << " dev " << eth0 << "\n";
 
   // Set up the default gateway to match that of eth0.
   script << "ip route add default via " << hostDefaultGateway << "\n";

@@ -17,6 +17,7 @@
 #ifndef __RESOURCE_PROVIDER_STORAGE_PROVIDER_HPP__
 #define __RESOURCE_PROVIDER_STORAGE_PROVIDER_HPP__
 
+#include <process/http.hpp>
 #include <process/owned.hpp>
 
 #include <stout/try.hpp>
@@ -36,6 +37,14 @@ class StorageLocalResourceProvider : public LocalResourceProvider
 {
 public:
   static Try<process::Owned<LocalResourceProvider>> create(
+      const process::http::URL& url,
+      const std::string& workDir,
+      const mesos::ResourceProviderInfo& info,
+      const SlaveID& slaveId,
+      const Option<std::string>& authToken,
+      bool strict);
+
+  static Try<process::http::authentication::Principal> principal(
       const mesos::ResourceProviderInfo& info);
 
   ~StorageLocalResourceProvider() override;
@@ -48,7 +57,12 @@ public:
 
 private:
   explicit StorageLocalResourceProvider(
-      const mesos::ResourceProviderInfo& info);
+      const process::http::URL& url,
+      const std::string& workDir,
+      const mesos::ResourceProviderInfo& info,
+      const SlaveID& slaveId,
+      const Option<std::string>& authToken,
+      bool strict);
 
   process::Owned<StorageLocalResourceProviderProcess> process;
 };

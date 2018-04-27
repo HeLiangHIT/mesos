@@ -14,6 +14,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// This header include must be enclosed in an `extern "C"` block to
+// workaround a bug in glibc <= 2.12 (see MESOS-7378).
+//
+// TODO(gilbert): Remove this when we no longer support glibc <= 2.12.
+extern "C" {
+#include <sys/sysmacros.h>
+}
+
 #include <process/id.hpp>
 
 #include <stout/foreach.hpp>
@@ -34,7 +42,6 @@ using std::string;
 using std::vector;
 
 using cgroups::blkio::Device;
-using cgroups::blkio::Operation;
 
 namespace mesos {
 namespace internal {
@@ -63,19 +70,19 @@ static void setValue(
     value->set_op(CgroupInfo::Blkio::UNKNOWN);
   } else {
     switch(statValue.op.get()) {
-      case Operation::TOTAL:
+      case cgroups::blkio::Operation::TOTAL:
         value->set_op(CgroupInfo::Blkio::TOTAL);
         break;
-      case Operation::READ:
+      case cgroups::blkio::Operation::READ:
         value->set_op(CgroupInfo::Blkio::READ);
         break;
-      case Operation::WRITE:
+      case cgroups::blkio::Operation::WRITE:
         value->set_op(CgroupInfo::Blkio::WRITE);
         break;
-      case Operation::SYNC:
+      case cgroups::blkio::Operation::SYNC:
         value->set_op(CgroupInfo::Blkio::SYNC);
         break;
-      case Operation::ASYNC:
+      case cgroups::blkio::Operation::ASYNC:
         value->set_op(CgroupInfo::Blkio::ASYNC);
         break;
     }
@@ -351,20 +358,20 @@ Future<ResourceStatistics> BlkioSubsystem::usage(
   CgroupInfo::Blkio::Statistics* stat = result.mutable_blkio_statistics();
 
   foreachkey (dev_t dev, cfq) {
-    cfq[dev].mutable_device()->set_major(major(dev));
-    cfq[dev].mutable_device()->set_minor(minor(dev));
+    cfq[dev].mutable_device()->set_major_number(major(dev));
+    cfq[dev].mutable_device()->set_minor_number(minor(dev));
     stat->add_cfq()->CopyFrom(cfq[dev]);
   }
 
   foreachkey (dev_t dev, cfqRecursive) {
-    cfqRecursive[dev].mutable_device()->set_major(major(dev));
-    cfqRecursive[dev].mutable_device()->set_minor(minor(dev));
+    cfqRecursive[dev].mutable_device()->set_major_number(major(dev));
+    cfqRecursive[dev].mutable_device()->set_minor_number(minor(dev));
     stat->add_cfq_recursive()->CopyFrom(cfqRecursive[dev]);
   }
 
   foreachkey (dev_t dev, throttling) {
-    throttling[dev].mutable_device()->set_major(major(dev));
-    throttling[dev].mutable_device()->set_minor(minor(dev));
+    throttling[dev].mutable_device()->set_major_number(major(dev));
+    throttling[dev].mutable_device()->set_minor_number(minor(dev));
     stat->add_throttling()->CopyFrom(throttling[dev]);
   }
 

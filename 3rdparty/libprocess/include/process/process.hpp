@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 
+#include <memory>
 #include <map>
 #include <queue>
 #include <vector>
@@ -40,6 +41,8 @@
 namespace process {
 
 // Forward declaration.
+class EventQueue;
+class Gate;
 class Logging;
 class Sequence;
 
@@ -66,30 +69,30 @@ void install(std::vector<Owned<FirewallRule>>&& rules);
 
 } // namespace firewall {
 
-class ProcessBase : public EventVisitor
+class ProcessBase : public EventConsumer
 {
 public:
   explicit ProcessBase(const std::string& id = "");
 
   virtual ~ProcessBase();
 
-  UPID self() const { return pid; }
+  const UPID& self() const { return pid; }
 
 protected:
   /**
    * Invoked when an event is serviced.
    */
-  virtual void serve(const Event& event)
+  virtual void serve(Event&& event)
   {
-    event.visit(this);
+    std::move(event).consume(this);
   }
 
-  // Callbacks used to visit (i.e., handle) a specific event.
-  virtual void visit(const MessageEvent& event);
-  virtual void visit(const DispatchEvent& event);
-  virtual void visit(const HttpEvent& event);
-  virtual void visit(const ExitedEvent& event);
-  virtual void visit(const TerminateEvent& event);
+  // Callbacks used to consume (i.e., handle) a specific event.
+  void consume(MessageEvent&& event) override;
+  void consume(DispatchEvent&& event) override;
+  void consume(HttpEvent&& event) override;
+  void consume(ExitedEvent&& event) override;
+  void consume(TerminateEvent&& event) override;
 
   /**
    * Invoked when a process gets spawned.
@@ -100,7 +103,7 @@ protected:
    * Invoked when a process is terminated.
    *
    * **NOTE**: this does not get invoked automatically if
-   * `process::ProcessBase::visit(const TerminateEvent&)` is overridden.
+   * `process::ProcessBase::consume(TerminateEvent&&)` is overridden.
    */
   virtual void finalize() {}
 
@@ -130,18 +133,8 @@ protected:
   virtual void lost(const UPID&) {}
 
   /**
-   * Puts the message at front of this process's message queue.
-   *
-   * @see process::Message
-   */
-  void inject(
-      const UPID& from,
-      const std::string& name,
-      const char* data = nullptr,
-      size_t length = 0);
-
-  /**
-   * Sends the message to the specified `UPID`.
+   * Sends the message to the specified `UPID`. Prefer the rvalue
+   * reference overloads if the data can be moved in.
    *
    * @see process::Message
    */
@@ -150,6 +143,15 @@ protected:
       const std::string& name,
       const char* data = nullptr,
       size_t length = 0);
+
+  void send(
+      const UPID& to,
+      std::string&& name);
+
+  void send(
+      const UPID& to,
+      std::string&& name,
+      std::string&& data);
 
   /**
    * Describes the behavior of the `link` call when the target `pid`
@@ -198,7 +200,7 @@ protected:
    * Any function which takes a "from" `UPID` and a message body as
    * arguments.
    *
-   * The default visit implementation for message events invokes
+   * The default consume implementation for message events invokes
    * installed message handlers, or delegates the message to another
    * process. A message handler always takes precedence over delegating.
    *
@@ -246,7 +248,7 @@ protected:
    * Any function which takes a `process::http::Request` and returns a
    * `process::http::Response`.
    *
-   * The default visit implementation for HTTP events invokes
+   * The default consume implementation for HTTP events invokes
    * installed HTTP handlers.
    *
    * @see process::ProcessBase::route
@@ -269,7 +271,7 @@ protected:
    * Sets up a handler for HTTP requests with the specified name.
    *
    * @param name The endpoint or URL to route.
-   *     Must begin with a `/`.
+   *     Must begin with a `/` and must not end with a '/'.
    */
   void route(
       const std::string& name,
@@ -310,7 +312,7 @@ protected:
    * If the principal is not set, then the endpoint's
    * realm does not require authentication.
    *
-   * The default visit implementation for HTTP events invokes
+   * The default consume implementation for HTTP events invokes
    * installed HTTP handlers.
    *
    * @see process::ProcessBase::route
@@ -321,6 +323,8 @@ protected:
           AuthenticatedHttpRequestHandler;
 
   // TODO(arojas): Consider introducing an `authentication::Realm` type.
+  // TODO(bevers): Consider changing the type of the second argument to
+  // `const Option<std::string>&` for consistency with the version below.
   void route(
       const std::string& name,
       const std::string& realm,
@@ -329,24 +333,30 @@ protected:
       const RouteOptions& options = RouteOptions());
 
   /**
-   * @copydoc process::ProcessBase::route
+   * Forwards to the correct overload of `process::ProcessBase::route()`,
+   * depending on whether the authentication realm `realm` is present.
    */
-  template <typename T>
+  template<typename T>
   void route(
-      const std::string& name,
-      const std::string& realm,
-      const Option<std::string>& help,
-      Future<http::Response> (T::*method)(
-          const http::Request&,
-          const Option<http::authentication::Principal>&),
-      const RouteOptions& options = RouteOptions())
+    const std::string& name,
+    const Option<std::string>& realm,
+    const Option<std::string>& help,
+    Future<http::Response>(T::*method)(
+        const http::Request&, const Option<http::authentication::Principal>&),
+    const RouteOptions& options = RouteOptions())
   {
     // Note that we use dynamic_cast here so a process can use
     // multiple inheritance if it sees so fit (e.g., to implement
     // multiple callback interfaces).
-    AuthenticatedHttpRequestHandler handler =
-      lambda::bind(method, dynamic_cast<T*>(this), lambda::_1, lambda::_2);
-    route(name, realm, help, handler, options);
+    if (realm.isSome()) {
+      AuthenticatedHttpRequestHandler handler =
+        lambda::bind(method, dynamic_cast<T*>(this), lambda::_1, lambda::_2);
+      route(name, realm.get(), help, handler, options);
+    } else {
+      HttpRequestHandler handler =
+        lambda::bind(method, dynamic_cast<T*>(this), lambda::_1, None());
+      route(name, help, handler, options);
+    }
   }
 
   /**
@@ -377,50 +387,38 @@ protected:
   }
 
   /**
-   * Returns the number of events of the given type currently on the event
-   * queue.
+   * Returns the number of events of the given type currently on the
+   * event queue. MUST be invoked from within the process itself in
+   * order to safely examine events.
    */
   template <typename T>
-  size_t eventCount()
-  {
-    size_t count = 0U;
-
-    synchronized (mutex) {
-      count = std::count_if(events.begin(), events.end(), isEventType<T>);
-    }
-
-    return count;
-  }
+  size_t eventCount();
 
 private:
   friend class SocketManager;
   friend class ProcessManager;
-  friend class ProcessReference;
   friend void* schedule(void*);
 
   // Process states.
-  enum
+  //
+  // Transitioning from BLOCKED to READY also requires enqueueing the
+  // process in the run queue otherwise the events will never be
+  // processed!
+  enum class State
   {
-    BOTTOM,
-    READY,
-    RUNNING,
-    BLOCKED,
-    TERMINATING,
-    TERMINATED
-  } state;
+    BOTTOM, // Uninitialized but events may be enqueued.
+    BLOCKED, // Initialized, no events enqueued.
+    READY, // Initialized, events enqueued.
+    TERMINATING // Initialized, no more events will be enqueued.
+  };
 
-  template <typename T>
-  static bool isEventType(const Event* event)
-  {
-    return event->is<T>();
-  }
+  std::atomic<State> state = ATOMIC_VAR_INIT(State::BOTTOM);
 
-  // Mutex protecting internals.
-  // TODO(benh): Consider replacing with a spinlock, on multi-core systems.
-  std::recursive_mutex mutex;
+  // Flag for indicating that a terminate event has been injected.
+  std::atomic<bool> termination = ATOMIC_VAR_INIT(false);
 
   // Enqueue the specified message, request, or function call.
-  void enqueue(Event* event, bool inject = false);
+  void enqueue(Event* event);
 
   // Delegates for messages.
   std::map<std::string, UPID> delegates;
@@ -431,7 +429,7 @@ private:
   //  (1) `realm` and `authenticatedHandler` will be set.
   //      Libprocess will perform HTTP authentication for
   //      all requests to this endpoint (by default during
-  //      HttpEvent visitation). The authentication principal
+  //      HttpEvent consumption). The authentication principal
   //      will be passed to the `authenticatedHandler`.
   //
   //  Otherwise, if the endpoint is not associated with an
@@ -466,20 +464,33 @@ private:
     std::map<std::string, std::string> types;
   };
 
-  // Continuation for `visit(const HttpEvent&)`.
-  Future<http::Response> _visit(
+  // Continuation for `consume(HttpEvent&&)`.
+  Future<http::Response> _consume(
       const HttpEndpoint& endpoint,
       const std::string& name,
       const Owned<http::Request>& request);
 
+  // JSON representation of process. MUST be invoked from within the
+  // process itself in order to safely examine events.
+  operator JSON::Object();
+
   // Static assets(s) to provide.
   std::map<std::string, Asset> assets;
 
-  // Queue of received events, requires lock()ed access!
-  std::deque<Event*> events;
+  // Queue of received events. We employ the PIMPL idiom here and use
+  // a pointer so we can hide the implementation of `EventQueue`.
+  std::unique_ptr<EventQueue> events;
 
-  // Active references.
-  std::atomic_long refs;
+  // NOTE: this is a shared pointer to a _pointer_, hence this is not
+  // responsible for the ProcessBase itself.
+  std::shared_ptr<ProcessBase*> reference;
+
+  std::shared_ptr<Gate> gate;
+
+  // Whether or not the runtime should delete this process after it
+  // has terminated. Note that failure to spawn the process will leave
+  // the process unmanaged and thus it may leak!
+  bool manage = false;
 
   // Process PID.
   UPID pid;
@@ -559,10 +570,19 @@ PID<Logging> logging();
 
 
 /**
+ * Returns the number of worker threads the library has created. A
+ * worker thread is a thread that runs a process (i.e., calls
+ * `ProcessBase::serve`).
+ */
+long workers();
+
+
+/**
  * Spawn a new process.
  *
  * @param process Process to be spawned.
- * @param manage Whether process should get garbage collected.
+ * @param manage Whether process should get deleted by the runtime
+ *     after terminating.
  */
 UPID spawn(ProcessBase* process, bool manage = false);
 
