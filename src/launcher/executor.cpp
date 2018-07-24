@@ -111,6 +111,8 @@ using mesos::Environment;
 using mesos::executor::Call;
 using mesos::executor::Event;
 
+using mesos::slave::ContainerLaunchInfo;
+
 using mesos::v1::executor::Mesos;
 using mesos::v1::executor::MesosBase;
 using mesos::v1::executor::V0ToV1Adapter;
@@ -131,6 +133,7 @@ public:
       const Option<Environment>& _taskEnvironment,
       const Option<CapabilityInfo>& _effectiveCapabilities,
       const Option<CapabilityInfo>& _boundingCapabilities,
+      const Option<ContainerLaunchInfo>& _taskLaunchInfo,
       const FrameworkID& _frameworkId,
       const ExecutorID& _executorId,
       const Duration& _shutdownGracePeriod)
@@ -140,6 +143,7 @@ public:
       launched(false),
       killed(false),
       killedByHealthCheck(false),
+      killedByMaxCompletionTimer(false),
       terminated(false),
       pid(None()),
       shutdownGracePeriod(_shutdownGracePeriod),
@@ -154,11 +158,12 @@ public:
       taskEnvironment(_taskEnvironment),
       effectiveCapabilities(_effectiveCapabilities),
       boundingCapabilities(_boundingCapabilities),
+      taskLaunchInfo(_taskLaunchInfo),
       frameworkId(_frameworkId),
       executorId(_executorId),
       lastTaskStatus(None()) {}
 
-  virtual ~CommandExecutor() = default;
+  ~CommandExecutor() override = default;
 
   void connected()
   {
@@ -259,7 +264,7 @@ public:
   }
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     Option<string> value = os::getenv("MESOS_HTTP_COMMAND_EXECUTOR");
 
@@ -405,12 +410,13 @@ protected:
       const Option<string>& sandboxDirectory,
       const Option<string>& workingDirectory,
       const Option<CapabilityInfo>& effectiveCapabilities,
-      const Option<CapabilityInfo>& boundingCapabilities)
+      const Option<CapabilityInfo>& boundingCapabilities,
+      const Option<ContainerLaunchInfo>& taskLaunchInfo)
   {
     // Prepare the flags to pass to the launch process.
     slave::MesosContainerizerLaunch::Flags launchFlags;
 
-    ::mesos::slave::ContainerLaunchInfo launchInfo;
+    ContainerLaunchInfo launchInfo;
     launchInfo.mutable_command()->CopyFrom(command);
 
 #ifndef __WINDOWS__
@@ -470,6 +476,15 @@ protected:
     if (boundingCapabilities.isSome()) {
       launchInfo.mutable_bounding_capabilities()->CopyFrom(
           boundingCapabilities.get());
+    }
+
+    if (taskLaunchInfo.isSome()) {
+      launchInfo.mutable_mounts()->CopyFrom(taskLaunchInfo->mounts());
+      launchInfo.mutable_pre_exec_commands()->CopyFrom(
+          taskLaunchInfo->pre_exec_commands());
+
+      launchInfo.mutable_clone_namespaces()->CopyFrom(
+          taskLaunchInfo->clone_namespaces());
     }
 
     launchFlags.launch_info = JSON::protobuf(launchInfo);
@@ -646,6 +661,21 @@ protected:
       launchEnvironment.add_variables()->CopyFrom(variable);
     }
 
+    // Setup timer for max_completion_time.
+    if (task.max_completion_time().nanoseconds() > 0) {
+      Duration duration = Nanoseconds(task.max_completion_time().nanoseconds());
+
+      LOG(INFO) << "Task " << taskId.get() << " has a max completion time of "
+                << duration;
+
+      taskCompletionTimer = delay(
+          duration,
+          self(),
+          &Self::taskCompletionTimeout,
+          task.task_id(),
+          duration);
+    }
+
     LOG(INFO) << "Starting task " << taskId.get();
 
     pid = launchTaskSubprocess(
@@ -657,7 +687,8 @@ protected:
         sandboxDirectory,
         workingDirectory,
         effectiveCapabilities,
-        boundingCapabilities);
+        boundingCapabilities,
+        taskLaunchInfo);
 
     LOG(INFO) << "Forked command at " << pid.get();
 
@@ -734,6 +765,12 @@ protected:
 
   void kill(const TaskID& _taskId, const Option<KillPolicy>& override = None())
   {
+    // Cancel the taskCompletionTimer if it is set and ongoing.
+    if (taskCompletionTimer.isSome()) {
+      Clock::cancel(taskCompletionTimer.get());
+      taskCompletionTimer = None();
+    }
+
     // Default grace period is set to 3s for backwards compatibility.
     //
     // TODO(alexr): Replace it with a more meaningful default, e.g.
@@ -846,10 +883,13 @@ private:
       CHECK_SOME(taskId);
       CHECK(taskId.get() == _taskId);
 
-      if (protobuf::frameworkHasCapability(
+      if (!killedByMaxCompletionTimer &&
+          protobuf::frameworkHasCapability(
               frameworkInfo.get(),
               FrameworkInfo::Capability::TASK_KILLING_STATE)) {
-        TaskStatus status = createTaskStatus(taskId.get(), TASK_KILLING);
+        TaskStatus status =
+          createTaskStatus(taskId.get(), TASK_KILLING);
+
         forward(status);
       }
 
@@ -915,6 +955,13 @@ private:
       Clock::cancel(killGracePeriodTimer.get());
     }
 
+    if (taskCompletionTimer.isSome()) {
+      Clock::cancel(taskCompletionTimer.get());
+      taskCompletionTimer = None();
+    }
+
+    Option<TaskStatus::Reason> reason = None();
+
     if (!status_.isReady()) {
       taskState = TASK_FAILED;
       message =
@@ -928,7 +975,10 @@ private:
       CHECK(WIFEXITED(status) || WIFSIGNALED(status))
         << "Unexpected wait status " << status;
 
-      if (killed) {
+      if (killedByMaxCompletionTimer) {
+        taskState = TASK_FAILED;
+        reason = TaskStatus::REASON_MAX_COMPLETION_TIME_REACHED;
+      } else if (killed) {
         // Send TASK_KILLED if the task was killed as a result of
         // kill() or shutdown().
         taskState = TASK_KILLED;
@@ -948,7 +998,7 @@ private:
     TaskStatus status = createTaskStatus(
         taskId.get(),
         taskState,
-        None(),
+        reason,
         message);
 
     // Indicate that a kill occurred due to a failing health check.
@@ -1006,6 +1056,23 @@ private:
                 << stringify(trees.get());
     }
   }
+
+
+  void taskCompletionTimeout(const TaskID& taskId, const Duration& duration)
+  {
+    CHECK(!terminated);
+    CHECK(!killed);
+
+    LOG(INFO) << "Killing task " << taskId
+              << " which exceeded its maximum completion time of " << duration;
+
+    taskCompletionTimer = None();
+    killedByMaxCompletionTimer = true;
+
+    // Use a zero gracePeriod to kill the task.
+    kill(taskId, Duration::zero());
+  }
+
 
   // Use this helper to create a status update from scratch, i.e., without
   // previously attached extra information like `data` or `check_status`.
@@ -1130,11 +1197,13 @@ private:
   bool launched;
   bool killed;
   bool killedByHealthCheck;
+  bool killedByMaxCompletionTimer;
+
   bool terminated;
 
   Option<Time> killGracePeriodStart;
   Option<Timer> killGracePeriodTimer;
-
+  Option<Timer> taskCompletionTimer;
   Option<pid_t> pid;
   Duration shutdownGracePeriod;
   Option<KillPolicy> killPolicy;
@@ -1149,6 +1218,7 @@ private:
   Option<Environment> taskEnvironment;
   Option<CapabilityInfo> effectiveCapabilities;
   Option<CapabilityInfo> boundingCapabilities;
+  Option<ContainerLaunchInfo> taskLaunchInfo;
   const FrameworkID frameworkId;
   const ExecutorID executorId;
   Owned<MesosBase> mesos;
@@ -1208,6 +1278,10 @@ public:
         "bounding_capabilities",
         "The bounding set of capabilities the command can use.");
 
+    add(&Flags::task_launch_info,
+        "task_launch_info",
+        "The launch info to run the task.");
+
     add(&Flags::launcher_dir,
         "launcher_dir",
         "Directory path of Mesos binaries.",
@@ -1225,6 +1299,7 @@ public:
   Option<Environment> task_environment;
   Option<mesos::CapabilityInfo> effective_capabilities;
   Option<mesos::CapabilityInfo> bounding_capabilities;
+  Option<JSON::Object> task_launch_info;
   string launcher_dir;
 };
 
@@ -1289,6 +1364,19 @@ int main(int argc, char** argv)
     shutdownGracePeriod = parse.get();
   }
 
+  Option<ContainerLaunchInfo> task_launch_info;
+  if (flags.task_launch_info.isSome()) {
+    Try<ContainerLaunchInfo> parse =
+      protobuf::parse<ContainerLaunchInfo>(flags.task_launch_info.get());
+
+    if (parse.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to parse task launch info: " << parse.error();
+    }
+
+    task_launch_info = parse.get();
+  }
+
   process::initialize();
 
   Owned<mesos::internal::CommandExecutor> executor(
@@ -1302,6 +1390,7 @@ int main(int argc, char** argv)
           flags.task_environment,
           flags.effective_capabilities,
           flags.bounding_capabilities,
+          task_launch_info,
           frameworkId,
           executorId,
           shutdownGracePeriod));

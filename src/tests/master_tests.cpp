@@ -1357,7 +1357,7 @@ protected:
     : path("whitelist.txt")
   {}
 
-  virtual ~WhitelistTest()
+  ~WhitelistTest() override
   {
     os::rm(path);
   }
@@ -2507,8 +2507,7 @@ TEST_F(MasterTest, SlavesEndpointTwoSlaves)
   AWAIT_READY(slave1RegisteredMessage);
 
   Future<SlaveRegisteredMessage> slave2RegisteredMessage =
-    FUTURE_PROTOBUF(
-        SlaveRegisteredMessage(), master.get()->pid, Not(slave1.get()->pid));
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, Not(slave1.get()->pid));
 
   Try<Owned<cluster::Slave>> slave2 = StartSlave(detector.get());
   ASSERT_SOME(slave2);
@@ -2562,10 +2561,7 @@ TEST_F(MasterTest, SlavesEndpointQuerySlave)
   AWAIT_READY(slave1RegisteredMessage);
 
   Future<SlaveRegisteredMessage> slave2RegisteredMessage =
-    FUTURE_PROTOBUF(
-        SlaveRegisteredMessage(),
-        master.get()->pid,
-        Not(slave1.get()->pid));
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, Not(slave1.get()->pid));
 
   Try<Owned<cluster::Slave>> slave2 = StartSlave(detector.get());
   ASSERT_SOME(slave2);
@@ -5045,11 +5041,18 @@ TEST_F(MasterTest, StateEndpointAgentCapabilities)
   ASSERT_EQ(1u, slaveInfo.values.count("capabilities"));
   JSON::Value slaveCapabilities = slaveInfo.values.at("capabilities");
 
-  // Agents should have MULTI_ROLE, HIERARCHICAL_ROLE, RESERVATION_REFINEMENT,
-  // and RESOURCE_PROVIDER capabilities in current implementation.
+  // Agents should have the following capabilities in the current
+  // implementation.
   Try<JSON::Value> expectedCapabilities = JSON::parse(
-      "[\"MULTI_ROLE\",\"HIERARCHICAL_ROLE\",\"RESERVATION_REFINEMENT\","
-      "\"RESOURCE_PROVIDER\"]");
+    R"~(
+      [
+        "MULTI_ROLE",
+        "HIERARCHICAL_ROLE",
+        "RESERVATION_REFINEMENT",
+        "RESOURCE_PROVIDER",
+        "RESIZE_VOLUME"
+      ]
+    )~");
 
   ASSERT_SOME(expectedCapabilities);
   EXPECT_TRUE(slaveCapabilities.contains(expectedCapabilities.get()));
@@ -6121,7 +6124,7 @@ TEST_F(MasterTest, DuplicatedSlaveIdWhenSlaveReregister)
   ASSERT_SOME(master);
 
   Future<SlaveRegisteredMessage> slaveRegisteredMessage2 =
-      FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, Not(slave1.get()->pid));
 
   // Start a new slave and make sure it registers before the old slave.
   slave::Flags slaveFlags2 = CreateSlaveFlags();
@@ -7705,10 +7708,13 @@ TEST_F(MasterTest, TaskWithTinyResources)
 
   Offer offer = offers.get()[0];
 
-  TaskInfo task = createTask(
-      offer.slave_id(),
-      Resources::parse("cpus:0.00001;mem:1").get(),
-      SLEEP_COMMAND(1000));
+  // We manually construct the CPU resources since the parser constructing
+  // `Resources` instead of `Resource` already performs validation and would
+  // reject the input.
+  Resources resources = Resources::parse("mem:1").get();
+  resources += Resources::parse("cpus", "0.00001", "*").get();
+
+  TaskInfo task = createTask(offer.slave_id(), resources, SLEEP_COMMAND(1000));
 
   Future<TaskStatus> startingStatus;
   Future<TaskStatus> runningStatus;
@@ -8532,14 +8538,10 @@ TEST_F(MasterTest, RegistryGcByCount)
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
   }
 
-  // Wait for outstanding messages to be dropped, for example if
-  // the `SlaveRegisteredMessage` was re-sent after a timeout.
-  Clock::pause();
-  Clock::settle();
-  Clock::resume();
-
+  // Ensure we catch a brand new `SlaveRegisteredMessage` message
+  // and not the one eventually resent for the first agent.
   Future<SlaveRegisteredMessage> slaveRegisteredMessage2 =
-    FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, Not(slave.get()->pid));
 
   slave::Flags slaveFlags2 = CreateSlaveFlags();
 
@@ -8639,7 +8641,6 @@ TEST_F(MasterTest, UpdateSlaveMessageWithPendingOffers)
     FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.authenticate_http_readwrite = false;
 
   Try<Owned<cluster::Slave>> agent = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(agent);
@@ -8664,8 +8665,7 @@ TEST_F(MasterTest, UpdateSlaveMessageWithPendingOffers)
   Owned<EndpointDetector> endpointDetector(
       resource_provider::createEndpointDetector(agent.get()->pid));
 
-  resourceProvider->start(
-      endpointDetector, ContentType::PROTOBUF, v1::DEFAULT_CREDENTIAL);
+  resourceProvider->start(endpointDetector, ContentType::PROTOBUF);
 
   AWAIT_READY(updateSlaveMessage);
   ASSERT_TRUE(resourceProvider->info.has_id());
@@ -8758,10 +8758,6 @@ TEST_F(MasterTest, OperationUpdateDuringFailover)
 
   slave::Flags slaveFlags = CreateSlaveFlags();
 
-  // TODO(nfnt): Remove this once 'MockResourceProvider' supports
-  // authentication.
-  slaveFlags.authenticate_http_readwrite = false;
-
   Future<UpdateSlaveMessage> updateSlaveMessage =
     FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
 
@@ -8794,10 +8790,7 @@ TEST_F(MasterTest, OperationUpdateDuringFailover)
 
   updateSlaveMessage = FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
 
-  resourceProvider.start(
-      endpointDetector,
-      ContentType::PROTOBUF,
-      v1::DEFAULT_CREDENTIAL);
+  resourceProvider.start(endpointDetector, ContentType::PROTOBUF);
 
   AWAIT_READY(updateSlaveMessage);
 
@@ -8841,7 +8834,7 @@ TEST_F(MasterTest, OperationUpdateDuringFailover)
 
   driver.acceptOffers(
       {offer.id()},
-      {CREATE_VOLUME(rawDisk.get(), Resource::DiskInfo::Source::MOUNT)});
+      {CREATE_DISK(rawDisk.get(), Resource::DiskInfo::Source::MOUNT)});
 
   AWAIT_READY(operation);
 
@@ -8947,11 +8940,86 @@ TEST_F(MasterTest, OperationUpdateDuringFailover)
 }
 
 
+// Tests that the master correctly drops an operation if the operation's 'id'
+// field is set and the operation affects resources not managed by a resource
+// provider.
+TEST_F(MasterTest, DropOperationWithIDAffectingDefaultResources)
+{
+  Clock::pause();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  mesos::internal::slave::Flags slaveFlags = CreateSlaveFlags();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  // Advance the clock to trigger agent registration.
+  Clock::advance(slaveFlags.registration_backoff_factor);
+
+  // Start a v1 framework.
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+
+  v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_roles(0, DEFAULT_TEST_ROLE);
+
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(v1::scheduler::SendSubscribe(frameworkInfo));
+
+  Future<v1::scheduler::Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  // Ignore heartbeats.
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return());
+
+  Future<v1::scheduler::Event::Offers> offers;
+
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(v1::scheduler::DeclineOffers());
+
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid, ContentType::PROTOBUF, scheduler);
+
+  AWAIT_READY(subscribed);
+  v1::FrameworkID frameworkId(subscribed->framework_id());
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->offers().empty());
+
+  const v1::Offer& offer = offers->offers(0);
+
+  Future<v1::scheduler::Event::UpdateOperationStatus> operationErrorUpdate;
+  EXPECT_CALL(*scheduler, updateOperationStatus(_, _))
+    .WillOnce(FutureArg<1>(&operationErrorUpdate));
+
+  v1::Resource reserved = *(offer.resources().begin());
+  reserved.add_reservations()->CopyFrom(
+      v1::createDynamicReservationInfo(
+          frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
+
+  v1::OperationID operationId;
+  operationId.set_value("operation");
+
+  mesos.send(v1::createCallAccept(
+      frameworkId, offer, {v1::RESERVE(reserved, operationId.value())}));
+
+  // Wait for the framework to receive the OPERATION_ERROR update.
+  AWAIT_READY(operationErrorUpdate);
+
+  EXPECT_EQ(operationId, operationErrorUpdate->status().operation_id());
+  EXPECT_EQ(v1::OPERATION_ERROR, operationErrorUpdate->status().state());
+}
+
+
 class MasterTestPrePostReservationRefinement
   : public MasterTest,
     public WithParamInterface<bool> {
 public:
-  virtual master::Flags CreateMasterFlags()
+  master::Flags CreateMasterFlags() override
   {
     // Turn off periodic allocations to avoid the race between
     // `HierarchicalAllocator::updateAvailable()` and periodic allocations.

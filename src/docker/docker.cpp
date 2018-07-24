@@ -34,9 +34,17 @@
 #include <stout/os/read.hpp>
 #include <stout/os/write.hpp>
 
+#ifdef __WINDOWS__
+#include <stout/os/windows/jobobject.hpp>
+#endif // __WINDOWS__
+
 #include <process/check.hpp>
 #include <process/collect.hpp>
 #include <process/io.hpp>
+
+#ifdef __WINDOWS__
+#include <process/windows/jobobject.hpp>
+#endif // __WINDOWS__
 
 #include "common/status_utils.hpp"
 
@@ -56,7 +64,6 @@ using namespace mesos::internal::slave;
 
 using namespace process;
 
-using std::list;
 using std::map;
 using std::mutex;
 using std::pair;
@@ -160,6 +167,19 @@ void commandDiscarded(const Subprocess& s, const string& cmd)
 }
 
 
+vector<Subprocess::ParentHook> createParentHooks()
+{
+  return {
+#ifdef __WINDOWS__
+  // To correctly discard the docker cli process tree in `commandDiscarded`,
+  // we need to wrap the process in a job object.
+  Subprocess::ParentHook::CREATE_JOB(),
+  Subprocess::ParentHook(&os::set_job_kill_on_close_limit),
+#endif // __WINDOWS__
+  };
+}
+
+
 Future<Version> Docker::version() const
 {
   string cmd = path + " -H " + socket + " --version";
@@ -168,7 +188,10 @@ Future<Version> Docker::version() const
       cmd,
       Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
-      Subprocess::PIPE());
+      Subprocess::PIPE(),
+      None(),
+      None(),
+      createParentHooks());
 
   if (s.isError()) {
     return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
@@ -1144,7 +1167,10 @@ Future<Option<int>> Docker::run(
       Subprocess::PATH(os::DEV_NULL),
       _stdout,
       _stderr,
-      nullptr);
+      nullptr,
+      None(),
+      None(),
+      createParentHooks());
 
   if (s.isError()) {
     return Failure("Failed to create subprocess '" + path + "': " + s.error());
@@ -1187,7 +1213,10 @@ Future<Nothing> Docker::stop(
       cmd,
       Subprocess::PATH(os::DEV_NULL),
       Subprocess::PATH(os::DEV_NULL),
-      Subprocess::PIPE());
+      Subprocess::PIPE(),
+      None(),
+      None(),
+      createParentHooks());
 
   if (s.isError()) {
     return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
@@ -1242,7 +1271,10 @@ Future<Nothing> Docker::kill(
       cmd,
       Subprocess::PATH(os::DEV_NULL),
       Subprocess::PATH(os::DEV_NULL),
-      Subprocess::PIPE());
+      Subprocess::PIPE(),
+      None(),
+      None(),
+      createParentHooks());
 
   if (s.isError()) {
     return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
@@ -1267,7 +1299,10 @@ Future<Nothing> Docker::rm(
       cmd,
       Subprocess::PATH(os::DEV_NULL),
       Subprocess::PATH(os::DEV_NULL),
-      Subprocess::PIPE());
+      Subprocess::PIPE(),
+      None(),
+      None(),
+      createParentHooks());
 
   if (s.isError()) {
     return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
@@ -1315,7 +1350,10 @@ void Docker::_inspect(
       cmd,
       Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
-      Subprocess::PIPE());
+      Subprocess::PIPE(),
+      None(),
+      None(),
+      createParentHooks());
 
   if (s.isError()) {
     promise->fail("Failed to create subprocess '" + cmd + "': " + s.error());
@@ -1440,7 +1478,7 @@ void Docker::___inspect(
 }
 
 
-Future<list<Docker::Container>> Docker::ps(
+Future<vector<Docker::Container>> Docker::ps(
     bool all,
     const Option<string>& prefix) const
 {
@@ -1452,7 +1490,10 @@ Future<list<Docker::Container>> Docker::ps(
       cmd,
       Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
-      Subprocess::PIPE());
+      Subprocess::PIPE(),
+      None(),
+      None(),
+      createParentHooks());
 
   if (s.isError()) {
     return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
@@ -1468,7 +1509,7 @@ Future<list<Docker::Container>> Docker::ps(
 }
 
 
-Future<list<Docker::Container>> Docker::_ps(
+Future<vector<Docker::Container>> Docker::_ps(
     const Docker& docker,
     const string& cmd,
     const Subprocess& s,
@@ -1485,7 +1526,7 @@ Future<list<Docker::Container>> Docker::_ps(
     CHECK_SOME(s.err());
     return io::read(s.err().get())
       .then(lambda::bind(
-                failure<list<Docker::Container>>,
+                failure<vector<Docker::Container>>,
                 cmd,
                 status.get(),
                 lambda::_1));
@@ -1496,7 +1537,7 @@ Future<list<Docker::Container>> Docker::_ps(
 }
 
 
-Future<list<Docker::Container>> Docker::__ps(
+Future<vector<Docker::Container>> Docker::__ps(
     const Docker& docker,
     const Option<string>& prefix,
     const string& output)
@@ -1508,10 +1549,10 @@ Future<list<Docker::Container>> Docker::__ps(
   CHECK(!lines->empty());
   lines->erase(lines->begin());
 
-  Owned<list<Docker::Container>> containers(new list<Docker::Container>());
+  Owned<vector<Docker::Container>> containers(new vector<Docker::Container>());
 
-  Owned<Promise<list<Docker::Container>>> promise(
-    new Promise<list<Docker::Container>>());
+  Owned<Promise<vector<Docker::Container>>> promise(
+    new Promise<vector<Docker::Container>>());
 
   // Limit number of parallel calls to docker inspect at once to prevent
   // reaching system's open file descriptor limit.
@@ -1524,16 +1565,16 @@ Future<list<Docker::Container>> Docker::__ps(
 // TODO(chenlily): Generalize functionality into a concurrency limiter
 // within libprocess.
 void Docker::inspectBatches(
-    Owned<list<Docker::Container>> containers,
+    Owned<vector<Docker::Container>> containers,
     Owned<vector<string>> lines,
-    Owned<Promise<list<Docker::Container>>> promise,
+    Owned<Promise<vector<Docker::Container>>> promise,
     const Docker& docker,
     const Option<string>& prefix)
 {
-  list<Future<Docker::Container>> batch =
+  vector<Future<Docker::Container>> batch =
     createInspectBatch(lines, docker, prefix);
 
-  collect(batch).onAny([=](const Future<list<Docker::Container>>& c) {
+  collect(batch).onAny([=](const Future<vector<Docker::Container>>& c) {
     if (c.isReady()) {
       foreach (const Docker::Container& container, c.get()) {
         containers->push_back(container);
@@ -1556,12 +1597,12 @@ void Docker::inspectBatches(
 }
 
 
-list<Future<Docker::Container>> Docker::createInspectBatch(
+vector<Future<Docker::Container>> Docker::createInspectBatch(
     Owned<vector<string>> lines,
     const Docker& docker,
     const Option<string>& prefix)
 {
-  list<Future<Docker::Container>> batch;
+  vector<Future<Docker::Container>> batch;
 
   while (!lines->empty() && batch.size() < DOCKER_PS_MAX_INSPECT_CALLS) {
     string line = lines->back();
@@ -1623,7 +1664,10 @@ Future<Docker::Image> Docker::pull(
       Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE(),
-      nullptr);
+      nullptr,
+      None(),
+      None(),
+      createParentHooks());
 
   if (s.isError()) {
     return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
@@ -1767,10 +1811,12 @@ Future<Docker::Image> Docker::__pull(
       path,
       argv,
       Subprocess::PATH(os::DEV_NULL),
-      Subprocess::PIPE(),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       nullptr,
-      environment);
+      environment,
+      None(),
+      createParentHooks());
 
   if (s_.isError()) {
     return Failure("Failed to execute '" + cmd + "': " + s_.error());

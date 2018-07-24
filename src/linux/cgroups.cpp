@@ -35,7 +35,6 @@ extern "C" {
 #include <glog/logging.h>
 
 #include <fstream>
-#include <list>
 #include <map>
 #include <set>
 #include <sstream>
@@ -78,7 +77,6 @@ using std::dec;
 using std::getline;
 using std::ifstream;
 using std::istringstream;
-using std::list;
 using std::map;
 using std::ofstream;
 using std::ostream;
@@ -919,12 +917,25 @@ Try<string> read(
     const string& cgroup,
     const string& control)
 {
-  Option<Error> error = verify(hierarchy, cgroup, control);
-  if (error.isSome()) {
-    return error.get();
+  Try<string> read = internal::read(hierarchy, cgroup, control);
+
+  // It turns out that `verify()` is expensive, so rather than
+  // verifying *prior* to the read, as is currently done for other
+  // cgroup helpers, we only verify if the read fails. This ensures
+  // we still provide a good error message. See: MESOS-8418.
+  //
+  // TODO(bmahler): Longer term, verification should be done
+  // explicitly by the caller, or its performance should be
+  // improved, or verification could be done consistently
+  // post-failure, as done here.
+  if (read.isError()) {
+    Option<Error> error = verify(hierarchy, cgroup, control);
+    if (error.isSome()) {
+      return error.get();
+    }
   }
 
-  return internal::read(hierarchy, cgroup, control);
+  return read;
 }
 
 
@@ -1174,7 +1185,7 @@ public:
       args(_args),
       data(0) {}
 
-  virtual ~Listener() {}
+  ~Listener() override {}
 
   // Waits for the next event to occur, at which point the future
   // becomes ready. Returns a failure if error occurs. If any previous
@@ -1206,7 +1217,7 @@ public:
   }
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     // Register an eventfd "notifier" for the given control.
     Try<int> fd = registerNotifier(hierarchy, cgroup, control, args);
@@ -1218,7 +1229,7 @@ protected:
     }
   }
 
-  virtual void finalize()
+  void finalize() override
   {
     // Discard the nonblocking read.
     reading.discard();
@@ -1363,7 +1374,7 @@ public:
       cgroup(_cgroup),
       start(Clock::now()) {}
 
-  virtual ~Freezer() {}
+  ~Freezer() override {}
 
   void freeze()
   {
@@ -1427,7 +1438,7 @@ public:
   Future<Nothing> future() { return promise.future(); }
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     Option<Error> error = verify(hierarchy, cgroup, "freezer.state");
     if (error.isSome()) {
@@ -1441,7 +1452,7 @@ protected:
           static_cast<void(*)(const UPID&, bool)>(terminate), self(), true));
   }
 
-  virtual void finalize()
+  void finalize() override
   {
     promise.discard();
   }
@@ -1463,7 +1474,7 @@ public:
       hierarchy(_hierarchy),
       cgroup(_cgroup) {}
 
-  virtual ~TasksKiller() {}
+  ~TasksKiller() override {}
 
   // Return a future indicating the state of the killer.
   // Failure occurs if any process in the cgroup is unable to be
@@ -1471,7 +1482,7 @@ public:
   Future<Nothing> future() { return promise.future(); }
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     // Stop when no one cares.
     promise.future().onDiscard(lambda::bind(
@@ -1480,7 +1491,7 @@ protected:
     killTasks();
   }
 
-  virtual void finalize()
+  void finalize() override
   {
     chain.discard();
 
@@ -1555,13 +1566,13 @@ private:
     return cgroups::freezer::thaw(hierarchy, cgroup);
   }
 
-  Future<list<Option<int>>> reap()
+  Future<vector<Option<int>>> reap()
   {
     // Wait until we've reaped all processes.
     return collect(statuses);
   }
 
-  void finished(const Future<list<Option<int>>>& future)
+  void finished(const Future<vector<Option<int>>>& future)
   {
     if (future.isDiscarded()) {
       promise.fail("Unexpected discard of future");
@@ -1601,8 +1612,8 @@ private:
   const string hierarchy;
   const string cgroup;
   Promise<Nothing> promise;
-  list<Future<Option<int>>> statuses; // List of statuses for processes.
-  Future<list<Option<int>>> chain; // Used to discard all operations.
+  vector<Future<Option<int>>> statuses; // List of statuses for processes.
+  Future<vector<Option<int>>> chain; // Used to discard all operations.
 };
 
 
@@ -1615,14 +1626,14 @@ public:
       hierarchy(_hierarchy),
       cgroups(_cgroups) {}
 
-  virtual ~Destroyer() {}
+  ~Destroyer() override {}
 
   // Return a future indicating the state of the destroyer.
   // Failure occurs if any cgroup fails to be destroyed.
   Future<Nothing> future() { return promise.future(); }
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     // Stop when no one cares.
     promise.future().onDiscard(lambda::bind(
@@ -1641,14 +1652,14 @@ protected:
       .onAny(defer(self(), &Destroyer::killed, lambda::_1));
   }
 
-  virtual void finalize()
+  void finalize() override
   {
     discard(killers);
     promise.discard();
   }
 
 private:
-  void killed(const Future<list<Nothing>>& kill)
+  void killed(const Future<vector<Nothing>>& kill)
   {
     if (kill.isReady()) {
       remove();
@@ -1688,7 +1699,7 @@ private:
   Promise<Nothing> promise;
 
   // The killer processes used to atomically kill tasks in each cgroup.
-  list<Future<Nothing>> killers;
+  vector<Future<Nothing>> killers;
 };
 
 } // namespace internal {
@@ -2683,7 +2694,7 @@ public:
           "memory.pressure_level",
           stringify(level))) {}
 
-  virtual ~CounterProcess() {}
+  ~CounterProcess() override {}
 
   Future<uint64_t> value()
   {
@@ -2695,13 +2706,13 @@ public:
   }
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     spawn(CHECK_NOTNULL(process.get()));
     listen();
   }
 
-  virtual void finalize()
+  void finalize() override
   {
     terminate(process.get());
     wait(process.get());

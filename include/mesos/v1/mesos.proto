@@ -985,6 +985,10 @@ message AgentInfo {
       //
       // (2) The ability to provide operation feedback.
       RESOURCE_PROVIDER = 4;
+
+      // This expresses the capability for the agent to handle persistent volume
+      // resize operations safely. This capability is turned on by default.
+      RESIZE_VOLUME = 5;
     }
 
     // Enum fields should be optional, see: MESOS-4997.
@@ -1911,10 +1915,10 @@ message Offer {
       UNRESERVE = 3;
       CREATE = 4;
       DESTROY = 5;
-      CREATE_VOLUME = 7;  // EXPERIMENTAL.
-      DESTROY_VOLUME = 8; // EXPERIMENTAL.
-      CREATE_BLOCK = 9;   // EXPERIMENTAL.
-      DESTROY_BLOCK = 10; // EXPERIMENTAL.
+      GROW_VOLUME = 11;   // EXPERIMENTAL.
+      SHRINK_VOLUME = 12; // EXPERIMENTAL.
+      CREATE_DISK = 13;   // EXPERIMENTAL.
+      DESTROY_DISK = 14;  // EXPERIMENTAL.
     }
 
     // TODO(vinod): Deprecate this in favor of `LaunchGroup` below.
@@ -1951,30 +1955,43 @@ message Offer {
       repeated Resource volumes = 1;
     }
 
+    // Grow a volume by an additional disk resource.
+    // NOTE: This is currently experimental and only for persistent volumes
+    // created on ROOT/PATH disk.
+    message GrowVolume {
+      required Resource volume = 1;
+      required Resource addition = 2;
+    }
+
+    // Shrink a volume by the size specified in the `subtract` field.
+    // NOTE: This is currently experimental and only for persistent volumes
+    // created on ROOT/PATH disk.
+    message ShrinkVolume {
+      required Resource volume = 1;
+
+      // See comments in `Value.Scalar` for maximum precision supported.
+      required Value.Scalar subtract = 2;
+    }
+
+    // Create a `MOUNT` or `BLOCK` disk resource from a `RAW` disk resource.
     // NOTE: For the time being, this API is subject to change and the related
     // feature is experimental.
-    message CreateVolume {
+    message CreateDisk {
       required Resource source = 1;
+
+      // NOTE: Only `MOUNT` or `BLOCK` is allowed in the `target_type` field.
       required Resource.DiskInfo.Source.Type target_type = 2;
     }
 
+    // Destroy a `MOUNT` or `BLOCK` disk resource. This will result in a `RAW`
+    // disk resource.
     // NOTE: For the time being, this API is subject to change and the related
     // feature is experimental.
-    message DestroyVolume {
-      required Resource volume = 1;
-    }
-
-    // NOTE: For the time being, this API is subject to change and the related
-    // feature is experimental.
-    message CreateBlock {
+    message DestroyDisk {
+      // NOTE: Only a `MOUNT` or `BLOCK` disk is allowed in the `source` field.
       required Resource source = 1;
     }
 
-    // NOTE: For the time being, this API is subject to change and the related
-    // feature is experimental.
-    message DestroyBlock {
-      required Resource block = 1;
-    }
 
     optional Type type = 1;
 
@@ -1989,10 +2006,10 @@ message Offer {
     optional Unreserve unreserve = 4;
     optional Create create = 5;
     optional Destroy destroy = 6;
-    optional CreateVolume create_volume = 8;
-    optional DestroyVolume destroy_volume = 9;
-    optional CreateBlock create_block = 10;
-    optional DestroyBlock destroy_block = 11;
+    optional GrowVolume grow_volume = 13; // EXPERIMENTAL.
+    optional ShrinkVolume shrink_volume = 14; // EXPERIMENTAL.
+    optional CreateDisk create_disk = 15; // EXPERIMENTAL.
+    optional DestroyDisk destroy_disk = 16; // EXPERIMENTAL.
   }
 }
 
@@ -2103,6 +2120,14 @@ message TaskInfo {
   // to use this information as needed and to handle tasks without
   // service discovery information.
   optional DiscoveryInfo discovery = 11;
+
+  // Maximum duration for task completion. If the task is non-terminal at the
+  // end of this duration, it will fail with the reason
+  // `REASON_MAX_COMPLETION_TIME_REACHED`. Mesos supports this field for
+  // executor-less tasks, and tasks that use Docker or default executors.
+  // It is the executor's responsibility to implement this, so it might not be
+  // supported by all custom executors.
+  optional DurationInfo max_completion_time = 14;
 }
 
 
@@ -2435,6 +2460,7 @@ message TaskStatus {
     REASON_CONTAINER_LIMITATION_MEMORY = 8;
     REASON_CONTAINER_PREEMPTED = 17;
     REASON_CONTAINER_UPDATE_FAILED = 22;
+    REASON_MAX_COMPLETION_TIME_REACHED = 33;
     REASON_EXECUTOR_REGISTRATION_TIMEOUT = 23;
     REASON_EXECUTOR_REREGISTRATION_TIMEOUT = 24;
     REASON_EXECUTOR_TERMINATED = 1;

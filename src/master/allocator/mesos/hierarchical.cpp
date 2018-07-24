@@ -58,7 +58,6 @@ using process::Owned;
 using process::PID;
 using process::Timeout;
 
-using mesos::internal::protobuf::framework::Capabilities;
 
 namespace mesos {
 namespace internal {
@@ -81,7 +80,7 @@ class RefusedOfferFilter : public OfferFilter
 public:
   RefusedOfferFilter(const Resources& _resources) : resources(_resources) {}
 
-  virtual bool filter(const Resources& _resources) const
+  bool filter(const Resources& _resources) const override
   {
     // TODO(jieyu): Consider separating the superset check for regular
     // and revocable resources. For example, frameworks might want
@@ -122,7 +121,7 @@ public:
   RefusedInverseOfferFilter(const Timeout& _timeout)
     : timeout(_timeout) {}
 
-  virtual bool filter() const
+  bool filter() const override
   {
     // See comment above why we currently don't do more fine-grained filtering.
     return timeout.remaining() > Seconds(0);
@@ -155,7 +154,8 @@ void HierarchicalAllocatorProcess::initialize(
       _inverseOfferCallback,
     const Option<set<string>>& _fairnessExcludeResourceNames,
     bool _filterGpuResources,
-    const Option<DomainInfo>& _domain)
+    const Option<DomainInfo>& _domain,
+    const Option<std::vector<Resources>>& _minAllocatableResources)
 {
   allocationInterval = _allocationInterval;
   offerCallback = _offerCallback;
@@ -163,6 +163,7 @@ void HierarchicalAllocatorProcess::initialize(
   fairnessExcludeResourceNames = _fairnessExcludeResourceNames;
   filterGpuResources = _filterGpuResources;
   domain = _domain;
+  minAllocatableResources = _minAllocatableResources;
   initialized = true;
   paused = false;
 
@@ -506,15 +507,15 @@ void HierarchicalAllocatorProcess::addSlave(
   CHECK_EQ(slaveId, slaveInfo.id());
   CHECK(!paused || expectedAgentCount.isSome());
 
-  slaves[slaveId] = Slave();
+  slaves.insert({slaveId,
+                 Slave(
+                     slaveInfo,
+                     protobuf::slave::Capabilities(capabilities),
+                     true,
+                     total,
+                     Resources::sum(used))});
 
   Slave& slave = slaves.at(slaveId);
-
-  slave.total = total;
-  slave.allocated = Resources::sum(used);
-  slave.activated = true;
-  slave.info = slaveInfo;
-  slave.capabilities = protobuf::slave::Capabilities(capabilities);
 
   // NOTE: We currently implement maintenance in the allocator to be able to
   // leverage state and features such as the FrameworkSorter and OfferFilter.
@@ -572,8 +573,8 @@ void HierarchicalAllocatorProcess::addSlave(
   }
 
   LOG(INFO) << "Added agent " << slaveId << " (" << slave.info.hostname() << ")"
-            << " with " << slave.total
-            << " (allocated: " << slave.allocated << ")";
+            << " with " << slave.getTotal()
+            << " (allocated: " << slave.getAllocated() << ")";
 
   allocate(slaveId);
 }
@@ -591,12 +592,13 @@ void HierarchicalAllocatorProcess::removeSlave(
   // all the resources. Fixing this would require more information
   // than what we currently track in the allocator.
 
-  roleSorter->remove(slaveId, slaves.at(slaveId).total);
+  roleSorter->remove(slaveId, slaves.at(slaveId).getTotal());
 
   // See comment at `quotaRoleSorter` declaration regarding non-revocable.
-  quotaRoleSorter->remove(slaveId, slaves.at(slaveId).total.nonRevocable());
+  quotaRoleSorter->remove(
+      slaveId, slaves.at(slaveId).getTotal().nonRevocable());
 
-  untrackReservations(slaves.at(slaveId).total.reservations());
+  untrackReservations(slaves.at(slaveId).getTotal().reservations());
 
   slaves.erase(slaveId);
   allocationCandidates.erase(slaveId);
@@ -706,8 +708,8 @@ void HierarchicalAllocatorProcess::addResourceProvider(
   }
 
   Slave& slave = slaves.at(slaveId);
-  updateSlaveTotal(slaveId, slave.total + total);
-  slave.allocated += Resources::sum(used);
+  updateSlaveTotal(slaveId, slave.getTotal() + total);
+  slave.allocate(Resources::sum(used));
 
   VLOG(1)
     << "Grew agent " << slaveId << " by "
@@ -844,8 +846,8 @@ void HierarchicalAllocatorProcess::updateAllocation(
   const Resources& updatedOfferedResources = _updatedOfferedResources.get();
 
   // Update the per-slave allocation.
-  slave.allocated -= offeredResources;
-  slave.allocated += updatedOfferedResources;
+  slave.unallocate(offeredResources);
+  slave.allocate(updatedOfferedResources);
 
   // Update the allocation in the framework sorter.
   frameworkSorter->update(
@@ -881,6 +883,7 @@ void HierarchicalAllocatorProcess::updateAllocation(
   // We strip `AllocationInfo` from conversions in order to apply them
   // successfully, since agent's total is stored as unallocated resources.
   vector<ResourceConversion> strippedConversions;
+  Resources removedResources;
   foreach (const ResourceConversion& conversion, conversions) {
     // TODO(jieyu): Ideally, we should make sure agent's total
     // resources are consistent with agent's allocation in terms of
@@ -895,6 +898,12 @@ void HierarchicalAllocatorProcess::updateAllocation(
       continue;
     }
 
+    // NOTE: For now, a resource conversion must either not change the resource
+    // quantities, or completely remove the consumed resources. See MESOS-8825.
+    if (conversion.converted.empty()) {
+      removedResources += conversion.consumed;
+    }
+
     Resources consumed = conversion.consumed;
     Resources converted = conversion.converted;
 
@@ -904,7 +913,7 @@ void HierarchicalAllocatorProcess::updateAllocation(
     strippedConversions.emplace_back(consumed, converted);
   }
 
-  Try<Resources> updatedTotal = slave.total.apply(strippedConversions);
+  Try<Resources> updatedTotal = slave.getTotal().apply(strippedConversions);
   CHECK_SOME(updatedTotal);
 
   updateSlaveTotal(slaveId, updatedTotal.get());
@@ -913,14 +922,20 @@ void HierarchicalAllocatorProcess::updateAllocation(
   frameworkSorter->remove(slaveId, offeredResources);
   frameworkSorter->add(slaveId, updatedOfferedResources);
 
-  // Check that the unreserved quantities for framework allocations
-  // have not changed by the above resource conversions.
   const Resources updatedFrameworkAllocation =
     frameworkSorter->allocation(frameworkId.value(), slaveId);
 
+  // Check that the changed quantities af the framework's allocation is exactly
+  // the same as the resources removed by the resource conversions.
+  //
+  // TODO(chhsiao): Revisit this constraint if we want to support other type of
+  // resource conversions. See MESOS-9015.
+  const Resources removedAllocationQuantities =
+    frameworkAllocation.createStrippedScalarQuantity() -
+    updatedFrameworkAllocation.createStrippedScalarQuantity();
   CHECK_EQ(
-      frameworkAllocation.toUnreserved().createStrippedScalarQuantity(),
-      updatedFrameworkAllocation.toUnreserved().createStrippedScalarQuantity());
+      removedAllocationQuantities,
+      removedResources.createStrippedScalarQuantity());
 
   LOG(INFO) << "Updated allocation of framework " << frameworkId
             << " on agent " << slaveId
@@ -955,7 +970,7 @@ Future<Nothing> HierarchicalAllocatorProcess::updateAvailable(
   //                \___/ \___/
   //
   //   where A = allocate, R = reserve, U = updateAvailable
-  Try<Resources> updatedAvailable = slave.available().apply(operations);
+  Try<Resources> updatedAvailable = slave.getAvailable().apply(operations);
   if (updatedAvailable.isError()) {
     VLOG(1) << "Failed to update available resources on agent " << slaveId
             << ": " << updatedAvailable.error();
@@ -963,7 +978,7 @@ Future<Nothing> HierarchicalAllocatorProcess::updateAvailable(
   }
 
   // Update the total resources.
-  Try<Resources> updatedTotal = slave.total.apply(operations);
+  Try<Resources> updatedTotal = slave.getTotal().apply(operations);
   CHECK_SOME(updatedTotal);
 
   // Update the total resources in the allocator and role and quota sorters.
@@ -1020,7 +1035,9 @@ void HierarchicalAllocatorProcess::updateInverseOffer(
   Framework& framework = frameworks.at(frameworkId);
   Slave& slave = slaves.at(slaveId);
 
-  CHECK(slave.maintenance.isSome());
+  CHECK(slave.maintenance.isSome())
+    << "Agent " << slaveId
+    << " (" << slave.info.hostname() << ") should have maintenance scheduled";
 
   // NOTE: We currently implement maintenance in the allocator to be able to
   // leverage state and features such as the FrameworkSorter and OfferFilter.
@@ -1184,14 +1201,14 @@ void HierarchicalAllocatorProcess::recoverResources(
   if (slaves.contains(slaveId)) {
     Slave& slave = slaves.at(slaveId);
 
-    CHECK(slave.allocated.contains(resources))
-      << slave.allocated << " does not contain " << resources;
+    CHECK(slave.getAllocated().contains(resources))
+      << slave.getAllocated() << " does not contain " << resources;
 
-    slave.allocated -= resources;
+    slave.unallocate(resources);
 
     VLOG(1) << "Recovered " << resources
-            << " (total: " << slave.total
-            << ", allocated: " << slave.allocated << ")"
+            << " (total: " << slave.getTotal()
+            << ", allocated: " << slave.getAllocated() << ")"
             << " on agent " << slaveId
             << " from framework " << frameworkId;
   }
@@ -1567,11 +1584,7 @@ void HierarchicalAllocatorProcess::__allocate()
   // NOTE: Revocable resources are excluded in `quotaRoleSorter`.
   auto getQuotaRoleAllocatedScalarQuantities = [this](const string& role) {
     CHECK(quotas.contains(role));
-
-    // NOTE: `allocationScalarQuantities` omits dynamic reservation,
-    // persistent volume info, and allocation info. We additionally
-    // remove the static reservations here via `toUnreserved()`.
-    return quotaRoleSorter->allocationScalarQuantities(role).toUnreserved();
+    return quotaRoleSorter->allocationScalarQuantities(role);
   };
 
   // Returns the result of shrinking the provided resources down to the
@@ -1659,10 +1672,8 @@ void HierarchicalAllocatorProcess::__allocate()
       quotaRoleSorter->allocation(role);
 
     foreachvalue (const Resources& resources, allocations) {
-      // We need to remove the static reservation metadata here via
-      // `toUnreserved()`.
       rolesConsumedQuotaScalarQuantites[role] -=
-        resources.reserved().createStrippedScalarQuantity().toUnreserved();
+        resources.reserved().createStrippedScalarQuantity();
     }
   }
 
@@ -1697,20 +1708,11 @@ void HierarchicalAllocatorProcess::__allocate()
   //                        allocated resources -
   //                        unallocated reservations -
   //                        unallocated revocable resources
-
-  // NOTE: `totalScalarQuantities` omits dynamic reservation,
-  // persistent volume info, and allocation info. We additionally
-  // remove the static reservations here via `toUnreserved()`.
-  Resources availableHeadroom =
-    roleSorter->totalScalarQuantities().toUnreserved();
+  Resources availableHeadroom = roleSorter->totalScalarQuantities();
 
   // Subtract allocated resources from the total.
   foreachkey (const string& role, roles) {
-    // NOTE: `totalScalarQuantities` omits dynamic reservation,
-    // persistent volume info, and allocation info. We additionally
-    // remove the static reservations here via `toUnreserved()`.
-    availableHeadroom -=
-      roleSorter->allocationScalarQuantities(role).toUnreserved();
+    availableHeadroom -= roleSorter->allocationScalarQuantities(role);
   }
 
   // Calculate total allocated reservations. Note that we need to ensure
@@ -1728,11 +1730,8 @@ void HierarchicalAllocatorProcess::__allocate()
     }
 
     foreachvalue (const Resources& resources, allocations) {
-      // NOTE: `totalScalarQuantities` omits dynamic reservation,
-      // persistent volume info, and allocation info. We additionally
-      // remove the static reservations here via `toUnreserved()`.
       totalAllocatedReservationScalarQuantities +=
-        resources.reserved().createStrippedScalarQuantity().toUnreserved();
+        resources.reserved().createStrippedScalarQuantity();
     }
   }
 
@@ -1743,11 +1742,8 @@ void HierarchicalAllocatorProcess::__allocate()
 
   // Subtract revocable resources.
   foreachvalue (const Slave& slave, slaves) {
-    // NOTE: `totalScalarQuantities` omits dynamic reservation,
-    // persistent volume info, and allocation info. We additionally
-    // remove the static reservations here via `toUnreserved()`.
-    availableHeadroom -= slave.available().revocable()
-      .createStrippedScalarQuantity().toUnreserved();
+    availableHeadroom -=
+      slave.getAvailable().revocable().createStrippedScalarQuantity();
   }
 
   // Due to the two stages in the allocation algorithm and the nature of
@@ -1803,32 +1799,21 @@ void HierarchicalAllocatorProcess::__allocate()
 
         Slave& slave = slaves.at(slaveId);
 
-        // Only offer resources from slaves that have GPUs to
-        // frameworks that are capable of receiving GPUs.
-        // See MESOS-5634.
-        if (filterGpuResources &&
-            !framework.capabilities.gpuResources &&
-            slave.total.gpus().getOrElse(0) > 0) {
-          continue;
-        }
-
-        // If this framework is not region-aware, don't offer it
-        // resources on agents in remote regions.
-        if (!framework.capabilities.regionAware && isRemoteSlave(slave)) {
+        if (!isCapableOfReceivingAgent(framework.capabilities, slave)) {
           continue;
         }
 
         // Calculate the currently available resources on the slave, which
         // is the difference in non-shared resources between total and
         // allocated, plus all shared resources on the agent (if applicable).
-        Resources available = slave.available().nonShared();
+        Resources available = slave.getAvailable().nonShared();
 
         // Since shared resources are offerable even when they are in use, we
         // make one copy of the shared resources available regardless of the
         // past allocations. Offer a shared resource only if it has not been
         // offered in this offer cycle to a framework.
         if (framework.capabilities.sharedResources) {
-          available += slave.total.shared();
+          available += slave.getTotal().shared();
           if (offeredSharedResources.contains(slaveId)) {
             available -= offeredSharedResources[slaveId];
           }
@@ -2010,7 +1995,7 @@ void HierarchicalAllocatorProcess::__allocate()
         // in the cluster.
         availableHeadroom -= allocatedUnreserved;
 
-        slave.allocated += toAllocate;
+        slave.allocate(toAllocate);
 
         trackAllocatedResources(slaveId, frameworkId, toAllocate);
       }
@@ -2047,32 +2032,21 @@ void HierarchicalAllocatorProcess::__allocate()
         const Framework& framework = frameworks.at(frameworkId);
         Slave& slave = slaves.at(slaveId);
 
-        // Only offer resources from slaves that have GPUs to
-        // frameworks that are capable of receiving GPUs.
-        // See MESOS-5634.
-        if (filterGpuResources &&
-            !framework.capabilities.gpuResources &&
-            slave.total.gpus().getOrElse(0) > 0) {
-          continue;
-        }
-
-        // If this framework is not region-aware, don't offer it
-        // resources on agents in remote regions.
-        if (!framework.capabilities.regionAware && isRemoteSlave(slave)) {
+        if (!isCapableOfReceivingAgent(framework.capabilities, slave)) {
           continue;
         }
 
         // Calculate the currently available resources on the slave, which
         // is the difference in non-shared resources between total and
         // allocated, plus all shared resources on the agent (if applicable).
-        Resources available = slave.available().nonShared();
+        Resources available = slave.getAvailable().nonShared();
 
         // Since shared resources are offerable even when they are in use, we
         // make one copy of the shared resources available regardless of the
         // past allocations. Offer a shared resource only if it has not been
         // offered in this offer cycle to a framework.
         if (framework.capabilities.sharedResources) {
-          available += slave.total.shared();
+          available += slave.getTotal().shared();
           if (offeredSharedResources.contains(slaveId)) {
             available -= offeredSharedResources[slaveId];
           }
@@ -2163,7 +2137,7 @@ void HierarchicalAllocatorProcess::__allocate()
             headroomToAllocate.createStrippedScalarQuantity();
         }
 
-        slave.allocated += toAllocate;
+        slave.allocate(toAllocate);
 
         trackAllocatedResources(slaveId, frameworkId, toAllocate);
       }
@@ -2468,14 +2442,22 @@ bool HierarchicalAllocatorProcess::isFiltered(
 }
 
 
-bool HierarchicalAllocatorProcess::allocatable(
-    const Resources& resources)
+bool HierarchicalAllocatorProcess::allocatable(const Resources& resources)
 {
-  Option<double> cpus = resources.cpus();
-  Option<Bytes> mem = resources.mem();
+  if (minAllocatableResources.isNone() ||
+      CHECK_NOTNONE(minAllocatableResources).empty()) {
+    return true;
+  }
 
-  return (cpus.isSome() && cpus.get() >= MIN_CPUS) ||
-         (mem.isSome() && mem.get() >= MIN_MEM);
+  Resources quantity = resources.createStrippedScalarQuantity();
+  foreach (
+      const Resources& minResources, CHECK_NOTNONE(minAllocatableResources)) {
+    if (quantity.contains(minResources)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 
@@ -2486,7 +2468,7 @@ double HierarchicalAllocatorProcess::_resources_offered_or_allocated(
 
   foreachvalue (const Slave& slave, slaves) {
     Option<Value::Scalar> value =
-      slave.allocated.get<Value::Scalar>(resource);
+      slave.getAllocated().get<Value::Scalar>(resource);
 
     if (value.isSome()) {
       offered_or_allocated += value->value();
@@ -2512,8 +2494,14 @@ double HierarchicalAllocatorProcess::_quota_allocated(
     const string& role,
     const string& resource)
 {
+  if (!roleSorter->contains(role)) {
+    // This can occur when execution of this callback races with removal of the
+    // metric for a role which does not have any associated frameworks.
+    return 0.;
+  }
+
   Option<Value::Scalar> used =
-    quotaRoleSorter->allocationScalarQuantities(role)
+    roleSorter->allocationScalarQuantities(role)
       .get<Value::Scalar>(resource);
 
   return used.isSome() ? used->value() : 0;
@@ -2617,9 +2605,8 @@ void HierarchicalAllocatorProcess::trackReservations(
 {
   foreachpair (const string& role,
                const Resources& resources, reservations) {
-    // We remove the static reservation metadata here via `toUnreserved()`.
     const Resources scalarQuantitesToTrack =
-        resources.createStrippedScalarQuantity().toUnreserved();
+      resources.createStrippedScalarQuantity();
 
     reservationScalarQuantities[role] += scalarQuantitesToTrack;
   }
@@ -2635,9 +2622,8 @@ void HierarchicalAllocatorProcess::untrackReservations(
     Resources& currentReservationQuantity =
         reservationScalarQuantities.at(role);
 
-    // We remove the static reservation metadata here via `toUnreserved()`.
     const Resources scalarQuantitesToUntrack =
-        resources.createStrippedScalarQuantity().toUnreserved();
+      resources.createStrippedScalarQuantity();
     CHECK(currentReservationQuantity.contains(scalarQuantitesToUntrack));
     currentReservationQuantity -= scalarQuantitesToUntrack;
 
@@ -2656,13 +2642,13 @@ bool HierarchicalAllocatorProcess::updateSlaveTotal(
 
   Slave& slave = slaves.at(slaveId);
 
-  const Resources oldTotal = slave.total;
+  const Resources oldTotal = slave.getTotal();
 
   if (oldTotal == total) {
     return false;
   }
 
-  slave.total = total;
+  slave.updateTotal(total);
 
   hashmap<std::string, Resources> oldReservations = oldTotal.reservations();
   hashmap<std::string, Resources> newReservations = total.reservations();
@@ -2719,6 +2705,28 @@ bool HierarchicalAllocatorProcess::isRemoteSlave(const Slave& slave) const
     slave.info.domain().fault_domain().region();
 
   return masterRegion != slaveRegion;
+}
+
+
+bool HierarchicalAllocatorProcess::isCapableOfReceivingAgent(
+    const protobuf::framework::Capabilities& frameworkCapabilities,
+    const Slave& slave) const
+{
+  // Only offer resources from slaves that have GPUs to
+  // frameworks that are capable of receiving GPUs.
+  // See MESOS-5634.
+  if (filterGpuResources && !frameworkCapabilities.gpuResources &&
+      slave.getTotal().gpus().getOrElse(0) > 0) {
+    return false;
+  }
+
+  // If this framework is not region-aware, don't offer it
+  // resources on agents in remote regions.
+  if (!frameworkCapabilities.regionAware && isRemoteSlave(slave)) {
+    return false;
+  }
+
+  return true;
 }
 
 
@@ -2793,6 +2801,7 @@ void HierarchicalAllocatorProcess::untrackAllocatedResources(
     }
   }
 }
+
 
 } // namespace internal {
 } // namespace allocator {

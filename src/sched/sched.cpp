@@ -61,7 +61,7 @@
 #include <process/process.hpp>
 #include <process/protobuf.hpp>
 
-#include <process/metrics/gauge.hpp>
+#include <process/metrics/pull_gauge.hpp>
 #include <process/metrics/metrics.hpp>
 
 #include <stout/abort.hpp>
@@ -232,13 +232,13 @@ public:
     LOG(INFO) << "Version: " << MESOS_VERSION;
   }
 
-  virtual ~SchedulerProcess()
+  ~SchedulerProcess() override
   {
     delete authenticatee;
   }
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     install<Event>(&SchedulerProcess::receive);
 
@@ -1342,6 +1342,12 @@ protected:
 
     // Setting accept.operations.
     foreach (const Offer::Operation& _operation, operations) {
+      if (_operation.has_id()) {
+        ABORT("An offer operation's 'id' field was set, which is disallowed"
+              " because the SchedulerDriver cannot handle offer operation"
+              " status updates");
+      }
+
       Offer::Operation* operation = accept->add_operations();
       operation->CopyFrom(_operation);
     }
@@ -1611,8 +1617,8 @@ private:
     }
 
     // Process metrics.
-    process::metrics::Gauge event_queue_messages;
-    process::metrics::Gauge event_queue_dispatches;
+    process::metrics::PullGauge event_queue_messages;
+    process::metrics::PullGauge event_queue_dispatches;
   } metrics;
 
   double _event_queue_messages()

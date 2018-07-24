@@ -106,7 +106,7 @@ TEST(CniSpecTest, GenerateResolverConfig)
 class CniIsolatorTest : public MesosTest
 {
 public:
-  virtual void SetUp()
+  void SetUp() override
   {
     MesosTest::SetUp();
 
@@ -505,6 +505,33 @@ TEST_F(CniIsolatorTest, ROOT_FailedPlugin)
 // kill the task and then verify we can receive TASK_KILLED for the task.
 TEST_F(CniIsolatorTest, ROOT_SlaveRecovery)
 {
+  // This file will be touched when CNI delete is called.
+  const string cniDeleteSignalFile = path::join(sandbox.get(), "delete");
+
+  Try<net::IP::Network> hostNetwork = getNonLoopbackIP();
+  ASSERT_SOME(hostNetwork);
+
+  Try<string> mockPlugin = strings::format(
+      R"~(
+      #!/bin/sh
+      if [ x$CNI_COMMAND = xADD ]; then
+        echo '{'
+        echo '  "ip4": {'
+        echo '    "ip": "%s/%d"'
+        echo '  }'
+        echo '}'
+      else
+        touch %s
+      fi
+      )~",
+      hostNetwork->address(),
+      hostNetwork->prefix(),
+      cniDeleteSignalFile);
+
+  ASSERT_SOME(mockPlugin);
+
+  ASSERT_SOME(setupMockPlugin(mockPlugin.get()));
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -591,9 +618,23 @@ TEST_F(CniIsolatorTest, ROOT_SlaveRecovery)
   // Stop the slave after TASK_RUNNING is received.
   slave.get()->terminate();
 
+  Future<ReregisterExecutorMessage> reregisterExecutorMessage =
+    FUTURE_PROTOBUF(ReregisterExecutorMessage(), _, _);
+
   // Restart the slave.
   slave = StartSlave(detector.get(), flags);
   ASSERT_SOME(slave);
+
+  AWAIT_READY(reregisterExecutorMessage);
+
+  Clock::pause();
+  Clock::advance(flags.executor_reregistration_timeout);
+  Clock::settle();
+  Clock::resume();
+
+  // NOTE: CNI DEL command should not be called. This is used to
+  // capture the regression described in MESOS-9025.
+  ASSERT_FALSE(os::exists(cniDeleteSignalFile));
 
   // Kill the task.
   driver.killTask(task.task_id());
@@ -1419,7 +1460,7 @@ class DefaultExecutorCniTest
     public WithParamInterface<NetworkParam>
 {
 protected:
-  slave::Flags CreateSlaveFlags()
+  slave::Flags CreateSlaveFlags() override
   {
     slave::Flags flags = CniIsolatorTest::CreateSlaveFlags();
 
@@ -1586,7 +1627,7 @@ class NestedContainerCniTest
     public WithParamInterface<bool>
 {
 protected:
-  slave::Flags CreateSlaveFlags()
+  slave::Flags CreateSlaveFlags() override
   {
     slave::Flags flags = CniIsolatorTest::CreateSlaveFlags();
 
@@ -1745,7 +1786,7 @@ TEST_P(NestedContainerCniTest, ROOT_INTERNET_CURL_VerifyContainerHostname)
 class CniIsolatorPortMapperTest : public CniIsolatorTest
 {
 public:
-  virtual void SetUp()
+  void SetUp() override
   {
     CniIsolatorTest::SetUp();
 
@@ -1776,7 +1817,7 @@ public:
     ASSERT_SOME(write);
   }
 
-  virtual void TearDown()
+  void TearDown() override
   {
     // This is a best effort cleanup of the
     // `MESOS_TEST_PORT_MAPPER_CHAIN`. We shouldn't fail and bail on

@@ -191,6 +191,14 @@
   jira_user: bernd-mesos
   reviewboard_user: bernd-mesos
 
+- name: Bin Zheng
+  affilitations:
+    - {organization: China Unicom}
+  emails:
+    - zhengbin@chinaunicom.cn
+  jira_user: netrahat
+  reviewboard_user: netrahat
+
 - name: Bruce Merry
   affiliations:
     - {organization: SKA South Africa}
@@ -198,6 +206,14 @@
     - bmerry@ska.ac.za
   jira_user: bmerry
   reviewboard_user: bmerry
+
+- name: Cai ShuHua
+  affiliations:
+    - {organization: asiainfo}
+  emails:
+    - caishuhua916@163.com
+  jira_user: caishuhua916
+  reviewboard_user: caishuhua916
 
 - name: Charles Allen
   affiliations:
@@ -207,6 +223,14 @@
     - charles.allen@metamarkets.com
   jira_user: drcrallen
   reviewboard_user: drcrallen
+
+- name: Chen Runcong
+  affiliations:
+    - {organization: Asiainfo}
+  emails:
+    - chenruncong@163.com
+  jira_user: chenrc
+  reviewboard_user: chenrc
 
 - name: Chun-Hung Hsiao
   affiliations:
@@ -232,6 +256,14 @@
     - dpravat@outlook.com
   jira_user: dpravat
   reviewboard_user: dpravat
+
+- name: DaoTan Cui
+   affiliations:
+    - {organization: Asiainfo}
+   emails:
+    - cuidt@outlook.com
+   jira_user: cuidt
+   reviewboard_user: dtcui
 
 - name: Dario Rexin
   affiliations:
@@ -522,6 +554,15 @@
   jira_user: klueska
   reviewboard_user: klueska
 
+- name: Kjetil Joergensen
+  affiliations:
+    - {organization: Medallia Inc.}
+  emails:
+    - kjetijor@gmail.com
+    - kjetil@medallia.com
+  jira_user: kjetijor
+  reviewboard_user: kjetijor
+
 - name: Klaus Ma
   affiliations:
     - {organization: IBM}
@@ -558,6 +599,14 @@
     - lily@mesosphere.io
   jira_user: chenlily
   reviewboard_user: chenlily
+
+- name: LongFei Niu
+  affiliations:
+    - {organization: China Unicom}
+  emails:
+    - niulf5@chinaunicom.cn
+  jira_user: smush618
+  reviewboard_user: smush618
 
 - name: M Lawindi
   affiliations:
@@ -762,6 +811,14 @@
   jira_user: wrouesnel
   reviewboard_user: wrouesnel
 
+- name: Xiang Chaosheng
+  affiliations:
+    - {organization: ChinaUnicom}
+  emails:
+    - xiangcs@chinaunicom.cn
+  jira_user: zhanrox
+  reviewboard_user: zhanrox
+
 - name: Xiao Deshi
   affiliations:
     - {organization: Dataman}
@@ -770,6 +827,23 @@
   jira_user: xds2000
   reviewboard_user: xds2000
 
+- name: Xiao Wei
+  affiliations:
+    - {organization: ChinaUnicom}
+  emails:
+    - xiaow10@chinaunicom.cn
+  jira_user: xiaowei-cuc
+  reviewboard_user: xiaowei-cuc
+
+- name: Xudong Ni
+  affiliations:
+    - {organization: Apple}
+  emails:
+    - xd_ni@yahoo.com
+    - xudong_ni@apple.com
+  jira_user: fiu
+  reviewboard_user: fiu
+
 - name: Yanyan Hu
   affiliations:
     - {organization: IBM}
@@ -777,6 +851,14 @@
     - yanyanhu@cn.ibm.com
   jira_user: yanyanhu
   reviewboard_user: yanyanhu
+
+- name: Yihua He
+  affiliations:
+    - {organization: ASIAINFO}
+  emails:
+    - yhua.he@163.com
+  jira_user: yhua
+  reviewboard_user: yhua
 
 - name: Yongqiao Wang
   affiliations:

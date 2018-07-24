@@ -24,6 +24,8 @@
 
 #include "checks/health_checker.hpp"
 
+#include "common/validation.hpp"
+
 #include "docker/docker.hpp"
 
 #include "slave/slave.hpp"
@@ -46,6 +48,8 @@
 #endif // __linux__
 
 namespace http = process::http;
+
+using mesos::internal::common::validation::validateHealthCheck;
 
 using mesos::internal::master::Master;
 
@@ -199,11 +203,11 @@ TEST_F(HealthCheckTest, HealthCheckProtobufValidation)
   {
     HealthCheck healthCheckProto;
 
-    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    Option<Error> validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
 
     healthCheckProto.set_type(HealthCheck::UNKNOWN);
-    validate = validation::healthCheck(healthCheckProto);
+    validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
   }
 
@@ -212,15 +216,15 @@ TEST_F(HealthCheckTest, HealthCheckProtobufValidation)
     HealthCheck healthCheckProto;
 
     healthCheckProto.set_type(HealthCheck::COMMAND);
-    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    Option<Error> validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
 
     healthCheckProto.set_type(HealthCheck::HTTP);
-    validate = validation::healthCheck(healthCheckProto);
+    validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
 
     healthCheckProto.set_type(HealthCheck::TCP);
-    validate = validation::healthCheck(healthCheckProto);
+    validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
   }
 
@@ -232,21 +236,21 @@ TEST_F(HealthCheckTest, HealthCheckProtobufValidation)
     healthCheckProto.mutable_http()->set_port(8080);
 
     healthCheckProto.set_delay_seconds(-1.0);
-    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    Option<Error> validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
 
     healthCheckProto.set_delay_seconds(0.0);
     healthCheckProto.set_interval_seconds(-1.0);
-    validate = validation::healthCheck(healthCheckProto);
+    validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
 
     healthCheckProto.set_interval_seconds(0.0);
     healthCheckProto.set_timeout_seconds(-1.0);
-    validate = validation::healthCheck(healthCheckProto);
+    validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
 
     healthCheckProto.set_timeout_seconds(0.0);
-    validate = validation::healthCheck(healthCheckProto);
+    validate = validateHealthCheck(healthCheckProto);
     EXPECT_NONE(validate);
   }
 
@@ -256,7 +260,7 @@ TEST_F(HealthCheckTest, HealthCheckProtobufValidation)
 
     healthCheckProto.set_type(HealthCheck::COMMAND);
     healthCheckProto.mutable_command()->CopyFrom(CommandInfo());
-    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    Option<Error> validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
   }
 
@@ -267,7 +271,7 @@ TEST_F(HealthCheckTest, HealthCheckProtobufValidation)
     healthCheckProto.set_type(HealthCheck::COMMAND);
     healthCheckProto.mutable_command()->CopyFrom(createCommandInfo("exit 0"));
 
-    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    Option<Error> validate = validateHealthCheck(healthCheckProto);
     EXPECT_NONE(validate);
 
     Environment::Variable* variable =
@@ -275,7 +279,7 @@ TEST_F(HealthCheckTest, HealthCheckProtobufValidation)
           ->mutable_variables()->Add();
     variable->set_name("ENV_VAR_KEY");
 
-    validate = validation::healthCheck(healthCheckProto);
+    validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
   }
 
@@ -286,16 +290,16 @@ TEST_F(HealthCheckTest, HealthCheckProtobufValidation)
     healthCheckProto.set_type(HealthCheck::HTTP);
     healthCheckProto.mutable_http()->set_port(8080);
 
-    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    Option<Error> validate = validateHealthCheck(healthCheckProto);
     EXPECT_NONE(validate);
 
     healthCheckProto.mutable_http()->set_scheme("ftp");
-    validate = validation::healthCheck(healthCheckProto);
+    validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
 
     healthCheckProto.mutable_http()->set_scheme("https");
     healthCheckProto.mutable_http()->set_path("healthz");
-    validate = validation::healthCheck(healthCheckProto);
+    validate = validateHealthCheck(healthCheckProto);
     EXPECT_SOME(validate);
   }
 }
@@ -1907,7 +1911,7 @@ class DockerContainerizerHealthCheckTest
     public ::testing::WithParamInterface<NetworkInfo::Protocol>
 {
 protected:
-  virtual void SetUp()
+  void SetUp() override
   {
     Future<std::tuple<Nothing, Nothing, Nothing>> pulls = process::collect(
         pullDockerImage(DOCKER_TEST_IMAGE),
@@ -1930,7 +1934,7 @@ protected:
     createDockerIPv6UserNetwork();
   }
 
-  virtual void TearDown()
+  void TearDown() override
   {
     Try<Owned<Docker>> docker = Docker::create(
         tests::flags.docker,
@@ -1939,7 +1943,7 @@ protected:
 
     ASSERT_SOME(docker);
 
-    Future<std::list<Docker::Container>> containers =
+    Future<std::vector<Docker::Container>> containers =
       docker.get()->ps(true, slave::DOCKER_NAME_PREFIX);
 
     AWAIT_READY(containers);
@@ -2396,7 +2400,7 @@ TEST_F(DockerContainerizerHealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  TaskInfo task = createTask(offers.get()[0], DOCKER_SLEEP_CMD(120));
+  TaskInfo task = createTask(offers.get()[0], SLEEP_COMMAND(120));
 
   // TODO(tnachen): Use local image to test if possible.
   ContainerInfo containerInfo;
@@ -2459,7 +2463,7 @@ TEST_F(DockerContainerizerHealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
   agent.get()->terminate();
   agent->reset();
 
-  Future<std::list<Docker::Container>> containers =
+  Future<std::vector<Docker::Container>> containers =
     docker->ps(true, slave::DOCKER_NAME_PREFIX);
 
   AWAIT_READY(containers);
@@ -2526,7 +2530,7 @@ TEST_F(DockerContainerizerHealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  TaskInfo task = createTask(offers.get()[0], DOCKER_SLEEP_CMD(120));
+  TaskInfo task = createTask(offers.get()[0], SLEEP_COMMAND(120));
 
   // TODO(tnachen): Use local image to test if possible.
   ContainerInfo containerInfo;
@@ -2550,15 +2554,16 @@ TEST_F(DockerContainerizerHealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
   //
   // Case 1:
   //   - Remove the temporary file.
+  //
+  // NOTE: On Windows, we delete a temporary directory instead since `del`
+  // doesn't return an error if it tries to delete a nonexistent file, but
+  // `rmdir` does. Also, we hard code a path starting with `C:\` instead
+  // of using `tmpPath` since the path might not be possible to make inside
+  // the container (for example, if the `tmpPath` is in the `D:\` drive).
 #ifdef __WINDOWS__
+  const string dockerPath = path::join("C:", id::UUID::random().toString());
   const string healthCheckCmd =
-    "pwsh -Command "
-    "Remove-Item -ErrorAction SilentlyContinue \"" + tmpPath + "\"; "
-    "if (-Not $?) { "
-      "New-Item -ItemType Directory -Force \"" + os::getcwd() + "\"; "
-      "Set-Content -Path \"" + tmpPath + "\" -Value foo; "
-      "exit 1 "
-    "}";
+    "rmdir /s /q " + dockerPath + " || (mkdir " + dockerPath + " && exit 1)";
 #else
   const string healthCheckCmd =
     "rm " + tmpPath + " || "
@@ -2640,7 +2645,7 @@ TEST_F(DockerContainerizerHealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
   agent.get()->terminate();
   agent->reset();
 
-  Future<std::list<Docker::Container>> containers =
+  Future<std::vector<Docker::Container>> containers =
     docker->ps(true, slave::DOCKER_NAME_PREFIX);
 
   AWAIT_READY(containers);
@@ -2709,7 +2714,7 @@ TEST_F(
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  TaskInfo task = createTask(offers.get()[0], DOCKER_SLEEP_CMD(120));
+  TaskInfo task = createTask(offers.get()[0], SLEEP_COMMAND(120));
 
   // TODO(akagup): Use local image to test if possible.
   ContainerInfo containerInfo;
@@ -2772,7 +2777,7 @@ TEST_F(
   agent.get()->terminate();
   agent->reset();
 
-  Future<std::list<Docker::Container>> containers =
+  Future<std::vector<Docker::Container>> containers =
     docker->ps(true, slave::DOCKER_NAME_PREFIX);
 
   AWAIT_READY(containers);

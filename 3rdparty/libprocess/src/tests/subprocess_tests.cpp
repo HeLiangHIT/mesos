@@ -41,14 +41,14 @@
 namespace io = process::io;
 
 using process::Clock;
-using process::subprocess;
-using process::Subprocess;
 using process::MAX_REAP_INTERVAL;
+using process::Subprocess;
+using process::subprocess;
 
 using std::map;
+using std::shared_ptr;
 using std::string;
 using std::vector;
-using std::shared_ptr;
 
 
 class SubprocessTest: public TemporaryDirectoryTest {};
@@ -227,10 +227,6 @@ TEST_F(SubprocessTest, EnvironmentEcho)
 }
 
 
-// NOTE: These tests can't be run on Windows because the rely on functionality
-// that does not exist on Windows. For example, `os::nonblock` will not work on
-// all file descriptors on Windows.
-#ifndef __WINDOWS__
 TEST_F(SubprocessTest, Status)
 {
   // Exit 0.
@@ -263,6 +259,9 @@ TEST_F(SubprocessTest, Status)
 
   AWAIT_EXPECT_WEXITSTATUS_EQ(1, s->status());
 
+  // NOTE: This part of the test does not run on Windows because
+  // Windows does not use `SIGTERM` etc. to kill processes.
+#ifndef __WINDOWS__
   // SIGTERM.
   s = subprocess(SLEEP_COMMAND(60));
 
@@ -296,6 +295,7 @@ TEST_F(SubprocessTest, Status)
   Clock::resume();
 
   AWAIT_EXPECT_WTERMSIG_EQ(SIGKILL, s->status());
+#endif // __WINDOWS__
 }
 
 
@@ -310,7 +310,11 @@ TEST_F(SubprocessTest, PipeOutput)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s->out());
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("hello\r\n", io::read(s->out().get()));
+#else
   AWAIT_EXPECT_EQ("hello\n", io::read(s->out().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -331,7 +335,11 @@ TEST_F(SubprocessTest, PipeOutput)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s->err());
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("hello \r\n", io::read(s->err().get()));
+#else
   AWAIT_EXPECT_EQ("hello\n", io::read(s->err().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -345,10 +353,74 @@ TEST_F(SubprocessTest, PipeOutput)
 }
 
 
+// This test checks that we can open a subprocess, have it write a
+// substantial amount of data (two memory pages) to a pipe held by the
+// parent process (this test) without hanging, and then check that the
+// process exits and is reaped correctly.
+TEST_F(SubprocessTest, PipeLargeOutput)
+{
+  const string output(2 * os::pagesize(), 'c');
+  const string outfile = path::join(sandbox.get(), "out.txt");
+  ASSERT_SOME(os::write(outfile, output));
+
+  Try<Subprocess> s = subprocess(
+#ifdef __WINDOWS__
+      "type " + outfile,
+#else
+      "cat " + outfile,
+#endif // __WINDOWS__
+      Subprocess::FD(STDIN_FILENO),
+      Subprocess::PIPE(),
+      Subprocess::FD(STDERR_FILENO));
+
+  ASSERT_SOME(s);
+  ASSERT_SOME(s->out());
+
+#ifdef __WINDOWS__
+  ::SetLastError(0);
+#endif // __WINDOWS__
+
+  // Read 1 more than the input size, so we can trigger the EOF error
+  // on Windows.
+  EXPECT_SOME_EQ(output, os::read(s->out().get(), 1 + output.size()));
+
+#ifdef __WINDOWS__
+  // NOTE: On Windows, this is the end-of-file condition when reading
+  // from a pipe being written to by a child process. When it finishes
+  // writing, the last read will successfully return all the data, and
+  // the Windows error will be set to this.
+  EXPECT_EQ(::GetLastError(), ERROR_BROKEN_PIPE);
+#endif // __WINDOWS__
+
+  // Advance time until the internal reaper reaps the subprocess.
+  Clock::pause();
+  while (s->status().isPending()) {
+    Clock::advance(MAX_REAP_INTERVAL());
+    Clock::settle();
+  }
+  Clock::resume();
+
+  // NOTE: Because we are specifically writing more data (two pages)
+  // than can be held by the OS-allocated buffer, (on Windows this is
+  // one page), we cannot reap the process before reading because it
+  // will not exit until it has written all its data. It can only
+  // successfully write all its data if we read it in the parent
+  // process, otherwise the buffer fills up, and the OS makes the
+  // process wait until the buffer is emptied.
+
+  AWAIT_EXPECT_WEXITSTATUS_EQ(0, s->status());
+}
+
+
 TEST_F(SubprocessTest, PipeInput)
 {
   Try<Subprocess> s = subprocess(
+#ifdef __WINDOWS__
+      "powershell.exe",
+      {"powershell.exe", "-NoProfile", "-Command", "[Console]::In.Readline()"},
+#else
       "read word ; echo $word",
+#endif // __WINDOWS__
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO));
@@ -358,7 +430,11 @@ TEST_F(SubprocessTest, PipeInput)
   ASSERT_SOME(os::write(s->in().get(), "hello\n"));
 
   ASSERT_SOME(s->out());
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("hello\r\n", io::read(s->out().get()));
+#else
   AWAIT_EXPECT_EQ("hello\n", io::read(s->out().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -391,10 +467,10 @@ TEST_F(SubprocessTest, PipeRedirect)
       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
   ASSERT_SOME(fd);
-  ASSERT_SOME(os::nonblock(fd.get()));
+  ASSERT_SOME(io::prepare_async(fd.get()));
 
   ASSERT_SOME(s->out());
-  ASSERT_SOME(os::nonblock(s->out().get()));
+  ASSERT_SOME(io::prepare_async(s->out().get()));
   AWAIT_READY(io::redirect(s->out().get(), fd.get()));
 
   // Close our copy of the fd.
@@ -413,7 +489,11 @@ TEST_F(SubprocessTest, PipeRedirect)
   // Now make sure all the data is there!
   Try<string> read = os::read(path);
   ASSERT_SOME(read);
+#ifdef __WINDOWS__
+  EXPECT_EQ("'hello world'\n", read.get());
+#else
   EXPECT_EQ("hello world\n", read.get());
+#endif // __WINDOWS__
 }
 
 
@@ -466,7 +546,11 @@ TEST_F(SubprocessTest, PathOutput)
 
   read = os::read(err);
   ASSERT_SOME(read);
+#ifdef __WINDOWS__
+  EXPECT_EQ("hello \n", read.get());
+#else
   EXPECT_EQ("hello\n", read.get());
+#endif // __WINDOWS__
 }
 
 
@@ -477,14 +561,23 @@ TEST_F(SubprocessTest, PathInput)
   ASSERT_SOME(os::write(in, "hello\n"));
 
   Try<Subprocess> s = subprocess(
+#ifdef __WINDOWS__
+      "powershell.exe",
+      {"powershell.exe", "-NoProfile", "-Command", "[Console]::In.Readline()"},
+#else
       "read word ; echo $word",
+#endif // __WINDOWS__
       Subprocess::PATH(in),
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO));
 
   ASSERT_SOME(s);
   ASSERT_SOME(s->out());
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("hello\r\n", io::read(s->out().get()));
+#else
   AWAIT_EXPECT_EQ("hello\n", io::read(s->out().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -504,7 +597,7 @@ TEST_F(SubprocessTest, FdOutput)
   string err = path::join(os::getcwd(), "stderr");
 
   // Standard out.
-  Try<int> outFd = os::open(
+  Try<int_fd> outFd = os::open(
       out,
       O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -535,7 +628,7 @@ TEST_F(SubprocessTest, FdOutput)
   EXPECT_EQ("hello\n", read.get());
 
   // Standard error.
-  Try<int> errFd = os::open(
+  Try<int_fd> errFd = os::open(
       err,
       O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -563,7 +656,11 @@ TEST_F(SubprocessTest, FdOutput)
 
   read = os::read(err);
   ASSERT_SOME(read);
+#ifdef __WINDOWS__
+  EXPECT_EQ("hello \n", read.get());
+#else
   EXPECT_EQ("hello\n", read.get());
+#endif // __WINDOWS__
 }
 
 
@@ -573,11 +670,16 @@ TEST_F(SubprocessTest, FdInput)
 
   ASSERT_SOME(os::write(in, "hello\n"));
 
-  Try<int> inFd = os::open(in, O_RDONLY | O_CLOEXEC);
+  Try<int_fd> inFd = os::open(in, O_RDONLY | O_CLOEXEC);
   ASSERT_SOME(inFd);
 
   Try<Subprocess> s = subprocess(
+#ifdef __WINDOWS__
+      "powershell.exe",
+      {"powershell.exe", "-NoProfile", "-Command", "[Console]::In.Readline()"},
+#else
       "read word ; echo $word",
+#endif // __WINDOWS__
       Subprocess::FD(inFd.get()),
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO));
@@ -586,7 +688,11 @@ TEST_F(SubprocessTest, FdInput)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s->out());
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("hello\r\n", io::read(s->out().get()));
+#else
   AWAIT_EXPECT_EQ("hello\n", io::read(s->out().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -616,7 +722,6 @@ TEST_F(SubprocessTest, Default)
 
   AWAIT_EXPECT_WEXITSTATUS_EQ(0, s->status());
 }
-#endif // __WINDOWS__
 
 
 namespace {
@@ -648,10 +753,6 @@ struct TestFlags : public virtual flags::FlagsBase
 } // namespace {
 
 
-// NOTE: These tests can't be run on Windows because the rely on functionality
-// that does not exist on Windows. For example, `os::nonblock` will not work on
-// all file descriptors on Windows.
-#ifndef __WINDOWS__
 TEST_F(SubprocessTest, Flags)
 {
   TestFlags flags;
@@ -683,9 +784,39 @@ TEST_F(SubprocessTest, Flags)
 
   string out = path::join(os::getcwd(), "stdout");
 
+#ifdef __WINDOWS__
+  // The Windows version of `echo` is a built-in of the command
+  // prompt, and it simply reproduces the entire command line string.
+  // However, the flags class (and thus this test) is expecting the
+  // semantics of a native binary interpreting the command line
+  // arguments via the Windows API `CommandLineToArgv`. When a regular
+  // Windows application (in contrast to `echo`) gets command line
+  // arguments, the text is processed automatically by
+  // `CommandLineToArgv`, which converts the command line string into
+  // an array. For example, this is the output of `echo`:
+  //
+  //    > cmd.exe /c echo "--s3=\"geek\""
+  //    "--s3=\"geek\""
+  //
+  // With `test-echo.exe`, a small native binary that just prints its
+  // arguments, the output is:
+  //
+  //     > test-echo.exe "--s3=\"geek\""
+  //     --s3="geek"
+  //
+  // This is the behavior expected by the test as the POSIX version of
+  // `echo` is a native binary.
+  string test_echo_path = path::join(BUILD_DIR, "test-echo.exe");
+#endif
+
   Try<Subprocess> s = subprocess(
+#ifdef __WINDOWS__
+      test_echo_path,
+      {test_echo_path},
+#else
       "/bin/echo",
       vector<string>(1, "echo"),
+#endif // __WINDOWS__
       Subprocess::FD(STDIN_FILENO),
       Subprocess::PATH(out),
       Subprocess::FD(STDERR_FILENO),
@@ -746,7 +877,11 @@ TEST_F(SubprocessTest, Environment)
   environment["MESSAGE"] = "hello";
 
   Try<Subprocess> s = subprocess(
+#ifdef __WINDOWS__
+      "echo %MESSAGE%",
+#else
       "echo $MESSAGE",
+#endif // __WINDOWS__
       Subprocess::FD(STDIN_FILENO),
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO),
@@ -754,7 +889,11 @@ TEST_F(SubprocessTest, Environment)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s->out());
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("hello\r\n", io::read(s->out().get()));
+#else
   AWAIT_EXPECT_EQ("hello\n", io::read(s->out().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -772,7 +911,11 @@ TEST_F(SubprocessTest, Environment)
   environment["MESSAGE1"] = "world";
 
   s = subprocess(
+#ifdef __WINDOWS__
+      "echo %MESSAGE0% %MESSAGE1%",
+#else
       "echo $MESSAGE0 $MESSAGE1",
+#endif // __WINDOWS__
       Subprocess::FD(STDIN_FILENO),
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO),
@@ -780,7 +923,11 @@ TEST_F(SubprocessTest, Environment)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s->out());
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("hello world\r\n", io::read(s->out().get()));
+#else
   AWAIT_EXPECT_EQ("hello world\n", io::read(s->out().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -801,7 +948,11 @@ TEST_F(SubprocessTest, EnvironmentWithSpaces)
   environment["MESSAGE"] = "hello world";
 
   Try<Subprocess> s = subprocess(
+#ifdef __WINDOWS__
+      "echo %MESSAGE%",
+#else
       "echo $MESSAGE",
+#endif // __WINDOWS__
       Subprocess::FD(STDIN_FILENO),
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO),
@@ -809,7 +960,11 @@ TEST_F(SubprocessTest, EnvironmentWithSpaces)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s->out());
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("hello world\r\n", io::read(s->out().get()));
+#else
   AWAIT_EXPECT_EQ("hello world\n", io::read(s->out().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -830,7 +985,11 @@ TEST_F(SubprocessTest, EnvironmentWithSpacesAndQuotes)
   environment["MESSAGE"] = "\"hello world\"";
 
   Try<Subprocess> s = subprocess(
+#ifdef __WINDOWS__
+      "echo %MESSAGE%",
+#else
       "echo $MESSAGE",
+#endif // __WINDOWS__
       Subprocess::FD(STDIN_FILENO),
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO),
@@ -838,7 +997,11 @@ TEST_F(SubprocessTest, EnvironmentWithSpacesAndQuotes)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s->out());
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("\"hello world\"\r\n", io::read(s->out().get()));
+#else
   AWAIT_EXPECT_EQ("\"hello world\"\n", io::read(s->out().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -862,7 +1025,11 @@ TEST_F(SubprocessTest, EnvironmentOverride)
   environment["MESSAGE2"] = "goodbye";
 
   Try<Subprocess> s = subprocess(
+#ifdef __WINDOWS__
+      "echo %MESSAGE1% %MESSAGE2%",
+#else
       "echo $MESSAGE1 $MESSAGE2",
+#endif // __WINDOWS__
       Subprocess::FD(STDIN_FILENO),
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO),
@@ -870,7 +1037,13 @@ TEST_F(SubprocessTest, EnvironmentOverride)
 
   ASSERT_SOME(s);
   ASSERT_SOME(s->out());
+  // NOTE: Windows will emit `%VAR%` if the environment variable `VAR`
+  // was not defined, unlike POSIX which will emit nothing.
+#ifdef __WINDOWS__
+  AWAIT_EXPECT_EQ("%MESSAGE1% goodbye\r\n", io::read(s->out().get()));
+#else
   AWAIT_EXPECT_EQ("goodbye\n", io::read(s->out().get()));
+#endif // __WINDOWS__
 
   // Advance time until the internal reaper reaps the subprocess.
   Clock::pause();
@@ -882,7 +1055,6 @@ TEST_F(SubprocessTest, EnvironmentOverride)
 
   AWAIT_EXPECT_WEXITSTATUS_EQ(0, s->status());
 }
-#endif // __WINDOWS__
 
 
 // TODO(joerg84): Consider adding tests for setsid, working_directory,

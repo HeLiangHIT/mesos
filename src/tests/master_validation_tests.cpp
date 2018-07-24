@@ -1460,7 +1460,305 @@ TEST_F(DestroyOperationValidationTest, MultipleResourceProviders)
 }
 
 
-TEST(OperationValidationTest, CreateVolume)
+class GrowVolumeOperationValidationTest : public MesosTest {
+protected:
+  Offer::Operation::GrowVolume createGrowVolume()
+  {
+    Resource volume = createPersistentVolume(
+        Megabytes(128),
+        "role1",
+        "id1",
+        "path1");
+
+    Resource addition = Resources::parse("disk", "128", "role1").get();
+
+    Offer::Operation::GrowVolume growVolume;
+    growVolume.mutable_volume()->CopyFrom(volume);
+    growVolume.mutable_addition()->CopyFrom(addition);
+
+    return growVolume;
+  }
+};
+
+
+// This test verifies that validation succeeds on a valid operation.
+TEST_F(GrowVolumeOperationValidationTest, Valid)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::GrowVolume growVolume = createGrowVolume();
+
+  Option<Error> error = operation::validate(growVolume, capabilities);
+  EXPECT_NONE(error);
+}
+
+
+// This test verifies that validation fails if `GrowVolume.volume` is not a
+// persistent volume.
+TEST_F(GrowVolumeOperationValidationTest, NonPersistentVolume)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::GrowVolume growVolume = createGrowVolume();
+  growVolume.mutable_volume()->mutable_disk()->clear_persistence();
+
+  Option<Error> error = operation::validate(growVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `GrowVolume.addition` has a zero
+// value.
+TEST_F(GrowVolumeOperationValidationTest, ZeroAddition)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::GrowVolume growVolume = createGrowVolume();
+  growVolume.mutable_addition()->mutable_scalar()->set_value(0);
+
+  Option<Error> error = operation::validate(growVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `GrowVolume.volume` and
+// `GrowVolume.addition' are incompatible.
+TEST_F(GrowVolumeOperationValidationTest, IncompatibleDisk)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  // Make the volume on a PATH disk so it cannot be grown with a ROOT disk.
+  Resource pathVolume = createPersistentVolume(
+       Megabytes(128),
+        "role1",
+        "id1",
+        "path1",
+        None(),
+        createDiskSourcePath("root"));
+
+  Offer::Operation::GrowVolume growVolume = createGrowVolume();
+  growVolume.mutable_volume()->CopyFrom(pathVolume);
+
+  Option<Error> error = operation::validate(growVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `GrowVolume.volume` is a shared
+// persistent volume.
+TEST_F(GrowVolumeOperationValidationTest, Shared)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::GrowVolume growVolume = createGrowVolume();
+  growVolume.mutable_volume()->mutable_shared();
+
+  Option<Error> error = operation::validate(growVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `GrowVolume.volume` has resource
+// provider id.
+TEST_F(GrowVolumeOperationValidationTest, ResourceProvider)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::GrowVolume growVolume = createGrowVolume();
+  growVolume.mutable_volume()->mutable_provider_id()->set_value("provider");
+
+  Option<Error> error = operation::validate(growVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `GrowVolume.volume` and
+// `GrowVolume.addition` are on MOUNT disks, which are not addable.
+TEST_F(GrowVolumeOperationValidationTest, Mount)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Resource mountVolume = createPersistentVolume(
+       Megabytes(128),
+        "role1",
+        "id1",
+        "path1",
+        None(),
+        createDiskSourceMount());
+
+  Resource mountDisk = createDiskResource(
+      "128", "role1", None(), None(), createDiskSourceMount());
+
+  Offer::Operation::GrowVolume growVolume = createGrowVolume();
+  growVolume.mutable_volume()->CopyFrom(mountVolume);
+  growVolume.mutable_addition()->CopyFrom(mountDisk);
+
+  Option<Error> error = operation::validate(growVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation  fails if agent has no RESIZE_VOLUME
+// capability.
+TEST_F(GrowVolumeOperationValidationTest, MissingCapability)
+{
+  protobuf::slave::Capabilities capabilities;
+
+  Option<Error> error = operation::validate(createGrowVolume(), capabilities);
+  EXPECT_SOME(error);
+}
+
+
+class ShrinkVolumeOperationValidationTest : public MesosTest {
+protected:
+  Offer::Operation::ShrinkVolume createShrinkVolume()
+  {
+    Resource volume = createPersistentVolume(
+        Megabytes(128),
+        "role1",
+        "id1",
+        "path1");
+
+    Offer::Operation::ShrinkVolume shrinkVolume;
+    shrinkVolume.mutable_volume()->CopyFrom(volume);
+    shrinkVolume.mutable_subtract()->set_value(64);
+
+    return shrinkVolume;
+  }
+};
+
+
+// This test verifies that validation succeeds on a valid `ShrinkVolume`
+// operation.
+TEST_F(ShrinkVolumeOperationValidationTest, Valid)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::ShrinkVolume shrinkVolume = createShrinkVolume();
+
+  Option<Error> error = operation::validate(shrinkVolume, capabilities);
+  EXPECT_NONE(error);
+}
+
+
+// This test verifies that validation fails if `ShrinkVolume.volume` is not a
+// persistent volume.
+TEST_F(ShrinkVolumeOperationValidationTest, NonPersistentVolume)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::ShrinkVolume shrinkVolume = createShrinkVolume();
+  shrinkVolume.mutable_volume()->mutable_disk()->clear_persistence();
+
+  Option<Error> error = operation::validate(shrinkVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `ShrinkVolume.subtract` has a
+// zero value.
+TEST_F(ShrinkVolumeOperationValidationTest, ZeroSubtract)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::ShrinkVolume shrinkVolume = createShrinkVolume();
+  shrinkVolume.mutable_subtract()->set_value(0);
+
+  Option<Error> error = operation::validate(shrinkVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `ShrinkVolume.subtract` has a
+// value equal to the size of `ShrinkVolume.volume`
+TEST_F(ShrinkVolumeOperationValidationTest, EmptyAfterShrink)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::ShrinkVolume shrinkVolume = createShrinkVolume();
+  shrinkVolume.mutable_subtract()->CopyFrom(shrinkVolume.volume().scalar());
+
+  Option<Error> error = operation::validate(shrinkVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `ShrinkVolume.volume` is a
+// MOUNT disk.
+TEST_F(ShrinkVolumeOperationValidationTest, Mount)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Resource mountVolume = createPersistentVolume(
+       Megabytes(128),
+        "role1",
+        "id1",
+        "path1",
+        None(),
+        createDiskSourceMount());
+
+  Offer::Operation::ShrinkVolume shrinkVolume = createShrinkVolume();
+  shrinkVolume.mutable_volume()->CopyFrom(mountVolume);
+
+  Option<Error> error = operation::validate(shrinkVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `ShrinkVolume.volume` is a
+// shared volume.
+TEST_F(ShrinkVolumeOperationValidationTest, Shared)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::ShrinkVolume shrinkVolume = createShrinkVolume();
+  shrinkVolume.mutable_volume()->mutable_shared();
+
+  Option<Error> error = operation::validate(shrinkVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if `ShrinkVolume.volume` has
+// resource provider id.
+TEST_F(ShrinkVolumeOperationValidationTest, ResourceProvider)
+{
+  protobuf::slave::Capabilities capabilities;
+  capabilities.resizeVolume = true;
+
+  Offer::Operation::ShrinkVolume shrinkVolume = createShrinkVolume();
+  shrinkVolume.mutable_volume()->mutable_provider_id()->set_value("provider");
+
+  Option<Error> error = operation::validate(shrinkVolume, capabilities);
+  EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if agent has no RESIZE_VOLUME
+// capability.
+TEST_F(ShrinkVolumeOperationValidationTest, MissingCapability)
+{
+  protobuf::slave::Capabilities capabilities;
+
+  Option<Error> error = operation::validate(createShrinkVolume(), capabilities);
+  EXPECT_SOME(error);
+}
+
+
+TEST(OperationValidationTest, CreateDisk)
 {
   Resource disk1 = createDiskResource(
       "10", "*", None(), None(), createDiskSourceRaw());
@@ -1474,153 +1772,92 @@ TEST(OperationValidationTest, CreateVolume)
   disk1.mutable_provider_id()->set_value("provider1");
   disk2.mutable_provider_id()->set_value("provider2");
 
-  Offer::Operation::CreateVolume createVolume;
-  createVolume.mutable_source()->CopyFrom(disk1);
-  createVolume.set_target_type(Resource::DiskInfo::Source::MOUNT);
+  Offer::Operation::CreateDisk createDisk;
+  createDisk.mutable_source()->CopyFrom(disk1);
+  createDisk.set_target_type(Resource::DiskInfo::Source::MOUNT);
 
-  Option<Error> error = operation::validate(createVolume);
+  Option<Error> error = operation::validate(createDisk);
   EXPECT_NONE(error);
 
-  createVolume.mutable_source()->CopyFrom(disk2);
-  createVolume.set_target_type(Resource::DiskInfo::Source::MOUNT);
+  createDisk.mutable_source()->CopyFrom(disk1);
+  createDisk.set_target_type(Resource::DiskInfo::Source::BLOCK);
 
-  error = operation::validate(createVolume);
+  error = operation::validate(createDisk);
+  EXPECT_NONE(error);
+
+  createDisk.mutable_source()->CopyFrom(disk1);
+  createDisk.set_target_type(Resource::DiskInfo::Source::PATH);
+
+  error = operation::validate(createDisk);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "'target_type' is neither MOUNT or BLOCK"));
+
+  createDisk.mutable_source()->CopyFrom(disk2);
+  createDisk.set_target_type(Resource::DiskInfo::Source::MOUNT);
+
+  error = operation::validate(createDisk);
   ASSERT_SOME(error);
   EXPECT_TRUE(strings::contains(
       error->message,
       "'source' is not a RAW disk resource"));
 
-  createVolume.mutable_source()->CopyFrom(disk3);
-  createVolume.set_target_type(Resource::DiskInfo::Source::PATH);
+  createDisk.mutable_source()->CopyFrom(disk3);
+  createDisk.set_target_type(Resource::DiskInfo::Source::MOUNT);
 
-  error = operation::validate(createVolume);
+  error = operation::validate(createDisk);
   ASSERT_SOME(error);
   EXPECT_TRUE(strings::contains(
       error->message,
-      "Does not have a resource provider"));
-
-  createVolume.mutable_source()->CopyFrom(disk1);
-  createVolume.set_target_type(Resource::DiskInfo::Source::BLOCK);
-
-  error = operation::validate(createVolume);
-  ASSERT_SOME(error);
-  EXPECT_TRUE(strings::contains(
-      error->message,
-      "'target_type' is neither MOUNT or PATH"));
+      "'source' is not managed by a resource provider"));
 }
 
 
-TEST(OperationValidationTest, DestroyVolume)
+TEST(OperationValidationTest, DestroyDisk)
 {
   Resource disk1 = createDiskResource(
       "10", "*", None(), None(), createDiskSourceMount());
 
   Resource disk2 = createDiskResource(
-      "20", "*", None(), None(), createDiskSourcePath());
-
-  Resource disk3 = createDiskResource(
-      "30", "*", None(), None(), createDiskSourceRaw());
-
-  disk1.mutable_provider_id()->set_value("provider1");
-  disk3.mutable_provider_id()->set_value("provider3");
-
-  Offer::Operation::DestroyVolume destroyVolume;
-  destroyVolume.mutable_volume()->CopyFrom(disk1);
-
-  Option<Error> error = operation::validate(destroyVolume);
-  EXPECT_NONE(error);
-
-  destroyVolume.mutable_volume()->CopyFrom(disk2);
-
-  error = operation::validate(destroyVolume);
-  ASSERT_SOME(error);
-  EXPECT_TRUE(strings::contains(
-      error->message,
-      "Does not have a resource provider"));
-
-  destroyVolume.mutable_volume()->CopyFrom(disk3);
-
-  error = operation::validate(destroyVolume);
-  ASSERT_SOME(error);
-  EXPECT_TRUE(strings::contains(
-      error->message,
-      "'volume' is neither a MOUTN or PATH disk resource"));
-}
-
-
-TEST(OperationValidationTest, CreateBlock)
-{
-  Resource disk1 = createDiskResource(
-      "10", "*", None(), None(), createDiskSourceRaw());
-
-  Resource disk2 = createDiskResource(
-      "20", "*", None(), None(), createDiskSourceMount());
-
-  Resource disk3 = createDiskResource(
-      "30", "*", None(), None(), createDiskSourceRaw());
-
-  disk1.mutable_provider_id()->set_value("provider1");
-  disk2.mutable_provider_id()->set_value("provider2");
-
-  Offer::Operation::CreateBlock createBlock;
-  createBlock.mutable_source()->CopyFrom(disk1);
-
-  Option<Error> error = operation::validate(createBlock);
-  EXPECT_NONE(error);
-
-  createBlock.mutable_source()->CopyFrom(disk2);
-
-  error = operation::validate(createBlock);
-  ASSERT_SOME(error);
-  EXPECT_TRUE(strings::contains(
-      error->message,
-      "'source' is not a RAW disk resource"));
-
-  createBlock.mutable_source()->CopyFrom(disk3);
-
-  error = operation::validate(createBlock);
-  ASSERT_SOME(error);
-  EXPECT_TRUE(strings::contains(
-      error->message,
-      "Does not have a resource provider"));
-}
-
-
-TEST(OperationValidationTest, DestroyBlock)
-{
-  Resource disk1 = createDiskResource(
-      "10", "*", None(), None(), createDiskSourceBlock());
-
-  Resource disk2 = createDiskResource(
       "20", "*", None(), None(), createDiskSourceBlock());
 
   Resource disk3 = createDiskResource(
-      "30", "*", None(), None(), createDiskSourceMount());
+      "30", "*", None(), None(), createDiskSourcePath());
+
+  Resource disk4 = createDiskResource(
+      "40", "*", None(), None(), createDiskSourceMount());
 
   disk1.mutable_provider_id()->set_value("provider1");
+  disk2.mutable_provider_id()->set_value("provider2");
   disk3.mutable_provider_id()->set_value("provider3");
 
-  Offer::Operation::DestroyBlock destroyBlock;
-  destroyBlock.mutable_block()->CopyFrom(disk1);
+  Offer::Operation::DestroyDisk destroyDisk;
+  destroyDisk.mutable_source()->CopyFrom(disk1);
 
-  Option<Error> error = operation::validate(destroyBlock);
+  Option<Error> error = operation::validate(destroyDisk);
   EXPECT_NONE(error);
 
-  destroyBlock.mutable_block()->CopyFrom(disk2);
+  destroyDisk.mutable_source()->CopyFrom(disk2);
 
-  error = operation::validate(destroyBlock);
+  error = operation::validate(destroyDisk);
+  EXPECT_NONE(error);
+
+  destroyDisk.mutable_source()->CopyFrom(disk3);
+
+  error = operation::validate(destroyDisk);
   ASSERT_SOME(error);
   EXPECT_TRUE(strings::contains(
       error->message,
-      "Does not have a resource provider"));
+      "'source' is neither a MOUNT or BLOCK disk resource"));
 
-  destroyBlock.mutable_block()->CopyFrom(disk3);
+  destroyDisk.mutable_source()->CopyFrom(disk4);
 
-  error = operation::validate(destroyBlock);
+  error = operation::validate(destroyDisk);
   ASSERT_SOME(error);
   EXPECT_TRUE(strings::contains(
       error->message,
-      "'block' is not a BLOCK disk resource"));
+      "'source' is not managed by a resource provider"));
 }
 
 

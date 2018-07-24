@@ -61,6 +61,7 @@ GTEST = $(GOOGLETEST)/googletest
 HTTP_PARSER = http-parser-$(HTTP_PARSER_VERSION)
 JEMALLOC = jemalloc-$(JEMALLOC_VERSION)
 LEVELDB = leveldb-$(LEVELDB_VERSION)
+LIBARCHIVE = libarchive-$(LIBARCHIVE_VERSION)
 LIBEV = libev-$(LIBEV_VERSION)
 NVML = nvml-$(NVML_VERSION)
 PIP = pip-$(PIP_VERSION)
@@ -82,6 +83,7 @@ EXTRA_DIST =			\
   $(HTTP_PARSER).tar.gz		\
   $(JEMALLOC).tar.gz		\
   $(LEVELDB).tar.gz		\
+  $(LIBARCHIVE).tar.gz		\
   $(LIBEV).tar.gz		\
   $(NVML).tar.gz		\
   $(PIP).tar.gz			\
@@ -121,6 +123,7 @@ CLEAN_EXTRACTED =		\
   $(HTTP_PARSER)		\
   $(JEMALLOC)			\
   $(LEVELDB)			\
+  $(LIBARCHIVE)			\
   $(LIBEV)			\
   $(NVML)			\
   $(PIP)			\
@@ -269,6 +272,30 @@ $(JEMALLOC)-build-stamp: $(JEMALLOC)-stamp
 ALL_LOCAL += $(LIB_JEMALLOC)
 endif
 
+if WITH_BUNDLED_LIBARCHIVE
+LIB_LIBARCHIVE = $(LIBARCHIVE)/.libs/libarchive.la
+
+$(LIB_LIBARCHIVE): $(LIBARCHIVE)-build-stamp
+
+$(LIBARCHIVE)-build-stamp: $(LIBARCHIVE)-stamp
+	cd $(LIBARCHIVE) &&			\
+	  ./configure $(CONFIGURE_ARGS)		\
+	      --without-bz2lib			\
+	      --without-cng			\
+	      --without-expat			\
+	      --without-iconv			\
+	      --without-libiconv-prefix		\
+	      --without-lz4			\
+	      --without-lzma			\
+	      --without-nettle			\
+	      --without-openssl			\
+	      --without-xml2
+	cd $(LIBARCHIVE) && $(MAKE) $(AM_MAKEFLAGS)
+	touch $@
+
+ALL_LOCAL += $(LIB_LIBARCHIVE)
+endif
+
 if WITH_BUNDLED_LIBEV
 $(LIBEV)/libev.la: $(LIBEV)-build-stamp
 $(LIBEV)-build-stamp: $(LIBEV)-stamp
@@ -322,34 +349,39 @@ PROTOC = @PROTOCOMPILER@
 endif
 
 if ENABLE_GRPC
+if !ENABLE_SSL
+GRPC_VARIANT = _unsecure
+endif
+
 if WITH_BUNDLED_GRPC
-LIB_GRPC = $(GRPC)/libs/opt/libgrpc++.a			\
-           $(GRPC)/libs/opt/libgrpc.a			\
+LIB_GRPC = $(GRPC)/libs/opt/libgrpc++$(GRPC_VARIANT).a	\
+           $(GRPC)/libs/opt/libgrpc$(GRPC_VARIANT).a	\
            $(GRPC)/libs/opt/libgpr.a
 
 $(LIB_GRPC): $(GRPC)-build-stamp
 
-# NOTE: The `-Wno-deprecated-declarations` flag is added so that gRPC
-# can be built with OpenSSL 1.1.0. See:
-# https://github.com/grpc/grpc/pull/11496
-# NOTE: The `-Wno-unused-function` flag is added to address errors when
-# compling `src/core/tsi/ssl_transport_security.cc`. See:
-# https://github.com/grpc/grpc/pull/11675
+# NOTE: We the include flags through the `CPPFLAGS` environment variable rather
+# than the command line because gRPC uses target-specific assignments to append
+# flags to `CPPFLAGS`, which will be overwritten by command line arguments. See:
+# https://www.gnu.org/software/make/manual/html_node/Target_002dspecific.html
 $(GRPC)-build-stamp: $(GRPC)-stamp			\
                      $(PROTOBUF)-build-stamp
 	cd $(GRPC) &&					\
-	  CPPFLAGS="-Wno-deprecated-declarations	\
-	            -Wno-unused-function		\
-	            $(PROTOBUF_INCLUDE_FLAGS)		\
+	  CPPFLAGS="$(PROTOBUF_INCLUDE_FLAGS)		\
 	            $(SSL_INCLUDE_FLAGS)		\
 	            $(ZLIB_INCLUDE_FLAGS)"		\
-	  LDFLAGS="$(PROTOBUF_LINKER_FLAGS)		\
-	           $(SSL_LINKER_FLAGS)			\
-	           $(ZLIB_LINKER_FLAGS)"		\
 	  $(MAKE) $(AM_MAKEFLAGS)			\
-	          HAS_PKG_CONFIG=false			\
-	          NO_PROTOC=false			\
-	          PROTOC=$(PROTOC)
+	    $(LIB_GRPC:%=$(abs_builddir)/%)		\
+	    CC="$(CC)"					\
+	    CXX="$(CXX)"				\
+	    LD="$(CC)"					\
+	    LDXX="$(CXX)"				\
+	    LDFLAGS="$(PROTOBUF_LINKER_FLAGS)		\
+	             $(SSL_LINKER_FLAGS)		\
+	             $(ZLIB_LINKER_FLAGS)"		\
+	    HAS_PKG_CONFIG=false			\
+	    NO_PROTOC=false				\
+	    PROTOC="$(PROTOC)"
 	touch $@
 
 ALL_LOCAL += $(LIB_GRPC)

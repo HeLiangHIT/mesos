@@ -84,6 +84,33 @@ option(
   "Use libevent instead of libev as the core event loop implementation."
   FALSE)
 
+if (ENABLE_LIBEVENT)
+  # TODO(tillt): Consider adding Ubuntu 17 to this check. See MESOS-7076.
+  if (NOT APPLE)
+    set(DEFAULT_UNBUNDLED_LIBEVENT FALSE)
+  else ()
+    set(DEFAULT_UNBUNDLED_LIBEVENT TRUE)
+  endif ()
+
+  option(
+    UNBUNDLED_LIBEVENT
+    "Build libprocess with an installed libevent version instead of the bundled."
+    ${DEFAULT_UNBUNDLED_LIBEVENT})
+
+  if (UNBUNDLED_LIBEVENT)
+    set(
+      LIBEVENT_ROOT_DIR
+      ""
+      CACHE STRING
+      "Specify the path to libevent, e.g. \"C:\\libevent-Win64\".")
+  endif()
+endif()
+
+option(
+  ENABLE_LIBWINIO
+  "Use Windows IOCP instead of libev as the core event loop implementation."
+  FALSE)
+
 option(
   ENABLE_SSL
   "Build libprocess with SSL support."
@@ -105,53 +132,50 @@ option(
   FALSE)
 
 option(
+  PYTHON
+  "Command for the Python interpreter, set to `python` if not given."
+  "python")
+
+option(
+  PYTHON_3
+  "Command for the Python 3 interpreter, set to the option PYTHON if not given."
+  "")
+
+option(
   ENABLE_NEW_CLI
   "Build the new CLI instead of the old one."
   FALSE)
 
 if (ENABLE_NEW_CLI)
-  find_package(PythonInterp)
-  find_package(PythonLibs)
-
-  if (NOT PYTHON_LIBRARY)
-    message(
-      FATAL_ERROR
-      "Python not found.\n"
-      "The new CLI requires Python version 2.6 or 2.7 in order to build.\n"
-      "Your Python version is ${PYTHONLIBS_VERSION_STRING}.\n"
-      "You may wish to set the PYTHON environment variable to an "
-      "appropriate value if Python is not installed in your PATH.")
+  # We always want to have PYTHON_3 set as it will be used to build the CLI.
+  if (NOT PYTHON_3)
+    if (PYTHON)
+      # Set PYTHON_3 to PYTHON if PYTHON is set but not PYTHON_3.
+      set(PYTHON_3 ${PYTHON})
+    else ()
+      # Set PYTHON_3 to the one CMake finds if PYTHON is not set.
+      # PythonInterp sets PYTHON_EXECUTABLE by looking for an interpreter
+      # from newest to oldest,, we then use it to set PYTHON and PYTHON_3.
+      find_package(PythonInterp)
+      if (NOT PYTHONINTERP_FOUND)
+        message(FATAL_ERROR "You must have Python set up in order to continue.")
+      endif ()
+      set(PYTHON ${PYTHON_EXECUTABLE})
+      set(PYTHON_3 ${PYTHON})
+    endif ()
   endif ()
 
-  if (${PYTHONLIBS_VERSION_STRING} VERSION_LESS "2.6.0")
-    message(
-      FATAL_ERROR
-      "Python version too old.\n"
-      "The new CLI requires Python version 2.6 or 2.7 in order to build.\n"
-      "Your Python version is ${PYTHONLIBS_VERSION_STRING}.\n"
-      "You may wish to set the PYTHON environment variable to an "
-      "appropriate value to assure the right Python executable is found.")
-  endif ()
+  execute_process(
+    COMMAND ${PYTHON_3} -c
+      "import sys; print('%d.%d' % (sys.version_info[0], sys.version_info[1]))"
+    OUTPUT_VARIABLE PYTHON_3_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-  if (${PYTHONLIBS_VERSION_STRING} VERSION_EQUAL "3.0.0" OR
-      ${PYTHONLIBS_VERSION_STRING} VERSION_GREATER "3.0.0")
-    message(
-      FATAL_ERROR
-      "Python version too new.\n"
-      "The new CLI requires Python version 2.6 or 2.7 in order to build.\n"
-      "Your Python version is ${PYTHONLIBS_VERSION_STRING}.\n"
-      "You may wish to set the PYTHON environment variable to an "
-      "appropriate value to assure the right Python executable is found.")
-  endif ()
-
-  find_program(VIRTUALENV virtualenv)
-  if (NOT VIRTUALENV)
-    message(
-      FATAL_ERROR
-      "Cannot find virtualenv.\n"
-      "The new CLI requires 'virtualenv' be installed as part of your "
-      "Python ${PYTHONLIBS_VERSION_STRING} installation.\n"
-      "You may wish to install it via 'pip install virtualenv'.")
+  if (PYTHON_3_VERSION VERSION_LESS "3.6.0")
+    message(FATAL_ERROR
+    "You must be running python 3.6 or newer in order to continue.\n"
+    "You appear to be running Python ${PYTHON_3_VERSION}.\n"
+    "Set the CMake option 'PYTHON_3' to define which interpreter to use.")
   endif ()
 endif ()
 
@@ -204,12 +228,21 @@ if (WIN32 AND REBUNDLED)
     "the Internet, even though the `REBUNDLED` flag was set.")
 endif ()
 
-if (WIN32 AND (NOT ENABLE_LIBEVENT))
+if (WIN32 AND (NOT ENABLE_LIBEVENT AND NOT ENABLE_LIBWINIO))
   message(
     FATAL_ERROR
     "Windows builds of Mesos currently do not support libev, the default event "
     "loop used by Mesos.  To opt into using libevent, pass "
-    "`-DENABLE_LIBEVENT=1` as an argument when you run CMake.")
+    "`-DENABLE_LIBEVENT=1` as an argument when you run CMake."
+    "To opt into using the native Windows IOCP implementation instead, "
+    "pass `-DENABLE_LIBWINIO=1` as an argument.")
+endif ()
+
+if (ENABLE_LIBWINIO AND (NOT WIN32))
+  message(
+    FATAL_ERROR
+    "Libwinio, which is the Windows IOCP event loop, only works on Windows. "
+    "Please use libev or libevent instead on non-Windows platforms.")
 endif ()
 
 if (ENABLE_SSL AND (NOT ENABLE_LIBEVENT))
@@ -299,6 +332,9 @@ elseif (CMAKE_CXX_COMPILER_ID MATCHES MSVC)
     /w44267)
 endif ()
 
+if (CMAKE_CXX_COMPILER_ID MATCHES Clang)
+  add_compile_options(-Wno-inconsistent-missing-override)
+endif ()
 
 # POSIX CONFIGURATION.
 ######################
@@ -318,6 +354,12 @@ if (NOT WIN32)
     message(
       WARNING
       "The compiler ${CMAKE_CXX_COMPILER} cannot apply stack protectors.")
+  endif ()
+
+  # Do not omit frame pointers in debug builds to ease debugging and profiling.
+  if ((CMAKE_BUILD_TYPE MATCHES Debug) OR
+      (CMAKE_BUILD_TYPE MATCHES RelWithDebInfo))
+    add_compile_options(-fno-omit-frame-pointer)
   endif ()
 
   # Directory structure for some build artifacts.

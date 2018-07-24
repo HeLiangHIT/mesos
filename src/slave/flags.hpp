@@ -69,7 +69,7 @@ public:
   std::string work_dir;
   std::string runtime_dir;
   std::string launcher_dir;
-  std::string hadoop_home; // TODO(benh): Make an Option.
+  Option<std::string> hadoop_home;
   size_t max_completed_executors_per_framework;
 
 #ifndef __WINDOWS__
@@ -152,6 +152,7 @@ public:
 #ifdef ENABLE_NETWORK_PORTS_ISOLATOR
   Duration container_ports_watch_interval;
   bool check_agent_port_range_only;
+  bool enforce_container_ports;
 #endif // ENABLE_NETWORK_PORTS_ISOLATOR
 
   Option<std::string> network_cni_plugins_dir;
@@ -178,6 +179,7 @@ public:
   Option<std::string> master_detector;
 #if ENABLE_XFS_DISK_ISOLATOR
   std::string xfs_project_range;
+  bool xfs_kill_containers;
 #endif
   bool http_command_executor;
   Option<SlaveCapabilities> agent_features;

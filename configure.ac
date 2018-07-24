@@ -18,7 +18,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.61])
-AC_INIT([mesos], [1.6.0])
+AC_INIT([mesos], [1.7.0])
 
 # Have autoconf setup some variables related to the system.
 AC_CANONICAL_HOST
@@ -76,66 +76,125 @@ AC_CONFIG_FILES([3rdparty/stout/Makefile])
 AC_CONFIG_FILES([3rdparty/stout/include/Makefile])
 AC_CONFIG_FILES([3rdparty/gmock_sources.cc])
 
-AC_CONFIG_FILES([bin/mesos.sh], [chmod +x bin/mesos.sh])
-AC_CONFIG_FILES([bin/mesos-agent.sh], [chmod +x bin/mesos-agent.sh])
-AC_CONFIG_FILES([bin/mesos-local.sh], [chmod +x bin/mesos-local.sh])
-AC_CONFIG_FILES([bin/mesos-master.sh], [chmod +x bin/mesos-master.sh])
+AC_CONFIG_FILES(
+  [bin/mesos.sh],
+  [chmod +x bin/mesos.sh])
+AC_CONFIG_FILES(
+  [bin/mesos-agent.sh],
+  [chmod +x bin/mesos-agent.sh])
+AC_CONFIG_FILES(
+  [bin/mesos-local.sh],
+  [chmod +x bin/mesos-local.sh])
+AC_CONFIG_FILES(
+  [bin/mesos-master.sh],
+  [chmod +x bin/mesos-master.sh])
 # TODO(tomxing): Remove this script once the
 # slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES([bin/mesos-slave.sh:bin/mesos-agent.sh.in],
+AC_CONFIG_FILES(
+  [bin/mesos-slave.sh:bin/mesos-agent.sh.in],
   [chmod +x bin/mesos-slave.sh])
-AC_CONFIG_FILES([bin/mesos-tests.sh], [chmod +x bin/mesos-tests.sh])
-AC_CONFIG_FILES([bin/mesos-agent-flags.sh])
-AC_CONFIG_FILES([bin/mesos-local-flags.sh])
-AC_CONFIG_FILES([bin/mesos-master-flags.sh])
+AC_CONFIG_FILES(
+  [bin/mesos-tests.sh],
+  [chmod +x bin/mesos-tests.sh])
+AC_CONFIG_FILES(
+  [bin/mesos-agent-flags.sh],
+  [chmod +x bin/mesos-agent-flags.sh])
+AC_CONFIG_FILES(
+  [bin/mesos-local-flags.sh],
+  [chmod +x bin/mesos-local-flags.sh])
+AC_CONFIG_FILES(
+  [bin/mesos-master-flags.sh],
+  [chmod +x bin/mesos-master-flags.sh])
 # TODO(tomxing): Remove this script once the
 # slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES([bin/mesos-slave-flags.sh:bin/mesos-agent-flags.sh.in])
-AC_CONFIG_FILES([bin/mesos-tests-flags.sh])
-AC_CONFIG_FILES([bin/gdb-mesos-agent.sh], [chmod +x bin/gdb-mesos-agent.sh])
-AC_CONFIG_FILES([bin/gdb-mesos-local.sh], [chmod +x bin/gdb-mesos-local.sh])
-AC_CONFIG_FILES([bin/gdb-mesos-master.sh], [chmod +x bin/gdb-mesos-master.sh])
+AC_CONFIG_FILES(
+  [bin/mesos-slave-flags.sh:bin/mesos-agent-flags.sh.in],
+  [chmod +x bin/mesos-slave-flags.sh])
+AC_CONFIG_FILES(
+  [bin/mesos-tests-flags.sh],
+  [chmod +x bin/mesos-tests-flags.sh])
+AC_CONFIG_FILES(
+  [bin/gdb-mesos-agent.sh],
+  [chmod +x bin/gdb-mesos-agent.sh])
+AC_CONFIG_FILES(
+  [bin/gdb-mesos-local.sh],
+  [chmod +x bin/gdb-mesos-local.sh])
+AC_CONFIG_FILES(
+  [bin/gdb-mesos-master.sh],
+  [chmod +x bin/gdb-mesos-master.sh])
 # TODO(tomxing): Remove this script once the
 # slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES([bin/gdb-mesos-slave.sh:bin/gdb-mesos-agent.sh.in],
+AC_CONFIG_FILES(
+  [bin/gdb-mesos-slave.sh:bin/gdb-mesos-agent.sh.in],
   [chmod +x bin/gdb-mesos-slave.sh])
-AC_CONFIG_FILES([bin/gdb-mesos-tests.sh], [chmod +x bin/gdb-mesos-tests.sh])
-AC_CONFIG_FILES([bin/lldb-mesos-agent.sh], [chmod +x bin/lldb-mesos-agent.sh])
-AC_CONFIG_FILES([bin/lldb-mesos-local.sh], [chmod +x bin/lldb-mesos-local.sh])
-AC_CONFIG_FILES([bin/lldb-mesos-master.sh],
+AC_CONFIG_FILES(
+  [bin/gdb-mesos-tests.sh],
+  [chmod +x bin/gdb-mesos-tests.sh])
+AC_CONFIG_FILES(
+  [bin/lldb-mesos-agent.sh],
+  [chmod +x bin/lldb-mesos-agent.sh])
+AC_CONFIG_FILES(
+  [bin/lldb-mesos-local.sh],
+  [chmod +x bin/lldb-mesos-local.sh])
+AC_CONFIG_FILES(
+  [bin/lldb-mesos-master.sh],
   [chmod +x bin/lldb-mesos-master.sh])
 # TODO(tomxing): Remove this script once the
 # slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES([bin/lldb-mesos-slave.sh:bin/lldb-mesos-agent.sh.in],
+AC_CONFIG_FILES(
+  [bin/lldb-mesos-slave.sh:bin/lldb-mesos-agent.sh.in],
   [chmod +x bin/lldb-mesos-slave.sh])
-AC_CONFIG_FILES([bin/lldb-mesos-tests.sh], [chmod +x bin/lldb-mesos-tests.sh])
-AC_CONFIG_FILES([bin/valgrind-mesos-agent.sh],
+AC_CONFIG_FILES(
+  [bin/lldb-mesos-tests.sh],
+  [chmod +x bin/lldb-mesos-tests.sh])
+AC_CONFIG_FILES(
+  [bin/valgrind-mesos-agent.sh],
   [chmod +x bin/valgrind-mesos-agent.sh])
-AC_CONFIG_FILES([bin/valgrind-mesos-local.sh],
+AC_CONFIG_FILES(
+  [bin/valgrind-mesos-local.sh],
   [chmod +x bin/valgrind-mesos-local.sh])
-AC_CONFIG_FILES([bin/valgrind-mesos-master.sh],
+AC_CONFIG_FILES(
+  [bin/valgrind-mesos-master.sh],
   [chmod +x bin/valgrind-mesos-master.sh])
 # TODO(tomxing): Remove this script once the
 # slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES([bin/valgrind-mesos-slave.sh:bin/valgrind-mesos-agent.sh.in],
+AC_CONFIG_FILES(
+  [bin/valgrind-mesos-slave.sh:bin/valgrind-mesos-agent.sh.in],
   [chmod +x bin/valgrind-mesos-slave.sh])
-AC_CONFIG_FILES([bin/valgrind-mesos-tests.sh],
+AC_CONFIG_FILES(
+  [bin/valgrind-mesos-tests.sh],
   [chmod +x bin/valgrind-mesos-tests.sh])
-AC_CONFIG_FILES([src/deploy/mesos-daemon.sh])
-AC_CONFIG_FILES([src/deploy/mesos-start-agents.sh])
-AC_CONFIG_FILES([src/deploy/mesos-start-cluster.sh])
-AC_CONFIG_FILES([src/deploy/mesos-start-masters.sh])
+AC_CONFIG_FILES(
+  [src/deploy/mesos-daemon.sh],
+  [chmod +x src/deploy/mesos-daemon.sh])
+AC_CONFIG_FILES(
+  [src/deploy/mesos-start-agents.sh],
+  [chmod +x src/deploy/mesos-start-agents.sh])
+AC_CONFIG_FILES(
+  [src/deploy/mesos-start-cluster.sh],
+  [chmod +x src/deploy/mesos-start-cluster.sh])
+AC_CONFIG_FILES(
+  [src/deploy/mesos-start-masters.sh],
+  [chmod +x src/deploy/mesos-start-masters.sh])
 # TODO(tomxing): Remove this script once the
 # slave->agent rename is complete(MESOS-3782).
 AC_CONFIG_FILES(
-  [src/deploy/mesos-start-slaves.sh:src/deploy/mesos-start-agents.sh.in])
-AC_CONFIG_FILES([src/deploy/mesos-stop-agents.sh])
-AC_CONFIG_FILES([src/deploy/mesos-stop-cluster.sh])
-AC_CONFIG_FILES([src/deploy/mesos-stop-masters.sh])
+  [src/deploy/mesos-start-slaves.sh:src/deploy/mesos-start-agents.sh.in],
+  [chmod +x src/deploy/mesos-start-slaves.sh])
+AC_CONFIG_FILES(
+  [src/deploy/mesos-stop-agents.sh],
+  [chmod +x src/deploy/mesos-stop-agents.sh])
+AC_CONFIG_FILES(
+  [src/deploy/mesos-stop-cluster.sh],
+  [chmod +x src/deploy/mesos-stop-cluster.sh])
+AC_CONFIG_FILES(
+  [src/deploy/mesos-stop-masters.sh],
+  [chmod +x src/deploy/mesos-stop-masters.sh])
 # TODO(tomxing): Remove this script once the
 # slave->agent rename is complete(MESOS-3782).
 AC_CONFIG_FILES(
-  [src/deploy/mesos-stop-slaves.sh:src/deploy/mesos-stop-agents.sh.in])
+  [src/deploy/mesos-stop-slaves.sh:src/deploy/mesos-stop-agents.sh.in],
+  [chmod +x src/deploy/mesos-stop-slaves.sh])
 
 AC_CONFIG_FILES([include/mesos/version.hpp])
 
@@ -408,6 +467,11 @@ AC_ARG_WITH([libevent],
                            [specify where to locate the libevent library]),
             [], [])
 
+AC_ARG_WITH([libarchive],
+            AS_HELP_STRING([--with-libarchive=@<:@=DIR@:>@],
+                           [specify where to locate the libarchive library]),
+            [without_bundled_libarchive=yes], [])
+
 AC_ARG_WITH([libprocess],
             AS_HELP_STRING([--with-libprocess=@<:@=DIR@:>@],
                            [specify where to locate the libprocess library]),
@@ -485,7 +549,7 @@ AM_CONDITIONAL([OPTIMIZE], [test x"$enable_optimize" = "xyes"])
 
 debug_flags="-g1"
 if test "x$enable_debug" = "xyes"; then
-  debug_flags="-g"
+  debug_flags="-g -fno-omit-frame-pointer"
 elif test "x$enable_optimize" = "xyes"; then
   debug_flags=""
 fi
@@ -584,6 +648,8 @@ AS_CASE($ax_cv_cxx_compiler_vendor,
       AC_MSG_NOTICE([Disabling warnings about unused local typedefs])
       CXXFLAGS="${CXXFLAGS} -Wno-unused-local-typedef"
     fi
+
+    CXXFLAGS="${CXXFLAGS} -Wno-inconsistent-missing-override"
   ], [gnu], [
     # Check for GCC version >= 4.8.
     AX_COMPARE_VERSION([$ax_cv_cxx_compiler_version], [ge], [4.8],
@@ -697,7 +763,9 @@ AC_ARG_VAR([MAVEN_HOME], [looks for mvn at MAVEN_HOME/bin/mvn])
 
 AC_ARG_VAR([PROTOBUF_JAR], [full path to protobuf jar on prefixed builds])
 
-AC_ARG_VAR([PYTHON], [which Python interpreter to use])
+AC_ARG_VAR([PYTHON], [which Python 2 interpreter to use])
+
+AC_ARG_VAR([PYTHON_3], [which Python 3 interpreter to use])
 
 AC_ARG_VAR([TEST_DRIVER], [executable and arguments of a test driver])
 
@@ -1453,6 +1521,42 @@ fi
 AM_CONDITIONAL([ENABLE_LIBEVENT], [test x"$enable_libevent" = "xyes"])
 
 
+# Check if user has asked us to use a preinstalled libarchive, or if
+# they asked us to ignore all bundled libraries while compiling and
+# linking.
+if test -n "`echo $with_libarchive`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_libarchive}/include"
+  LDFLAGS="$LDFLAGS -L${with_libarchive}/lib"
+fi
+
+if test "x$without_bundled_libarchive" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Check if headers and library were located.
+  AC_CHECK_HEADERS([archive.h], [found_libarchive=yes])
+
+  if test "x$found_libarchive" = "xyes"; then
+    with_bundled_libarchive=no
+  else
+    AC_MSG_ERROR([cannot find libarchive
+-------------------------------------------------------------------
+You have requested the use of a non-bundled libarchive but no suitable
+libarchive could be found.
+
+You may want specify the location of libarchive by providing a prefix
+path via --with-libarchive=DIR, or check that the path you provided is
+correct if you're already doing this.
+-------------------------------------------------------------------
+])
+  fi
+
+else
+  with_bundled_libarchive=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_LIBARCHIVE], [test "x$with_bundled_libarchive" = "xyes"])
+
+
+
 # Check if user has asked us to use a preinstalled libprocess, or if
 # they asked us to ignore all bundled libraries while compiling and
 # linking.
@@ -2067,9 +2171,13 @@ if test "x$enable_grpc" = "xyes"; then
       GRPCPREFIX="/usr"
     fi
 
+    if test "x$enable_ssl" = "xno"; then
+      GRPC_VARIANT="_unsecure"
+    fi
+
     # Check if headers and library were located.
     saved_LIBS="$LIBS"
-    LIBS="-lgrpc++ -lgrpc -lgpr $LIBS"
+    LIBS="-lgrpc++$GRPC_VARIANT -lgrpc$GRPC_VARIANT -lgpr $LIBS"
     AC_LANG_PUSH([C++])
     AC_CHECK_HEADERS([grpcpp/grpcpp.h],
                      [AC_LINK_IFELSE(
@@ -2108,14 +2216,6 @@ correct if you are already doing this.
       ])
     fi
   else
-    if test "x$found_ssl" != "xyes"; then
-      AC_MSG_ERROR([cannot find libssl
--------------------------------------------------------------------
-libssl is required for gRPC to build.
--------------------------------------------------------------------
-      ])
-    fi
-
     with_bundled_grpc=yes
   fi
 
@@ -2216,38 +2316,93 @@ LIBS="$saved_LIBS"
 # LDFLAGS, ...) beyond this line.
 
 # Perform necessary configuration for building with Python.
-if test "x$enable_python" = "xyes"; then
-  # If the user specified PYTHON_VERSION then assume that is the
-  # Python that they want and construct PYTHON using the canonical
-  # name (failing if PYTHON is also set since we can't easily check
-  # that PYTHON and PYTHON_VERSION are compatible). This bit of
-  # tomfoolery is mostly to match the semantics of AC_PYTHON_DEVEL
-  # (used below). If we don't do this then it's possible that a user
-  # will specify PYTHON_VERSION which will get ignored (and likely
-  # replaced) via AM_PATH_PYTHON.
+if test "x$enable_python" = "xyes" || \
+   test "x$enable_new_cli" = "xyes"; then
+  # Ensure PYTHON and PYTHON_VERSION are both set appropriately. We need
+  # to ensure this either when these variables are passed in the
+  # environment or when set via AM_PATH_PYTHON. If we don't do this,
+  # it's possible that a user will specify PYTHON_VERSION which will get
+  # ignored (and likely replaced) via AM_PATH_PYTHON.
   # TODO(benh): Consolidate AM_PATH_PYTHON and AC_PYTHON_DEVEL into a
   # single macro that both iterates through potential 'python' options
   # looking for an acceptable version (i.e., AM_PATH_PYTHON) and
   # checks for Python.h (i.e., AC_PYTHON_DEVEL).
-  if test -n "$PYTHON_VERSION"; then
-    if test -n "$PYTHON"; then
-      AC_MSG_ERROR([only specify one of PYTHON or PYTHON_VERSION])
-    fi
-    PYTHON=python$PYTHON_VERSION
+  if test -n "$PYTHON" && test -n "$PYTHON_VERSION"; then
+    AC_MSG_ERROR([only specify one of PYTHON or PYTHON_VERSION])
   fi
 
+  if test -n "$PYTHON"; then
+    PYTHON_VERSION=`$PYTHON -c "import sys; sys.stdout.write(sys.version[[:3]])"`
+  fi
+
+  if test -n "$PYTHON_VERSION"; then
+    AC_SUBST([PYTHON], [python$PYTHON_VERSION])
+  fi
+
+  if test -z "$PYTHON" && test -z "$PYTHON_VERSION"; then
+    AM_PATH_PYTHON()
+  fi
+fi
+
+if test "x$enable_python" = "xyes"; then
   # Check if PYTHON is at least 2.6 or try and find one that is if
   # PYTHON is not set (necessary to run our examples).
-  AM_PATH_PYTHON([2.6],,
-                 [AC_MSG_ERROR([mesos requires Python >= 2.6
+  AM_PYTHON_CHECK_VERSION([$PYTHON], [2.6], [],
+                 [AC_MSG_ERROR([Mesos requires Python >= 2.6
 -------------------------------------------------------------------
-If you already have Python 2.6 installed (and it's on the path),
-you might want to check if you have the PYTHON environment variable
-set to an older version of Python.
+The detected Python version is $PYTHON_VERSION.
+
+If you already have Python 2.6+ installed (and it's the default python
+on the path), you might want to check if you have the PYTHON environment
+variable set to an older version of Python.
 -------------------------------------------------------------------
   ])])
 
-  # Next we ensure we have the Python development libraries.
+  AM_PYTHON_CHECK_VERSION([$PYTHON], [3.0],
+                 [AC_MSG_ERROR([Mesos requires Python < 3.0
+-------------------------------------------------------------------
+The detected Python version is $PYTHON_VERSION.
+
+If you already have Python 2.6+ installed (and it's the default python
+on the path), you might want to check if you have the PYTHON environment
+variable set to a version of Python greater than 3.0.
+-------------------------------------------------------------------
+  ])], [])
+
+  if test "x$enable_new_cli" = "xyes" && test -z "$PYTHON_3"; then
+    AC_MSG_ERROR([Missing PYTHON_3 environment variable
+-------------------------------------------------------------------
+The detected Python version is $PYTHON_VERSION. Python 3 not detected.
+
+When building both the Python bindings and the CLI, the detected Python
+version is used to build the bindings and PYTHON_3 must be set
+explicitely in order to build the CLI.
+-------------------------------------------------------------------
+    ])
+  fi
+fi
+
+if test "x$enable_new_cli" = "xyes"; then
+  if test -z "$PYTHON_3"; then
+    AC_SUBST([PYTHON_3], [$PYTHON])
+  fi
+
+  PYTHON_3_VERSION=`$PYTHON_3 -c 'import sys; print(sys.version[[0:3]])'`
+
+  AM_PYTHON_CHECK_VERSION([$PYTHON_3], [3.6], [],
+                 [AC_MSG_ERROR([The Mesos CLI requires Python >= 3.6
+-------------------------------------------------------------------
+The detected Python 3 version is $PYTHON_3_VERSION.
+
+The new CLI requires Python version 3.6 or newer in order to build.
+You may wish to set the PYTHON_3 environment variable to make sure
+that the right Python executable is found.
+-------------------------------------------------------------------
+  ])])
+fi
+
+if test "x$enable_python" = "xyes"; then
+  # Next we ensure we have the Python development libraries for Python 2.
   AX_PYTHON_DEVEL([>= '2.6'])
 
   # Ensure that we can build a native Python egg linking against a
@@ -2356,7 +2511,7 @@ There are two possible workarounds for this issue:
   $PYTHON -c "import mesos; mesos._mesos" &> /dev/null
 
   if test $? = 0; then
-    pymodulelocation=`python -c \
+    pymodulelocation=`$PYTHON -c \
       "import mesos; import os; print os.path.dirname(mesos.__path__[[0]])" \
       2> /dev/null`
   fi
@@ -2519,32 +2674,6 @@ correct if you're already doing this.
 
   has_python=yes
 fi
-
-AS_IF([test "x$enable_new_cli" = "xyes"], [
-  AM_PATH_PYTHON([2.6])
-
-  AX_COMPARE_VERSION([$PYTHON_VERSION], [gt], [2.7],
-    AC_MSG_ERROR([Python version too new
--------------------------------------------------------------------
-The new CLI requires Python version 2.6 or 2.7 in order to build.
-Your Python version is $PYTHON_VERSION.
-
-You may wish to set the PYTHON environment variable to an
-appropriate value to assure the right Python executable is found.
--------------------------------------------------------------------
-  ]))
-
-  AC_CHECK_PROG([VIRTUALENV_CHECK], [virtualenv], [yes])
-  AS_IF([test "x$VIRTUALENV_CHECK" = "xyes"],, [
-     AC_MSG_ERROR([Cannot find virtualenv
--------------------------------------------------------------------
-The new CLI requires 'virtualenv' be installed as part of your
-Python $PYTHON_VERSION installation.
-
-You may wish to install it via 'pip install virtualenv'.
--------------------------------------------------------------------
-  ])])
-])
 
 AC_MSG_CHECKING([whether to enable new CLI])
 AS_IF([test "x$enable_new_cli" = "xyes"],

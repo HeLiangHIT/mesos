@@ -45,8 +45,8 @@ using process::Failure;
 using process::Future;
 using process::Owned;
 
-using std::list;
 using std::max;
+using std::vector;
 
 namespace mesos {
 namespace internal {
@@ -63,7 +63,7 @@ bool WindowsMemIsolatorProcess::supportsStandalone() { return true; }
 // When recovering, this ensures that our ContainerID -> PID mapping is
 // recreated.
 Future<Nothing> WindowsMemIsolatorProcess::recover(
-    const list<ContainerState>& state, const hashset<ContainerID>& orphans)
+    const vector<ContainerState>& state, const hashset<ContainerID>& orphans)
 {
   foreach (const ContainerState& run, state) {
     // This should (almost) never occur: see comment in
@@ -210,7 +210,7 @@ Future<ResourceStatistics> WindowsMemIsolatorProcess::usage(
   const Try<Bytes> mem_total_bytes =
     os::get_job_mem(infos[containerId].pid.get());
   if (mem_total_bytes.isSome()) {
-    result.set_mem_total_bytes(mem_total_bytes.get().bytes());
+    result.set_mem_total_bytes(mem_total_bytes->bytes());
   }
 
   return result;

@@ -863,8 +863,11 @@ Option<Error> Resources::validate(const Resource& resource)
       return Error("Invalid scalar resource");
     }
 
-    if (resource.scalar().value() < 0) {
-      return Error("Invalid scalar resource: value < 0");
+    // We do not allow negative scalar resource values or
+    // non-zero values which would be represented as zero.
+    if (resource.scalar().value() != 0 &&
+        resource.scalar() <= Value::Scalar()) {
+      return Error("Invalid scalar resource: value <= 0");
     }
   } else if (resource.type() == Value::RANGES) {
     if (resource.has_scalar() ||
@@ -1242,6 +1245,17 @@ bool Resources::isShared(const Resource& resource)
   CHECK(!resource.has_reservation()) << resource;
 
   return resource.has_shared();
+}
+
+
+bool Resources::isScalarQuantity(const Resources& resources)
+{
+  // Instead of checking the absence of non-scalar-quantity fields,
+  // we do an equality check between the original resources object and
+  // its stripped counterpart.
+  //
+  // We remove the static reservation metadata here via `toUnreserved()`.
+  return resources == resources.createStrippedScalarQuantity().toUnreserved();
 }
 
 
@@ -1626,23 +1640,12 @@ Resources Resources::createStrippedScalarQuantity() const
 
   foreach (const Resource& resource, resources) {
     if (resource.type() == Value::SCALAR) {
-      Resource scalar = resource;
-      scalar.clear_provider_id();
-      scalar.clear_allocation_info();
+      Resource scalar;
 
-      // We collapse the stack of reservations here to a single `STATIC`
-      // reservation in order to maintain existing behavior of ignoring
-      // the reservation type, and keeping the reservation role.
-      if (Resources::isReserved(scalar)) {
-        Resource::ReservationInfo collapsedReservation;
-        collapsedReservation.set_type(Resource::ReservationInfo::STATIC);
-        collapsedReservation.set_role(Resources::reservationRole(scalar));
-        scalar.clear_reservations();
-        scalar.add_reservations()->CopyFrom(collapsedReservation);
-      }
+      scalar.set_name(resource.name());
+      scalar.set_type(resource.type());
+      scalar.mutable_scalar()->CopyFrom(resource.scalar());
 
-      scalar.clear_disk();
-      scalar.clear_shared();
       stripped.add(scalar);
     }
   }

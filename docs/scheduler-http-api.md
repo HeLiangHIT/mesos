@@ -48,46 +48,7 @@ The following calls are currently accepted by the master. The canonical source o
 <a id="recordio-response-format"></a>
 ### RecordIO response format
 
-The response returned from the `SUBSCRIBE` call (see [below](#subscribe)) is encoded in RecordIO format, which essentially prepends to a single record (either JSON or serialized Protobuf) its length in bytes, followed by a newline and then the data:
-
-The [BNF grammar](http://www.w3.org/Protocols/rfc2616/rfc2616-sec2.html#sec2.1) for a RecordIO-encoded streaming response is:
-
-```
-    records         = *record
-
-    record          = record-size LF record-data
-
-    record-size     = 1*DIGIT
-    record-data     = record-size(OCTET)
-```
-
-`record-size` should be interpreted as an unsigned 64-bit integer (`uint64`).
-
-For example, a stream may look like:
-
-```
-128\n
-{"type": "SUBSCRIBED","subscribed": {"framework_id": {"value":"12220-3440-12532-2345"},"heartbeat_interval_seconds":15.0}20\n
-{"type":"HEARTBEAT"}675\n
-...
-```
-
-In pseudo-code, this could be parsed with something like the following:
-
-```
-  while (true) {
-    do {
-      lengthBytes = readline()
-    } while (lengthBytes.length < 1)
-
-    messageLength = parseInt(lengthBytes);
-    messageBytes = read(messageLength);
-    process(messageBytes);
-  }
-```
-
-Network intermediaries (e.g., proxies) are free to change the chunk boundaries; this should not have any effect on the recipient application (scheduler). We wanted a way to delimit/encode two events for JSON/Protobuf responses consistently and RecordIO format allowed us to do that.
-
+The response returned from the `SUBSCRIBE` call (see [below](#subscribe)) is encoded in RecordIO format, which essentially prepends to a single record (either JSON or serialized Protobuf) its length in bytes, followed by a newline and then the data. See [RecordIO Format](recordio.md) for details.
 
 <a id="subscribe"></a>
 ### SUBSCRIBE
@@ -268,7 +229,12 @@ HTTP/1.1 202 Accepted
 ```
 
 ### REVIVE
-Sent by the scheduler to remove any/all filters that it has previously set via `ACCEPT` or `DECLINE` calls.
+Sent by the scheduler to perform two actions:
+
+1. Place the scheduler's role(s) in a non-`SUPPRESS`ed state in order to once again receive offers. No-op if the role is not suppressed.
+2. Clears all filters for its role(s) that were previously set via `ACCEPT` and `DECLINE`.
+
+If no role is specified, the operation will apply to all of the scheduler's subscribed roles.
 
 ```
 REVIVE Request (JSON):
@@ -514,6 +480,32 @@ Mesos-Stream-Id: 130ae4e3-6b13-4ef4-baa9-9f2e85c3e9af
 }
 
 REQUEST Response:
+HTTP/1.1 202 Accepted
+
+```
+
+### SUPPRESS
+Sent by the scheduler when it doesn't need offers for a given set of its roles. When Mesos master receives this request, it will stop sending offers for the given set of roles to the framework. As a special case, if roles are not specified, all subscribed roles of this framework are suppressed.
+
+Note that master continues to send offers to other subscribed roles of this framework that are not suppressed. Also, status updates about tasks, executors and agents are not affected by this call. 
+
+If the scheduler wishes to receive offers for the suppressed roles again (e.g., it needs to schedule new workloads), it can send `REVIVE` call.
+
+```
+SUPPRESS Request (JSON):
+POST /api/v1/scheduler  HTTP/1.1
+
+Host: masterhost:5050
+Content-Type: application/json
+Mesos-Stream-Id: 130ae4e3-6b13-4ef4-baa9-9f2e85c3e9af
+
+{
+  "framework_id" : {"value" : "12220-3440-12532-2345"},
+  "type"         : "SUPPRESS",
+  "suppress"     : {"roles": <an-array-of-strings>}
+}
+
+SUPPRESS Response:
 HTTP/1.1 202 Accepted
 
 ```

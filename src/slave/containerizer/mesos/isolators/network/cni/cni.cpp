@@ -378,7 +378,7 @@ bool NetworkCniIsolatorProcess::supportsNesting()
 
 
 Future<Nothing> NetworkCniIsolatorProcess::recover(
-    const list<ContainerState>& states,
+    const vector<ContainerState>& states,
     const hashset<ContainerID>& orphans)
 {
   // If the `network/cni` isolator is providing network isolation to a
@@ -403,6 +403,9 @@ Future<Nothing> NetworkCniIsolatorProcess::recover(
         rootDir.get() + "': " + entries.error());
   }
 
+  vector<ContainerID> unknownOrphans;
+  vector<Future<Nothing>> cleanups;
+
   foreach (const string& entry, entries.get()) {
     ContainerID containerId =
       protobuf::parseContainerId(Path(entry).basename());
@@ -423,23 +426,38 @@ Future<Nothing> NetworkCniIsolatorProcess::recover(
       Try<Nothing> recover = _recover(containerId);
       if (recover.isError()) {
         return Failure(
-            "Failed to recover CNI network information for orphaned the "
+            "Failed to recover CNI network information for the orphaned "
             "container " + stringify(containerId) + ": " + recover.error());
       }
+
+      // Known orphan containers will be cleaned up by containerizer
+      // using the normal cleanup path. See MESOS-2367 for details.
+      if (!orphans.contains(containerId)) {
+        LOG(INFO) << "Removing unknown orphaned container " << containerId;
+
+        unknownOrphans.push_back(containerId);
+        cleanups.push_back(cleanup(containerId));
+      }
     }
-
-    // Known orphan containers will be cleaned up by containerizer
-    // using the normal cleanup path. See MESOS-2367 for details.
-    if (orphans.contains(containerId)) {
-      continue;
-    }
-
-    LOG(INFO) << "Removing unknown orphaned container " << containerId;
-
-    cleanup(containerId);
   }
 
-  return Nothing();
+  return await(cleanups)
+    .then([unknownOrphans](const vector<Future<Nothing>>& cleanups) {
+      CHECK_EQ(cleanups.size(), unknownOrphans.size());
+
+      int i = 0;
+      foreach (const Future<Nothing>& cleanup, cleanups) {
+        if (!cleanup.isReady()) {
+          LOG(ERROR) << "Failed to cleanup unknown orphaned container "
+                     << unknownOrphans.at(i) << ": "
+                     << (cleanup.isFailed() ? cleanup.failure() : "discarded");
+        }
+
+        i++;
+      }
+
+      return Nothing();
+    });
 }
 
 
@@ -935,7 +953,7 @@ Future<Nothing> NetworkCniIsolatorProcess::isolate(
             << "' for container " << containerId;
 
   // Invoke CNI plugin to attach container to CNI networks.
-  list<Future<Nothing>> futures;
+  vector<Future<Nothing>> futures;
   foreachkey (const string& networkName,
               infos[containerId]->containerNetworks) {
     futures.push_back(attach(containerId, networkName, target));
@@ -957,7 +975,7 @@ Future<Nothing> NetworkCniIsolatorProcess::isolate(
 Future<Nothing> NetworkCniIsolatorProcess::_isolate(
     const ContainerID& containerId,
     pid_t pid,
-    const list<Future<Nothing>>& attaches)
+    const vector<Future<Nothing>>& attaches)
 {
   vector<string> messages;
   foreach (const Future<Nothing>& attach, attaches) {
@@ -1496,7 +1514,7 @@ Future<Nothing> NetworkCniIsolatorProcess::cleanup(
   }
 
   // Invoke CNI plugin to detach container from CNI networks.
-  list<Future<Nothing>> futures;
+  vector<Future<Nothing>> futures;
   foreachkey (const string& networkName,
               infos[containerId]->containerNetworks) {
     futures.push_back(detach(containerId, networkName));
@@ -1513,7 +1531,7 @@ Future<Nothing> NetworkCniIsolatorProcess::cleanup(
 
 Future<Nothing> NetworkCniIsolatorProcess::_cleanup(
     const ContainerID& containerId,
-    const list<Future<Nothing>>& detaches)
+    const vector<Future<Nothing>>& detaches)
 {
   CHECK(infos.contains(containerId));
 

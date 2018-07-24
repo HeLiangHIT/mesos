@@ -190,7 +190,7 @@ public:
   }
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     ping();
   }
@@ -768,6 +768,42 @@ void Master::initialize()
       << " for --offer_timeout: Must be greater than zero";
   }
 
+  // Parse min_allocatable_resources.
+  Try<vector<Resources>> minAllocatableResources =
+    [](const string& resourceString) -> Try<vector<Resources>> {
+      vector<Resources> result;
+
+      foreach (const string& token, strings::tokenize(resourceString, "|")) {
+        Try<vector<Resource>> resourceVector =
+          Resources::fromSimpleString(token);
+
+        if (resourceVector.isError()) {
+          return Error(resourceVector.error());
+        }
+
+        result.push_back(Resources(CHECK_NOTERROR(resourceVector)));
+      }
+
+      return result;
+  }(flags.min_allocatable_resources);
+
+  if (minAllocatableResources.isError()) {
+    EXIT(EXIT_FAILURE) << "Error parsing min_allocatable_resources: '"
+                       << flags.min_allocatable_resources
+                       << "': " << minAllocatableResources.error();
+  }
+
+  // Validate that configured minimum resources are "pure" scalar quantities.
+  foreach (
+      const Resources& resources, CHECK_NOTERROR(minAllocatableResources)) {
+    if (!Resources::isScalarQuantity(resources)) {
+      EXIT(EXIT_FAILURE) << "Invalid min_allocatable_resources: '"
+                         << flags.min_allocatable_resources << "': "
+                         << "minimum allocatable resources should only"
+                         << "have name, type (scalar) and value set";
+    }
+  }
+
   // Initialize the allocator.
   allocator->initialize(
       flags.allocation_interval,
@@ -775,7 +811,8 @@ void Master::initialize()
       defer(self(), &Master::inverseOffer, lambda::_1, lambda::_2),
       flags.fair_sharing_excluded_resource_names,
       flags.filter_gpu_resources,
-      flags.domain);
+      flags.domain,
+      CHECK_NOTERROR(minAllocatableResources));
 
   // Parse the whitelist. Passing Allocator::updateWhitelist()
   // callback is safe because we shut down the whitelistWatcher in
@@ -804,13 +841,10 @@ void Master::initialize()
       &SubmitSchedulerRequest::name);
 
   install<RegisterFrameworkMessage>(
-      &Master::registerFramework,
-      &RegisterFrameworkMessage::framework);
+      &Master::registerFramework);
 
   install<ReregisterFrameworkMessage>(
-      &Master::reregisterFramework,
-      &ReregisterFrameworkMessage::framework,
-      &ReregisterFrameworkMessage::failover);
+      &Master::reregisterFramework);
 
   install<UnregisterFrameworkMessage>(
       &Master::unregisterFramework,
@@ -1920,6 +1954,7 @@ void Master::_doRegistryGc(
     }
 
     slaves.unreachable.erase(slave);
+    slaves.unreachableTasks.erase(slave);
     numRemovedUnreachable++;
   }
 
@@ -2281,7 +2316,11 @@ void Master::drop(
                << " operation from framework " << *framework
                << ": " << message;
 
-  if (operation.has_id()) {
+  // NOTE: The operation validation code should be refactored. Due to the order
+  // of validation, it's possible that this function will be called before the
+  // master validates that operations from v0 frameworks should not have their
+  // ID set.
+  if (operation.has_id() && framework->http.isSome()) {
     scheduler::Event update;
     update.set_type(scheduler::Event::UPDATE_OPERATION_STATUS);
 
@@ -2469,8 +2508,11 @@ void Master::receive(
 
 void Master::registerFramework(
     const UPID& from,
-    const FrameworkInfo& frameworkInfo)
+    RegisterFrameworkMessage&& registerFrameworkMessage)
 {
+  FrameworkInfo frameworkInfo =
+    std::move(*registerFrameworkMessage.mutable_framework());
+
   if (frameworkInfo.has_id() && !frameworkInfo.id().value().empty()) {
     const string error = "Registering with 'id' already set";
 
@@ -2485,7 +2527,7 @@ void Master::registerFramework(
   }
 
   scheduler::Call::Subscribe call;
-  call.mutable_framework_info()->CopyFrom(frameworkInfo);
+  *call.mutable_framework_info() = std::move(frameworkInfo);
 
   subscribe(from, call);
 }
@@ -2493,9 +2535,11 @@ void Master::registerFramework(
 
 void Master::reregisterFramework(
     const UPID& from,
-    const FrameworkInfo& frameworkInfo,
-    bool failover)
+    ReregisterFrameworkMessage&& reregisterFrameworkMessage)
 {
+  FrameworkInfo frameworkInfo =
+    std::move(*reregisterFrameworkMessage.mutable_framework());
+
   if (!frameworkInfo.has_id() || frameworkInfo.id().value().empty()) {
     const string error = "Re-registering without an 'id'";
 
@@ -2510,8 +2554,8 @@ void Master::reregisterFramework(
   }
 
   scheduler::Call::Subscribe call;
-  call.mutable_framework_info()->CopyFrom(frameworkInfo);
-  call.set_force(failover);
+  *call.mutable_framework_info() = std::move(frameworkInfo);
+  call.set_force(reregisterFrameworkMessage.failover());
 
   subscribe(from, call);
 }
@@ -3563,7 +3607,7 @@ Future<bool> Master::authorizeReserveResources(
   // reservations for all roles included in `reserve.resources`.
   // Add an element to `request.roles` for each unique role in the resources.
   hashset<string> roles;
-  list<Future<bool>> authorizations;
+  vector<Future<bool>> authorizations;
   foreach (const Resource& resource, resources) {
     // NOTE: Since authorization happens __before__ validation and resource
     // format conversion, we must look for roles that may appear in both
@@ -3606,7 +3650,7 @@ Future<bool> Master::authorizeReserveResources(
   }
 
   return await(authorizations)
-      .then([](const list<Future<bool>>& authorizations)
+      .then([](const vector<Future<bool>>& authorizations)
             -> Future<bool> {
         // Compute a disjunction.
         foreach (const Future<bool>& authorization, authorizations) {
@@ -3635,7 +3679,7 @@ Future<bool> Master::authorizeUnreserveResources(
     request.mutable_subject()->CopyFrom(subject.get());
   }
 
-  list<Future<bool>> authorizations;
+  vector<Future<bool>> authorizations;
   foreach (const Resource& resource, unreserve.resources()) {
     // NOTE: Since authorization happens __before__ validation and resource
     // format conversion, we must look for the principal that may appear in
@@ -3669,7 +3713,7 @@ Future<bool> Master::authorizeUnreserveResources(
   }
 
   return await(authorizations)
-      .then([](const list<Future<bool>>& authorizations)
+      .then([](const vector<Future<bool>>& authorizations)
             -> Future<bool> {
         // Compute a disjunction.
         foreach (const Future<bool>& authorization, authorizations) {
@@ -3702,7 +3746,7 @@ Future<bool> Master::authorizeCreateVolume(
   // volumes for all roles included in `create.volumes`.
   // Add an element to `request.roles` for each unique role in the volumes.
   hashset<string> roles;
-  list<Future<bool>> authorizations;
+  vector<Future<bool>> authorizations;
   foreach (const Resource& volume, create.volumes()) {
     string role;
     if (volume.reservations_size() > 0) {
@@ -3736,7 +3780,7 @@ Future<bool> Master::authorizeCreateVolume(
   }
 
   return await(authorizations)
-      .then([](const list<Future<bool>>& authorizations)
+      .then([](const vector<Future<bool>>& authorizations)
             -> Future<bool> {
         // Compute a disjunction.
         foreach (const Future<bool>& authorization, authorizations) {
@@ -3765,7 +3809,7 @@ Future<bool> Master::authorizeDestroyVolume(
     request.mutable_subject()->CopyFrom(subject.get());
   }
 
-  list<Future<bool>> authorizations;
+  vector<Future<bool>> authorizations;
   foreach (const Resource& volume, destroy.volumes()) {
     // NOTE: Since validation of this operation may be performed after
     // authorization, we must check here that this resource is a persistent
@@ -3788,7 +3832,7 @@ Future<bool> Master::authorizeDestroyVolume(
   }
 
   return await(authorizations)
-      .then([](const list<Future<bool>>& authorizations)
+      .then([](const vector<Future<bool>>& authorizations)
             -> Future<bool> {
         // Compute a disjunction.
         foreach (const Future<bool>& authorization, authorizations) {
@@ -3801,6 +3845,141 @@ Future<bool> Master::authorizeDestroyVolume(
 }
 
 
+Future<bool> Master::authorizeResizeVolume(
+    const Resource& volume,
+    const Option<Principal>& principal)
+{
+  if (authorizer.isNone()) {
+    return true; // Authorization is disabled.
+  }
+
+  authorization::Request request;
+  request.set_action(authorization::RESIZE_VOLUME);
+
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    request.mutable_subject()->CopyFrom(subject.get());
+  }
+
+  request.mutable_object()->mutable_resource()->CopyFrom(volume);
+
+  string role;
+  if (volume.reservations_size() > 0) {
+    // Check for role in the "post-reservation-refinement" format.
+    role = volume.reservations().rbegin()->role();
+  } else {
+    // Check for role in the "pre-reservation-refinement" format.
+    role = volume.role();
+  }
+
+  request.mutable_object()->set_value(role);
+
+  LOG(INFO) << "Authorizing principal '"
+            << (principal.isSome() ? stringify(principal.get()) : "ANY")
+            << "' to resize volume '" << volume << "'";
+
+  return authorizer.get()->authorized(request);
+}
+
+
+Future<bool> Master::authorizeCreateDisk(
+    const Offer::Operation::CreateDisk& createDisk,
+    const Option<Principal>& principal)
+{
+  if (authorizer.isNone()) {
+    return true; // Authorization is disabled.
+  }
+
+  Option<authorization::Action> action;
+
+  switch (createDisk.target_type()) {
+    case Resource::DiskInfo::Source::MOUNT: {
+      action = authorization::CREATE_MOUNT_DISK;
+      break;
+    }
+    case Resource::DiskInfo::Source::BLOCK: {
+      action = authorization::CREATE_BLOCK_DISK;
+      break;
+    }
+    case Resource::DiskInfo::Source::UNKNOWN:
+    case Resource::DiskInfo::Source::PATH:
+    case Resource::DiskInfo::Source::RAW: {
+      return Failure(
+          "Failed to authorize principal '" +
+          (principal.isSome() ? stringify(principal.get()) : "ANY") +
+          "' to create a " + stringify(createDisk.target_type()) +
+          " disk from '" + stringify(createDisk.source()) +
+          "': Unsupported disk type");
+    }
+  }
+
+  authorization::Request request;
+  request.set_action(CHECK_NOTNONE(action));
+
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    request.mutable_subject()->CopyFrom(subject.get());
+  }
+
+  request.mutable_object()->mutable_resource()->CopyFrom(createDisk.source());
+
+  LOG(INFO) << "Authorizing principal '"
+            << (principal.isSome() ? stringify(principal.get()) : "ANY")
+            << "' to create a " << createDisk.target_type() << " disk from '"
+            << createDisk.source() << "'";
+
+  return authorizer.get()->authorized(request);
+}
+
+
+Future<bool> Master::authorizeDestroyDisk(
+    const Offer::Operation::DestroyDisk& destroyDisk,
+    const Option<Principal>& principal)
+{
+  if (authorizer.isNone()) {
+    return true; // Authorization is disabled.
+  }
+
+  Option<authorization::Action> action;
+
+  switch (destroyDisk.source().disk().source().type()) {
+    case Resource::DiskInfo::Source::MOUNT: {
+      action = authorization::DESTROY_MOUNT_DISK;
+      break;
+    }
+    case Resource::DiskInfo::Source::BLOCK: {
+      action = authorization::DESTROY_BLOCK_DISK;
+      break;
+    }
+    case Resource::DiskInfo::Source::UNKNOWN:
+    case Resource::DiskInfo::Source::PATH:
+    case Resource::DiskInfo::Source::RAW: {
+      return Failure(
+          "Failed to authorize principal '" +
+          (principal.isSome() ? stringify(principal.get()) : "ANY") +
+          "' to destroy disk '" + stringify(destroyDisk.source()) +
+          "': Unsupported disk type");
+    }
+  }
+
+  authorization::Request request;
+  request.set_action(CHECK_NOTNONE(action));
+
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    request.mutable_subject()->CopyFrom(subject.get());
+  }
+
+  request.mutable_object()->mutable_resource()->CopyFrom(destroyDisk.source());
+
+  LOG(INFO) << "Authorizing principal '"
+            << (principal.isSome() ? stringify(principal.get()) : "ANY")
+            << "' to destroy disk '" << destroyDisk.source() << "'";
+
+  return authorizer.get()->authorized(request);
+}
+
+
 Future<bool> Master::authorizeSlave(
     const SlaveInfo& slaveInfo,
     const Option<Principal>& principal)
@@ -3809,7 +3988,7 @@ Future<bool> Master::authorizeSlave(
     return true;
   }
 
-  list<Future<bool>> authorizations;
+  vector<Future<bool>> authorizations;
 
   // First authorize whether the agent can register.
   LOG(INFO) << "Authorizing agent providing resources "
@@ -3844,7 +4023,7 @@ Future<bool> Master::authorizeSlave(
   }
 
   return collect(authorizations)
-    .then([](const list<bool>& results)
+    .then([](const vector<bool>& results)
           -> Future<bool> {
       return std::find(results.begin(), results.end(), false) == results.end();
     });
@@ -4106,10 +4285,10 @@ void Master::accept(
           case Offer::Operation::UNRESERVE:
           case Offer::Operation::CREATE:
           case Offer::Operation::DESTROY:
-          case Offer::Operation::CREATE_VOLUME:
-          case Offer::Operation::DESTROY_VOLUME:
-          case Offer::Operation::CREATE_BLOCK:
-          case Offer::Operation::DESTROY_BLOCK: {
+          case Offer::Operation::GROW_VOLUME:
+          case Offer::Operation::SHRINK_VOLUME:
+          case Offer::Operation::CREATE_DISK:
+          case Offer::Operation::DESTROY_DISK: {
             drop(framework,
                  operation,
                  "Operation attempted with invalid resources: " +
@@ -4167,10 +4346,10 @@ void Master::accept(
           case Offer::Operation::UNRESERVE:
           case Offer::Operation::CREATE:
           case Offer::Operation::DESTROY:
-          case Offer::Operation::CREATE_VOLUME:
-          case Offer::Operation::DESTROY_VOLUME:
-          case Offer::Operation::CREATE_BLOCK:
-          case Offer::Operation::DESTROY_BLOCK: {
+          case Offer::Operation::GROW_VOLUME:
+          case Offer::Operation::SHRINK_VOLUME:
+          case Offer::Operation::CREATE_DISK:
+          case Offer::Operation::DESTROY_DISK: {
             if (framework->http.isNone()) {
               const string message =
                 "The 'id' field was set in an offer operation, but operation"
@@ -4188,6 +4367,14 @@ void Master::accept(
                   "; please use the HTTP scheduler API for this feature");
               framework->send(frameworkError);
 
+              break;
+            }
+
+            if (getResourceProviderId(operation).isNone()) {
+              drop(framework,
+                   operation,
+                   "Operation requested feedback, but it affects resources not"
+                   " managed by a resource provider");
               break;
             }
 
@@ -4232,10 +4419,10 @@ void Master::accept(
       case Offer::Operation::UNRESERVE:
       case Offer::Operation::CREATE:
       case Offer::Operation::DESTROY:
-      case Offer::Operation::CREATE_VOLUME:
-      case Offer::Operation::DESTROY_VOLUME:
-      case Offer::Operation::CREATE_BLOCK:
-      case Offer::Operation::DESTROY_BLOCK: {
+      case Offer::Operation::GROW_VOLUME:
+      case Offer::Operation::SHRINK_VOLUME:
+      case Offer::Operation::CREATE_DISK:
+      case Offer::Operation::DESTROY_DISK: {
         // No-op.
         break;
       }
@@ -4304,7 +4491,7 @@ void Master::accept(
   LOG(INFO) << "Processing ACCEPT call for offers: " << accept.offer_ids()
             << " on agent " << *slave << " for framework " << *framework;
 
-  list<Future<bool>> futures;
+  vector<Future<bool>> futures;
   foreach (const Offer::Operation& operation, accept.operations()) {
     switch (operation.type()) {
       case Offer::Operation::LAUNCH:
@@ -4403,23 +4590,51 @@ void Master::accept(
         break;
       }
 
-      case Offer::Operation::CREATE_VOLUME: {
-        // TODO(nfnt): Implement authorization for 'CREATE_VOLUME'.
+      case Offer::Operation::GROW_VOLUME: {
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
+
+        futures.push_back(
+            authorizeResizeVolume(
+                operation.grow_volume().volume(), principal));
+
         break;
       }
 
-      case Offer::Operation::DESTROY_VOLUME: {
-        // TODO(nfnt): Implement authorization for 'DESTROY_VOLUME'.
+      case Offer::Operation::SHRINK_VOLUME: {
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
+
+        futures.push_back(
+            authorizeResizeVolume(
+                operation.shrink_volume().volume(), principal));
+
         break;
       }
 
-      case Offer::Operation::CREATE_BLOCK: {
-        // TODO(nfnt): Implement authorization for 'CREATE_BLOCK'.
+      case Offer::Operation::CREATE_DISK: {
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
+
+        futures.push_back(
+            authorizeCreateDisk(
+                operation.create_disk(), principal));
+
         break;
       }
 
-      case Offer::Operation::DESTROY_BLOCK: {
-        // TODO(nfnt): Implement authorization for 'DESTROY_BLOCK'.
+      case Offer::Operation::DESTROY_DISK: {
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
+
+        futures.push_back(
+            authorizeDestroyDisk(
+                operation.destroy_disk(), principal));
+
         break;
       }
 
@@ -4448,7 +4663,7 @@ void Master::_accept(
     const SlaveID& slaveId,
     const Resources& offeredResources,
     scheduler::Call::Accept&& accept,
-    const Future<list<Future<bool>>>& _authorizations)
+    const Future<vector<Future<bool>>>& _authorizations)
 {
   Framework* framework = getFramework(frameworkId);
 
@@ -4545,6 +4760,12 @@ void Master::_accept(
   // launched, we remove its resource from offered resources.
   Resources _offeredResources = offeredResources;
 
+  // Converted resources from volume resizes. These converted resources are not
+  // put into `_offeredResources`, so no other operations can consume them.
+  // TODO(zhitao): This will be unnecessary once `GROW_VOLUME` and
+  // `SHRINK_VOLUME` become non-speculative.
+  Resources resizedResources;
+
   // We keep track of the shared resources from the offers separately.
   // `offeredSharedResources` can be modified by CREATE/DESTROY but we
   // don't remove from it when a task is successfully launched so this
@@ -4569,7 +4790,8 @@ void Master::_accept(
   // The order of `authorizations` must match the order of the operations in
   // `accept.operations()`, as they are iterated through simultaneously.
   CHECK_READY(_authorizations);
-  list<Future<bool>> authorizations = _authorizations.get();
+  std::deque<Future<bool>> authorizations(
+      _authorizations->begin(), _authorizations->end());
 
   foreach (const Offer::Operation& operation, accept.operations()) {
     switch (operation.type()) {
@@ -4873,6 +5095,170 @@ void Master::_accept(
         LOG(INFO) << "Applying DESTROY operation for volumes "
                   << operation.destroy().volumes() << " from framework "
                   << *framework << " to agent " << *slave;
+
+        _apply(slave, framework, operation);
+
+        conversions.insert(
+            conversions.end(),
+            _conversions->begin(),
+            _conversions->end());
+
+        break;
+      }
+
+      case Offer::Operation::GROW_VOLUME: {
+        Future<bool> authorization = authorizations.front();
+        authorizations.pop_front();
+
+        CHECK(!authorization.isDiscarded());
+
+        if (authorization.isFailed()) {
+          // TODO(greggomann): We may want to retry this failed authorization
+          // request rather than dropping it immediately.
+          drop(framework,
+               operation,
+               "Authorization of principal '" + framework->info.principal() +
+               "' to grow a volume failed: " +
+               authorization.failure());
+
+          continue;
+        } else if (!authorization.get()) {
+          drop(framework,
+               operation,
+               "Not authorized to grow a volume as '" +
+                 framework->info.principal() + "'");
+
+          continue;
+        }
+
+        // Make sure this grow volume operation is valid.
+        Option<Error> error = validation::operation::validate(
+            operation.grow_volume(), slave->capabilities);
+
+        if (error.isSome()) {
+          drop(
+              framework,
+              operation,
+              error->message + "; on agent " + stringify(*slave));
+          continue;
+        }
+
+        // TODO(zhitao): Convert this operation to non-speculative once we can
+        // support that in the operator API.
+        Try<vector<ResourceConversion>> _conversions =
+          getResourceConversions(operation);
+
+        if (_conversions.isError()) {
+          drop(framework, operation, _conversions.error());
+          continue;
+        }
+
+        CHECK_EQ(1u, _conversions->size());
+        const Resources& consumed = _conversions->at(0).consumed;
+        const Resources& converted = _conversions->at(0).converted;
+
+        if (!_offeredResources.contains(consumed)) {
+          drop(
+              framework,
+              operation,
+              "Invalid GROW_VOLUME operation: " +
+              stringify(_offeredResources) + " does not contain " +
+              stringify(consumed));
+
+          continue;
+        }
+
+        _offeredResources -= consumed;
+        resizedResources += converted;
+
+        LOG(INFO) << "Processing GROW_VOLUME operation for volume "
+                  << operation.grow_volume().volume()
+                  << " with additional resource "
+                  << operation.grow_volume().addition()
+                  << " from framework "
+                  << *framework << " on agent " << *slave;
+
+        _apply(slave, framework, operation);
+
+        conversions.insert(
+            conversions.end(),
+            _conversions->begin(),
+            _conversions->end());
+
+        break;
+      }
+
+      case Offer::Operation::SHRINK_VOLUME: {
+        Future<bool> authorization = authorizations.front();
+        authorizations.pop_front();
+
+        CHECK(!authorization.isDiscarded());
+
+        if (authorization.isFailed()) {
+          // TODO(greggomann): We may want to retry this failed authorization
+          // request rather than dropping it immediately.
+          drop(framework,
+               operation,
+               "Authorization of principal '" + framework->info.principal() +
+               "' to shrink a volume failed: " +
+               authorization.failure());
+
+          continue;
+        } else if (!authorization.get()) {
+          drop(framework,
+               operation,
+               "Not authorized to shrink a volume as '" +
+                 framework->info.principal() + "'");
+
+          continue;
+        }
+
+        // Make sure this shrink volume operation is valid.
+        Option<Error> error = validation::operation::validate(
+            operation.shrink_volume(), slave->capabilities);
+
+        if (error.isSome()) {
+          drop(
+              framework,
+              operation,
+              error->message + "; on agent " + stringify(*slave));
+          continue;
+        }
+
+        // TODO(zhitao): Convert this operation to non-speculative once we can
+        // support that in the operator API.
+        Try<vector<ResourceConversion>> _conversions =
+          getResourceConversions(operation);
+
+        if (_conversions.isError()) {
+          drop(framework, operation, _conversions.error());
+          continue;
+        }
+
+        CHECK_EQ(1u, _conversions->size());
+        const Resources& consumed = _conversions->at(0).consumed;
+        const Resources& converted = _conversions->at(0).converted;
+
+        if (!_offeredResources.contains(consumed)) {
+          drop(
+              framework,
+              operation,
+              "Invalid SHRINK_VOLUME operation: " +
+              stringify(_offeredResources) + " does not contain " +
+              stringify(consumed));
+
+          continue;
+        }
+
+        _offeredResources -= consumed;
+        resizedResources += converted;
+
+        LOG(INFO) << "Processing SHRINK_VOLUME operation for volume "
+                  << operation.shrink_volume().volume()
+                  << " subtracting scalar value "
+                  << operation.shrink_volume().subtract()
+                  << " from framework "
+                  << *framework << " on agent " << *slave;
 
         _apply(slave, framework, operation);
 
@@ -5305,7 +5691,7 @@ void Master::_accept(
         break;
       }
 
-      case Offer::Operation::CREATE_VOLUME: {
+      case Offer::Operation::CREATE_DISK: {
         if (!slave->capabilities.resourceProvider) {
           drop(framework,
                operation,
@@ -5315,19 +5701,19 @@ void Master::_accept(
         }
 
         Option<Error> error = validation::operation::validate(
-            operation.create_volume());
+            operation.create_disk());
 
         if (error.isSome()) {
           drop(framework, operation, error->message);
           continue;
         }
 
-        const Resource& consumed = operation.create_volume().source();
+        const Resource& consumed = operation.create_disk().source();
 
         if (!_offeredResources.contains(consumed)) {
           drop(framework,
                operation,
-               "Invalid CREATE_VOLUME Operation: " +
+               "Invalid CREATE_DISK Operation: " +
                  stringify(_offeredResources) + " does not contain " +
                  stringify(consumed));
           continue;
@@ -5335,8 +5721,8 @@ void Master::_accept(
 
         _offeredResources -= consumed;
 
-        LOG(INFO) << "Processing CREATE_VOLUME operation with source "
-                  << operation.create_volume().source() << " from framework "
+        LOG(INFO) << "Processing CREATE_DISK operation with source "
+                  << operation.create_disk().source() << " from framework "
                   << *framework << " to agent " << *slave;
 
         _apply(slave, framework, operation);
@@ -5344,7 +5730,7 @@ void Master::_accept(
         break;
       }
 
-      case Offer::Operation::DESTROY_VOLUME: {
+      case Offer::Operation::DESTROY_DISK: {
         if (!slave->capabilities.resourceProvider) {
           drop(framework,
                operation,
@@ -5354,19 +5740,19 @@ void Master::_accept(
         }
 
         Option<Error> error = validation::operation::validate(
-            operation.destroy_volume());
+            operation.destroy_disk());
 
         if (error.isSome()) {
           drop(framework, operation, error->message);
           continue;
         }
 
-        const Resource& consumed = operation.destroy_volume().volume();
+        const Resource& consumed = operation.destroy_disk().source();
 
         if (!_offeredResources.contains(consumed)) {
           drop(framework,
                operation,
-               "Invalid DESTROY_VOLUME Operation: " +
+               "Invalid DESTROY_DISK Operation: " +
                  stringify(_offeredResources) + " does not contain " +
                  stringify(consumed));
           continue;
@@ -5374,86 +5760,8 @@ void Master::_accept(
 
         _offeredResources -= consumed;
 
-        LOG(INFO) << "Processing DESTROY_VOLUME operation for volume "
-                  << operation.destroy_volume().volume() << " from framework "
-                  << *framework << " to agent " << *slave;
-
-        _apply(slave, framework, operation);
-
-        break;
-      }
-
-      case Offer::Operation::CREATE_BLOCK: {
-        if (!slave->capabilities.resourceProvider) {
-          drop(framework,
-               operation,
-               "Not supported on agent " + stringify(*slave) +
-               " because it does not have RESOURCE_PROVIDER capability");
-          continue;
-        }
-
-        Option<Error> error = validation::operation::validate(
-            operation.create_block());
-
-        if (error.isSome()) {
-          drop(framework, operation, error->message);
-          continue;
-        }
-
-        const Resource& consumed = operation.create_block().source();
-
-        if (!_offeredResources.contains(consumed)) {
-          drop(framework,
-               operation,
-               "Invalid CREATE_BLOCK Operation: " +
-                 stringify(_offeredResources) + " does not contain " +
-                 stringify(consumed));
-          continue;
-        }
-
-        _offeredResources -= consumed;
-
-        LOG(INFO) << "Processing CREATE_BLOCK operation with source "
-                  << operation.create_block().source() << " from framework "
-                  << *framework << " to agent " << *slave;
-
-        _apply(slave, framework, operation);
-
-        break;
-      }
-
-      case Offer::Operation::DESTROY_BLOCK: {
-        if (!slave->capabilities.resourceProvider) {
-          drop(framework,
-               operation,
-               "Not supported on agent " + stringify(*slave) +
-               " because it does not have RESOURCE_PROVIDER capability");
-          continue;
-        }
-
-        Option<Error> error = validation::operation::validate(
-            operation.destroy_block());
-
-        if (error.isSome()) {
-          drop(framework, operation, error->message);
-          continue;
-        }
-
-        const Resource& consumed = operation.destroy_block().block();
-
-        if (!_offeredResources.contains(consumed)) {
-          drop(framework,
-               operation,
-               "Invalid DESTROY_BLOCK Operation: " +
-                 stringify(_offeredResources) + " does not contain " +
-                 stringify(consumed));
-          continue;
-        }
-
-        _offeredResources -= consumed;
-
-        LOG(INFO) << "Processing DESTROY_BLOCK operation for block "
-                  << operation.destroy_block().block() << " from framework "
+        LOG(INFO) << "Processing DESTROY_DISK operation for volume "
+                  << operation.destroy_disk().source() << " from framework "
                   << *framework << " to agent " << *slave;
 
         _apply(slave, framework, operation);
@@ -5477,12 +5785,15 @@ void Master::_accept(
         conversions);
   }
 
-  if (!_offeredResources.empty()) {
+
+  // TODO(zhitao): Remove `resizedResources` once `GROW_VOLUME` and
+  // `SHRINK_VOLUME` become non-speculative.
+  if (!_offeredResources.empty() || !resizedResources.empty()) {
     // Tell the allocator about the unused (e.g., refused) resources.
     allocator->recoverResources(
         frameworkId,
         slaveId,
-        _offeredResources,
+        _offeredResources + resizedResources,
         accept.filters());
   }
 }
@@ -6279,10 +6590,6 @@ void Master::registerSlave(
     // without authentication.
     LOG(WARNING) << "Refusing registration of agent at " << from
                  << " because it is not authenticated";
-
-    ShutdownMessage message;
-    message.set_message("Agent is not authenticated");
-    send(from, message);
     return;
   }
 
@@ -6367,10 +6674,6 @@ void Master::_registerSlave(
     LOG(WARNING) << "Refusing registration of agent at " << pid
                  << " (" << slaveInfo.hostname() << ")"
                  << ": " << authorizationError.get();
-
-    ShutdownMessage message;
-    message.set_message(authorizationError.get());
-    send(pid, message);
 
     slaves.registering.erase(pid);
     return;
@@ -6615,10 +6918,6 @@ void Master::reregisterSlave(
     // reregister without authentication.
     LOG(WARNING) << "Refusing re-registration of agent at " << from
                  << " because it is not authenticated";
-
-    ShutdownMessage message;
-    message.set_message("Agent is not authenticated");
-    send(from, message);
     return;
   }
 
@@ -6732,10 +7031,6 @@ void Master::_reregisterSlave(
     LOG(WARNING) << "Refusing re-registration of agent " << slaveInfo.id()
                  << " at " << pid << " (" << slaveInfo.hostname() << ")"
                  << ": " << authorizationError.get();
-
-    ShutdownMessage message;
-    message.set_message(authorizationError.get());
-    send(pid, message);
 
     slaves.reregistering.erase(slaveInfo.id());
     return;
@@ -7101,6 +7396,23 @@ void Master::__reregisterSlave(
 
     recoveredTasks.push_back(std::move(task));
   }
+
+  // All tasks from this agent are now reachable so clean them up from
+  // the master's unreachable task records.
+  if (slaves.unreachableTasks.contains(slaveInfo.id())) {
+    foreachkey (FrameworkID frameworkId,
+               slaves.unreachableTasks.at(slaveInfo.id())) {
+      Framework* framework = getFramework(frameworkId);
+      if (framework != nullptr) {
+        foreach (TaskID taskId,
+                 slaves.unreachableTasks.at(slaveInfo.id()).get(frameworkId)) {
+          framework->unreachableTasks.erase(taskId);
+        }
+      }
+    }
+  }
+
+  slaves.unreachableTasks.erase(slaveInfo.id());
 
   vector<Resource> checkpointedResources = google::protobuf::convert(
       std::move(*reregisterSlaveMessage.mutable_checkpointed_resources()));
@@ -7564,6 +7876,13 @@ void Master::updateSlave(UpdateSlaveMessage&& message)
 
   // Check if the known operations for this agent changed.
   if (!updated) {
+    // Below we loop over all received operations and check whether
+    // they are known to the master; operations can be unknown to the
+    // master after a master failover. To handle dropped operations on
+    // agent failover we explicitly track the received operations and
+    // compare them against the operations known to the master.
+    hashset<UUID> receivedOperations;
+
     foreach (const Operation& operation, message.operations().operations()) {
       if (!slave->operations.contains(operation.uuid())) {
         updated = true;
@@ -7574,6 +7893,12 @@ void Master::updateSlave(UpdateSlaveMessage&& message)
         updated = true;
         break;
       }
+
+      receivedOperations.insert(operation.uuid());
+    }
+
+    if (receivedOperations.size() != slave->operations.size()) {
+      updated = true;
     }
   }
 
@@ -8136,8 +8461,7 @@ void Master::forward(
 }
 
 
-void Master::updateOperationStatus(
-    const UpdateOperationStatusMessage& update)
+void Master::updateOperationStatus(UpdateOperationStatusMessage&& update)
 {
   CHECK(update.has_slave_id())
     << "External resource provider is not supported yet";
@@ -8189,6 +8513,21 @@ void Master::updateOperationStatus(
     return;
   }
 
+  if (operation->info().has_id()) {
+    // Agents don't include the framework and operation IDs when sending
+    // operation status updates for dropped operations in response to a
+    // `ReconcileOperationsMessage`, but they can be deduced from the operation
+    // info kept on the master.
+
+    // Only operations done via the scheduler API can have an ID.
+    CHECK(operation->has_framework_id());
+
+    frameworkId = operation->framework_id();
+
+    update.mutable_status()->mutable_operation_id()->CopyFrom(
+        operation->info().id());
+  }
+
   updateOperation(operation, update);
 
   CHECK(operation->statuses_size() > 0);
@@ -8196,9 +8535,6 @@ void Master::updateOperationStatus(
   const OperationStatus& latestStatus = *operation->statuses().rbegin();
 
   if (operation->info().has_id()) {
-    // Only operations done via the scheduler API can have an ID.
-    CHECK_SOME(frameworkId);
-
     // Forward the status update to the framework.
     Framework* framework = getFramework(frameworkId.get());
 
@@ -8967,6 +9303,9 @@ void Master::offer(
   // and a single allocation role.
   ResourceOffersMessage message;
 
+  // We keep track of the offer IDs so that we can log them.
+  vector<OfferID> offerIds;
+
   foreachkey (const string& role, resources) {
     foreachpair (const SlaveID& slaveId,
                  const Resources& offered,
@@ -9112,6 +9451,13 @@ void Master::offer(
       // Add the offer *AND* the corresponding slave's PID.
       message.add_offers()->MergeFrom(offer_);
       message.add_pids(slave->pid);
+
+      offerIds.push_back(offer_.id());
+
+      VLOG(2) << "Sending offer " << offer_.id()
+              << " containing resources " << offered
+              << " on agent " << *slave
+              << " to framework " << *framework;
     }
   }
 
@@ -9119,8 +9465,7 @@ void Master::offer(
     return;
   }
 
-  LOG(INFO) << "Sending " << message.offers().size()
-            << " offers to framework " << *framework;
+  LOG(INFO) << "Sending offers " << offerIds << " to framework " << *framework;
 
   framework->send(message);
 }
@@ -9159,8 +9504,20 @@ void Master::inverseOffer(
     // before the slave was deactivated in the allocator.
     if (!slave->active) {
       LOG(INFO)
-        << "Master ignoring inverse offers because agent " << *slave
-        << " is " << (slave->connected ? "deactivated" : "disconnected");
+        << "Master ignoring inverse offers to framework " << *framework
+        << " because agent " << *slave << " is "
+        << (slave->connected ? "deactivated" : "disconnected");
+
+      continue;
+    }
+
+    // This could happen if the allocator dispatched `Master::inverseOffer`
+    // before the unavailability was removed in the master.
+    if (!machines.contains(slave->machineId) ||
+        !machines.at(slave->machineId).info.has_unavailability()) {
+      LOG(INFO)
+        << "Master dropping inverse offers to framework " << *framework
+        << " because agent " << *slave << " had its unavailability revoked.";
 
       continue;
     }
@@ -9210,8 +9567,13 @@ void Master::inverseOffer(
     return;
   }
 
-  LOG(INFO) << "Sending " << message.inverse_offers().size()
-            << " inverse offers to framework " << *framework;
+  vector<OfferID> inverseOfferIds;
+  foreach (const InverseOffer& inverseOffer, message.inverse_offers()) {
+    inverseOfferIds.push_back(inverseOffer.id());
+  }
+
+  LOG(INFO) << "Sending inverse offers " << inverseOfferIds << " to framework "
+            << *framework;
 
   framework->send(message);
 }
@@ -9313,18 +9675,19 @@ void Master::_authenticate(
     const UPID& pid,
     const Future<Option<string>>& future)
 {
-  if (!future.isReady() || future->isNone()) {
-    const string& error = future.isReady()
-        ? "Refused authentication"
-        : (future.isFailed() ? future.failure() : "future discarded");
-
-    LOG(WARNING) << "Failed to authenticate " << pid
-                 << ": " << error;
-  } else {
+  if (future.isReady() && future->isSome()) {
     LOG(INFO) << "Successfully authenticated principal '" << future->get()
               << "' at " << pid;
 
     authenticated.put(pid, future->get());
+  } else if (future.isReady() && future->isNone()) {
+    LOG(INFO) << "Authentication of " << pid << " was unsuccessful:"
+              << " Invalid credentials";
+  } else if (future.isFailed()) {
+    LOG(WARNING) << "An error ocurred while attempting to authenticate " << pid
+                 << ": " << future.failure();
+  } else {
+    LOG(INFO) << "Authentication of " << pid << " was discarded";
   }
 
   CHECK(authenticating.contains(pid));
@@ -10514,6 +10877,13 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     task->set_state(latestState.getOrElse(status.state()));
   }
 
+  // If this is a (health) check status update, always forward it to
+  // subscribers.
+  if (status.reason() == TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED ||
+      status.reason() == TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED) {
+    sendSubscribersUpdate = true;
+  }
+
   // TODO(brenden): Consider wiping the `message` field?
   if (task->statuses_size() > 0 &&
       task->statuses(task->statuses_size() - 1).state() == status.state()) {
@@ -10648,6 +11018,8 @@ void Master::removeTask(Task* task, bool unreachable)
               << " of framework " << task->framework_id()
               << " on agent " << *slave;
   }
+
+  slaves.unreachableTasks[slave->id].put(task->framework_id(), task->task_id());
 
   // Remove from framework.
   Framework* framework = getFramework(task->framework_id());

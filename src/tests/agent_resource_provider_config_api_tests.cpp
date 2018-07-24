@@ -69,7 +69,7 @@ class AgentResourceProviderConfigApiTest
     public WithParamInterface<ContentType>
 {
 public:
-  virtual void SetUp()
+  void SetUp() override
   {
     ContainerizerTest<slave::MesosContainerizer>::SetUp();
 
@@ -160,7 +160,7 @@ public:
     return info.get();
   }
 
-  virtual void TearDown()
+  void TearDown() override
   {
     foreach (const string& slaveWorkDir, slaveWorkDirs) {
       // Clean up CSI endpoint directories if there is any.
@@ -191,7 +191,7 @@ public:
     ContainerizerTest<slave::MesosContainerizer>::TearDown();
   }
 
-  virtual slave::Flags CreateSlaveFlags()
+  slave::Flags CreateSlaveFlags() override
   {
     slave::Flags flags =
       ContainerizerTest<slave::MesosContainerizer>::CreateSlaveFlags();
@@ -297,9 +297,6 @@ TEST_P(AgentResourceProviderConfigApiTest, ROOT_Add)
   slave::Flags slaveFlags = CreateSlaveFlags();
   slaveFlags.isolation = "filesystem/linux";
 
-  // Disable HTTP authentication to simplify resource provider interactions.
-  slaveFlags.authenticate_http_readwrite = false;
-
   slaveFlags.resource_provider_config_dir = resourceProviderConfigDir;
 
   Future<SlaveRegisteredMessage> slaveRegisteredMessage =
@@ -328,7 +325,7 @@ TEST_P(AgentResourceProviderConfigApiTest, ROOT_Add)
 
   // Decline offers that contain only the agent's default resources.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(DeclineOffers(declineFilters));
+    .WillRepeatedly(DeclineOffers(declineFilters));
 
   Future<vector<Offer>> offers;
 
@@ -382,9 +379,6 @@ TEST_P(AgentResourceProviderConfigApiTest, ROOT_IdempotentAdd)
 
   slave::Flags slaveFlags = CreateSlaveFlags();
   slaveFlags.isolation = "filesystem/linux";
-
-  // Disable HTTP authentication to simplify resource provider interactions.
-  slaveFlags.authenticate_http_readwrite = false;
 
   slaveFlags.resource_provider_config_dir = resourceProviderConfigDir;
 
@@ -452,9 +446,6 @@ TEST_P(AgentResourceProviderConfigApiTest, ROOT_AddConflict)
   slave::Flags slaveFlags = CreateSlaveFlags();
   slaveFlags.isolation = "filesystem/linux";
 
-  // Disable HTTP authentication to simplify resource provider interactions.
-  slaveFlags.authenticate_http_readwrite = false;
-
   slaveFlags.resource_provider_config_dir = resourceProviderConfigDir;
 
   // Generate a pre-existing config.
@@ -514,9 +505,6 @@ TEST_P(AgentResourceProviderConfigApiTest, ROOT_Update)
   slave::Flags slaveFlags = CreateSlaveFlags();
   slaveFlags.isolation = "filesystem/linux";
 
-  // Disable HTTP authentication to simplify resource provider interactions.
-  slaveFlags.authenticate_http_readwrite = false;
-
   slaveFlags.resource_provider_config_dir = resourceProviderConfigDir;
 
   // Generate a pre-existing config.
@@ -551,7 +539,7 @@ TEST_P(AgentResourceProviderConfigApiTest, ROOT_Update)
 
   // Decline offers that contain only the agent's default resources.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(DeclineOffers(declineFilters));
+    .WillRepeatedly(DeclineOffers(declineFilters));
 
   Future<vector<Offer>> oldOffers;
 
@@ -627,9 +615,6 @@ TEST_P(AgentResourceProviderConfigApiTest, ROOT_IdempotentUpdate)
 
   slave::Flags slaveFlags = CreateSlaveFlags();
   slaveFlags.isolation = "filesystem/linux";
-
-  // Disable HTTP authentication to simplify resource provider interactions.
-  slaveFlags.authenticate_http_readwrite = false;
 
   slaveFlags.resource_provider_config_dir = resourceProviderConfigDir;
 
@@ -736,9 +721,6 @@ TEST_P(AgentResourceProviderConfigApiTest, ROOT_Remove)
   slave::Flags slaveFlags = CreateSlaveFlags();
   slaveFlags.isolation = "filesystem/linux";
 
-  // Disable HTTP authentication to simplify resource provider interactions.
-  slaveFlags.authenticate_http_readwrite = false;
-
   slaveFlags.resource_provider_config_dir = resourceProviderConfigDir;
 
   // Generate a pre-existing config.
@@ -772,7 +754,7 @@ TEST_P(AgentResourceProviderConfigApiTest, ROOT_Remove)
 
   // Decline offers that contain only the agent's default resources.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(DeclineOffers(declineFilters));
+    .WillRepeatedly(DeclineOffers(declineFilters));
 
   Future<vector<Offer>> oldOffers;
 

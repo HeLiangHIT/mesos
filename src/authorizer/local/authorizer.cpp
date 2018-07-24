@@ -182,7 +182,7 @@ public:
       action_(action),
       permissive_(permissive) {}
 
-  virtual Try<bool> approved(
+  Try<bool> approved(
       const Option<ObjectApprover::Object>& object) const noexcept override
   {
     // Construct subject.
@@ -417,12 +417,17 @@ public:
 
           break;
         case authorization::CREATE_VOLUME:
+        case authorization::RESIZE_VOLUME:
         case authorization::GET_QUOTA:
         case authorization::RESERVE_RESOURCES:
         case authorization::UPDATE_QUOTA:
         case authorization::UPDATE_WEIGHT:
         case authorization::VIEW_ROLE:
         case authorization::REGISTER_FRAMEWORK:
+        case authorization::CREATE_BLOCK_DISK:
+        case authorization::DESTROY_BLOCK_DISK:
+        case authorization::CREATE_MOUNT_DISK:
+        case authorization::DESTROY_MOUNT_DISK:
           return Error("Authorization for action " + stringify(action_) +
                        " requires a specialized approver object.");
         case authorization::UNKNOWN:
@@ -475,7 +480,7 @@ public:
   // under an executor running under a given OS user and, if a command
   // is available, the principal is also allowed to run the command as
   // the given OS user.
-  virtual Try<bool> approved(
+  Try<bool> approved(
       const Option<ObjectApprover::Object>& object) const noexcept override
   {
     if (object.isNone() || object->command_info == nullptr) {
@@ -519,7 +524,7 @@ public:
   // Executors are permitted to perform an action when the root ContainerID in
   // the object is equal to the ContainerID that was extracted from the
   // subject's claims.
-  virtual Try<bool> approved(
+  Try<bool> approved(
       const Option<ObjectApprover::Object>& object) const noexcept override
   {
     return object.isSome() &&
@@ -541,7 +546,7 @@ public:
   // Resource providers are permitted to perform an action when the
   // ContainerID in the object is prefixed by the namespace extracted
   // from the subject's claims.
-  virtual Try<bool> approved(
+  Try<bool> approved(
       const Option<ObjectApprover::Object>& object) const noexcept override
   {
     return object.isSome() &&
@@ -558,7 +563,7 @@ private:
 class RejectingObjectApprover : public ObjectApprover
 {
 public:
-  virtual Try<bool> approved(
+  Try<bool> approved(
       const Option<ObjectApprover::Object>& object) const noexcept override
   {
     return false;
@@ -584,7 +589,7 @@ public:
     }
   }
 
-  virtual Try<bool> approved(const Option<ObjectApprover::Object>& object) const
+  Try<bool> approved(const Option<ObjectApprover::Object>& object) const
       noexcept override
   {
     ACL::Entity entityObject;
@@ -594,7 +599,12 @@ public:
     } else {
       switch (action_) {
         case authorization::CREATE_VOLUME:
-        case authorization::RESERVE_RESOURCES: {
+        case authorization::RESIZE_VOLUME:
+        case authorization::RESERVE_RESOURCES:
+        case authorization::CREATE_BLOCK_DISK:
+        case authorization::DESTROY_BLOCK_DISK:
+        case authorization::CREATE_MOUNT_DISK:
+        case authorization::DESTROY_MOUNT_DISK: {
           entityObject.set_type(ACL::Entity::SOME);
           if (object->resource) {
             if (object->resource->reservations_size() > 0) {
@@ -875,6 +885,11 @@ public:
             createHierarchicalRoleACLs(acls.create_volumes());
         break;
       }
+      case authorization::RESIZE_VOLUME: {
+        hierarchicalRoleACLs =
+            createHierarchicalRoleACLs(acls.resize_volumes());
+        break;
+      }
       case authorization::RESERVE_RESOURCES: {
         hierarchicalRoleACLs =
             createHierarchicalRoleACLs(acls.reserve_resources());
@@ -903,6 +918,26 @@ public:
       case authorization::UPDATE_QUOTA: {
         hierarchicalRoleACLs =
             createHierarchicalRoleACLs(acls.update_quotas());
+        break;
+      }
+      case authorization::CREATE_BLOCK_DISK: {
+        hierarchicalRoleACLs =
+          createHierarchicalRoleACLs(acls.create_block_disks());
+        break;
+      }
+      case authorization::DESTROY_BLOCK_DISK: {
+        hierarchicalRoleACLs =
+          createHierarchicalRoleACLs(acls.destroy_block_disks());
+        break;
+      }
+      case authorization::CREATE_MOUNT_DISK: {
+        hierarchicalRoleACLs =
+          createHierarchicalRoleACLs(acls.create_mount_disks());
+        break;
+      }
+      case authorization::DESTROY_MOUNT_DISK: {
+        hierarchicalRoleACLs =
+          createHierarchicalRoleACLs(acls.destroy_mount_disks());
         break;
       }
       case authorization::ACCESS_MESOS_LOG:
@@ -1113,12 +1148,17 @@ public:
         return getNestedContainerObjectApprover(subject, action);
       }
       case authorization::CREATE_VOLUME:
+      case authorization::RESIZE_VOLUME:
       case authorization::RESERVE_RESOURCES:
       case authorization::UPDATE_WEIGHT:
       case authorization::VIEW_ROLE:
       case authorization::GET_QUOTA:
       case authorization::REGISTER_FRAMEWORK:
-      case authorization::UPDATE_QUOTA: {
+      case authorization::UPDATE_QUOTA:
+      case authorization::CREATE_BLOCK_DISK:
+      case authorization::DESTROY_BLOCK_DISK:
+      case authorization::CREATE_MOUNT_DISK:
+      case authorization::DESTROY_MOUNT_DISK: {
         return getHierarchicalRoleApprover(subject, action);
       }
       case authorization::ACCESS_MESOS_LOG:
@@ -1520,6 +1560,7 @@ private:
         return acls_;
       case authorization::REGISTER_FRAMEWORK:
       case authorization::CREATE_VOLUME:
+      case authorization::RESIZE_VOLUME:
       case authorization::RESERVE_RESOURCES:
       case authorization::UPDATE_WEIGHT:
       case authorization::VIEW_ROLE:
@@ -1527,6 +1568,10 @@ private:
       case authorization::UPDATE_QUOTA:
       case authorization::LAUNCH_NESTED_CONTAINER_SESSION:
       case authorization::LAUNCH_NESTED_CONTAINER:
+      case authorization::CREATE_BLOCK_DISK:
+      case authorization::DESTROY_BLOCK_DISK:
+      case authorization::CREATE_MOUNT_DISK:
+      case authorization::DESTROY_MOUNT_DISK:
         return Error("Extracting ACLs for " + stringify(action) + " requires "
                      "a specialized function");
       case authorization::UNKNOWN:
@@ -1644,8 +1689,7 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
   foreach (const ACL::GetMaintenanceStatus& acl,
            acls.get_maintenance_statuses()) {
     if (acl.machines().type() == ACL::Entity::SOME) {
-      return Error(
-          "ACL.GetMaintenanceStatus type must be either NONE or ANY");
+      return Error("ACL.GetMaintenanceStatus type must be either NONE or ANY");
     }
   }
 

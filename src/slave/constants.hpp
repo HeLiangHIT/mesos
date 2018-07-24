@@ -85,6 +85,10 @@ constexpr size_t MAX_COMPLETED_FRAMEWORKS = 50;
 // to store in memory.
 constexpr size_t DEFAULT_MAX_COMPLETED_EXECUTORS_PER_FRAMEWORK = 150;
 
+// Maximum number of a container id length, according to the
+// max entry length for directory names on AUFS.
+constexpr size_t MAX_CONTAINER_ID_LENGTH = 242;
+
 // Maximum number of completed tasks per executor to store in memory.
 //
 // NOTE: This should be greater than zero because the agent looks
@@ -166,6 +170,10 @@ constexpr char READWRITE_HTTP_AUTHENTICATION_REALM[] = "mesos-agent-readwrite";
 
 // Name of the agent HTTP authentication realm for HTTP executors.
 constexpr char EXECUTOR_HTTP_AUTHENTICATION_REALM[] = "mesos-agent-executor";
+
+// Name of the agent HTTP authentication realm for HTTP resource providers.
+constexpr char RESOURCE_PROVIDER_HTTP_AUTHENTICATION_REALM[] =
+  "mesos-agent-resource-provider";
 
 // Default maximum storage space to be used by the fetcher cache.
 constexpr Bytes DEFAULT_FETCHER_CACHE_SIZE = Gigabytes(2);

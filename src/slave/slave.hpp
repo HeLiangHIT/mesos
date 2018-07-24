@@ -128,7 +128,7 @@ public:
         mesos::SecretGenerator* secretGenerator,
         const Option<Authorizer*>& authorizer);
 
-  virtual ~Slave();
+  ~Slave() override;
 
   void shutdown(const process::UPID& from, const std::string& message);
 
@@ -205,8 +205,8 @@ public:
       const FrameworkID& frameworkId,
       const ExecutorID& executorId,
       const ContainerID& containerId,
-      const std::list<TaskInfo>& tasks,
-      const std::list<TaskGroupInfo>& taskGroups);
+      const std::vector<TaskInfo>& tasks,
+      const std::vector<TaskGroupInfo>& taskGroups);
 
   // TODO(mzhu): Combine this with `runTaskGroup()' and replace all
   // `runTaskGroup()' mock with `run()` mock.
@@ -421,9 +421,9 @@ public:
   // their address which we do in tests (for things like
   // FUTURE_DISPATCH).
 // protected:
-  virtual void initialize();
-  virtual void finalize();
-  virtual void exited(const process::UPID& pid);
+  void initialize() override;
+  void finalize() override;
+  void exited(const process::UPID& pid) override;
 
   process::Future<Secret> generateSecret(
       const FrameworkID& frameworkId,
@@ -652,6 +652,11 @@ private:
       Operation* operation,
       const UpdateOperationStatusMessage& update);
 
+  // Update the `latest_status` of the operation if it is not terminal.
+  void updateOperationLatestStatus(
+      Operation* operation,
+      const OperationStatus& status);
+
   void removeOperation(Operation* operation);
 
   Operation* getOperation(const UUID& uuid) const;
@@ -669,7 +674,7 @@ private:
   process::Future<Nothing> publishResources(
       const Option<Resources>& additionalResources = None());
 
-  // Gauge methods.
+  // PullGauge methods.
   double _frameworks_active()
   {
     return static_cast<double>(frameworks.size());
@@ -710,6 +715,10 @@ private:
   Try<Nothing> compatible(
       const SlaveInfo& previous,
       const SlaveInfo& current) const;
+
+  void initializeResourceProviderManager(
+      const Flags& flags,
+      const SlaveID& slaveId);
 
   protobuf::master::Capabilities requiredMasterCapabilities;
 
@@ -812,7 +821,7 @@ private:
   // (allocated and oversubscribable) resources.
   Option<Resources> oversubscribedResources;
 
-  ResourceProviderManager resourceProviderManager;
+  process::Owned<ResourceProviderManager> resourceProviderManager;
   process::Owned<LocalResourceProviderDaemon> localResourceProviderDaemon;
 
   // Local resource providers known by the agent.
@@ -1025,7 +1034,7 @@ public:
   // Not yet launched task groups. This is needed for correctly sending
   // TASK_KILLED status updates for all tasks in the group if any of the
   // tasks were killed before the executor could register with the agent.
-  std::list<TaskGroupInfo> queuedTaskGroups;
+  std::vector<TaskGroupInfo> queuedTaskGroups;
 
   // Running.
   LinkedHashMap<TaskID, Task*> launchedTasks;
@@ -1160,7 +1169,7 @@ public:
   // Pending task groups. This is needed for correctly sending
   // TASK_KILLED status updates for all tasks in the group if
   // any of the tasks are killed while pending.
-  std::list<TaskGroupInfo> pendingTaskGroups;
+  std::vector<TaskGroupInfo> pendingTaskGroups;
 
   // Current running executors.
   hashmap<ExecutorID, Executor*> executors;

@@ -20,6 +20,8 @@
 #include <sys/types.h>
 #endif
 
+#include <algorithm>
+#include <chrono>
 #include <cstdlib> // For rand.
 #include <list>
 #include <map>
@@ -49,6 +51,7 @@
 #include <stout/os/kill.hpp>
 #include <stout/os/killtree.hpp>
 #include <stout/os/realpath.hpp>
+#include <stout/os/shell.hpp>
 #include <stout/os/stat.hpp>
 #include <stout/os/which.hpp>
 #include <stout/os/write.hpp>
@@ -156,8 +159,14 @@ TEST_F(OsTest, System)
 }
 
 
-// NOTE: Disabled because `os::cloexec` is not implemented on Windows.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(OsTest, Cloexec)
+// NOTE: `os::cloexec` is a stub on Windows that returns `true`.
+#ifdef __WINDOWS__
+TEST_F(OsTest, Cloexec)
+{
+  ASSERT_SOME_TRUE(os::isCloexec(int_fd(INVALID_HANDLE_VALUE)));
+}
+#else
+TEST_F(OsTest, Cloexec)
 {
   Try<int_fd> fd = os::open(
       "cloexec",
@@ -185,10 +194,36 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(OsTest, Cloexec)
 
   close(fd.get());
 }
+#endif // __WINDOWS__
 
 
-// NOTE: Disabled because `os::nonblock` doesn't exist on Windows.
-#ifndef __WINDOWS__
+// NOTE: `os::isNonblock` is a stub on Windows that returns `true`.
+#ifdef __WINDOWS__
+TEST_F(OsTest, Nonblock)
+{
+  // `os::isNonblock` is a stub on Windows that returns `true`.
+  EXPECT_SOME_TRUE(os::isNonblock(int_fd(INVALID_HANDLE_VALUE)));
+
+  // `os::nonblock` is a no-op for handles.
+  EXPECT_SOME(os::nonblock(int_fd(INVALID_HANDLE_VALUE)));
+
+  // `os::nonblock` should fail for an invalid socket.
+  EXPECT_ERROR(os::nonblock(int_fd(INVALID_SOCKET)));
+
+  // NOTE: There is no way on Windows to check if the socket is in
+  // blocking or non-blocking mode, so `os::isNonblock` is a stub. A
+  // Windows socket always starts in blocking mode, and then can be
+  // set as non-blocking. All we can check here is that `os::nonblock`
+  // does not fail on a valid socket.
+  ASSERT_TRUE(net::wsa_initialize());
+  Try<int_fd> socket =
+    net::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP, WSA_FLAG_NO_HANDLE_INHERIT);
+  ASSERT_SOME(socket);
+  EXPECT_SOME(os::nonblock(socket.get()));
+  EXPECT_SOME(os::close(socket.get()));
+  ASSERT_TRUE(net::wsa_cleanup());
+}
+#else
 TEST_F(OsTest, Nonblock)
 {
   int pipes[2];
@@ -263,23 +298,24 @@ TEST_F(OsTest, BootId)
   Try<string> read = os::read("/proc/sys/kernel/random/boot_id");
   ASSERT_SOME(read);
   EXPECT_EQ(bootId.get(), strings::trim(read.get()));
-#elif defined(__APPLE__) || defined(__FreeBSD__)
-  // For OS X and FreeBSD systems, the boot id is the system boot time in
-  // seconds, so assert it can be numified and is a reasonable value.
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__WINDOWS__)
+  // For OS X, FreeBSD, and Windows systems, the boot id is the system
+  // boot time in seconds, so assert it can be numified and is a
+  // reasonable value.
   Try<uint64_t> numified = numify<uint64_t>(bootId.get());
   ASSERT_SOME(numified);
-
-  timeval time;
-  gettimeofday(&time, nullptr);
   EXPECT_GT(Seconds(numified.get()), Seconds(0));
-  EXPECT_LT(Seconds(numified.get()), Seconds(time.tv_sec));
-#endif
+
+  using namespace std::chrono;
+  EXPECT_LT(
+      Seconds(numified.get()),
+      Seconds(duration_cast<seconds>(system_clock::now().time_since_epoch())
+                .count()));
+#endif // APPLE / FreeBSD / WINDOWS
 }
 
 
-// TODO(hausdorff): Enable test on Windows after we fix. The test hangs. See
-// MESOS-3441.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(OsTest, Sleep)
+TEST_F(OsTest, Sleep)
 {
   Duration duration = Milliseconds(10);
   Stopwatch stopwatch;
@@ -888,12 +924,12 @@ TEST_F(OsTest, TrivialUser)
 }
 
 
-// TODO(hausdorff): Look into enabling this on Windows. Right now,
-// `LD_LIBRARY_PATH` doesn't exist on Windows, so `setPaths` doesn't work. See
-// MESOS-5940.
 // Test setting/resetting/appending to LD_LIBRARY_PATH environment
 // variable (DYLD_LIBRARY_PATH on OS X).
-TEST_F_TEMP_DISABLED_ON_WINDOWS(OsTest, Libraries)
+//
+// NOTE: This will never be enabled on Windows as there is no equivalent.
+#ifndef __WINDOWS__
+TEST_F(OsTest, Libraries)
 {
   const string path1 = "/tmp/path1";
   const string path2 = "/tmp/path1";
@@ -929,36 +965,79 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(OsTest, Libraries)
   os::libraries::setPaths(originalLibraryPath);
   EXPECT_EQ(os::libraries::paths(), originalLibraryPath);
 }
+#endif // __WINDOWS__
 
 
-// NOTE: `os::shell()` is explicitly disallowed on Windows.
-#ifndef __WINDOWS__
 TEST_F(OsTest, Shell)
 {
   Try<string> result = os::shell("echo %s", "hello world");
+#ifdef __WINDOWS__
+  EXPECT_SOME_EQ("hello world\r\n", result);
+#else
   EXPECT_SOME_EQ("hello world\n", result);
+#endif // __WINDOWS__
 
   result = os::shell("foobar");
   EXPECT_ERROR(result);
 
+#ifdef __WINDOWS__
+  // NOTE: This relies on the strange semantics of Windows' echo,
+  // where quotes are not removed. We are testing that a quoted
+  // argument with a space in it remains quoted by `os::shell`.
+  result = os::shell("echo \"foo bar\"");
+  EXPECT_SOME_EQ("\"foo bar\"\r\n", result);
+
+  // Because the arguments do not have whitespace in them,
+  // `CommandLineToArgv` removes the surrounding quotes before passing
+  // them to `echo`.
+  result = os::shell("echo \"foo\" \"bar\"");
+  EXPECT_SOME_EQ("foo bar\r\n", result);
+#endif // __WINDOWS__
+
   // The `|| true`` necessary so that os::shell() sees a success
   // exit code and returns stdout (which we have piped stderr to).
+#ifdef __WINDOWS__
+  result = os::shell("dir foobar889076 2>&1 || exit /b 0");
+  ASSERT_SOME(result);
+  EXPECT_TRUE(strings::contains(result.get(), "File Not Found"));
+#else
   result = os::shell("LC_ALL=C ls /tmp/foobar889076 2>&1 || true");
   ASSERT_SOME(result);
   EXPECT_TRUE(strings::contains(result.get(), "No such file or directory"));
+#endif // __WINDOWS__
+
+  // Testing a command that wrote a substantial amount of data.
+  const string output(2 * os::pagesize(), 'c');
+  const string outfile = path::join(sandbox.get(), "out.txt");
+  ASSERT_SOME(os::write(outfile, output));
+#ifdef __WINDOWS__
+  result = os::shell("type %s", outfile.c_str());
+#else
+  result = os::shell("cat %s", outfile.c_str());
+#endif // __WINDOWS__
+  EXPECT_SOME_EQ(output, result);
 
   // Testing a more ambitious command that mutates the filesystem.
-  const string path = "/tmp/os_tests.txt";
+  const string path = path::join(sandbox.get(), "os_tests.txt");
+#ifdef __WINDOWS__
+  result = os::shell("copy /y nul %s", path.c_str());
+  ASSERT_SOME(result);
+  EXPECT_EQ("1 file(s) copied.", strings::trim(result.get()));
+#else
   result = os::shell("touch %s", path.c_str());
   EXPECT_SOME_EQ("", result);
+#endif // __WINDOWS__
   EXPECT_TRUE(os::exists(path));
 
   // Let's clean up, and ensure this worked too.
+#ifdef __WINDOWS__
+  result = os::shell("del %s", path.c_str());
+#else
   result = os::shell("rm %s", path.c_str());
-  EXPECT_SOME_EQ("", result);
-  EXPECT_FALSE(os::exists("/tmp/os_tests.txt"));
-}
 #endif // __WINDOWS__
+  EXPECT_SOME_EQ("", result);
+  EXPECT_FALSE(os::exists(path));
+}
 
 
 // NOTE: Disabled on Windows because `mknod` does not exist.
@@ -1014,11 +1093,36 @@ TEST_F(OsTest, SYMLINK_Realpath)
   ASSERT_SOME(fs::symlink(testFile, testLink));
 
   // Validate the symlink.
+#ifdef __WINDOWS__
+  Try<int_fd> handle = os::open(testFile, O_RDONLY);
+  ASSERT_SOME(handle);
+  FILE_ID_INFO fileInfo;
+  BOOL result = ::GetFileInformationByHandleEx(
+    handle.get(), FileIdInfo, &fileInfo, sizeof(fileInfo));
+  ASSERT_SOME(os::close(handle.get()));
+  ASSERT_EQ(TRUE, result);
+
+  handle = os::open(testLink, O_RDONLY);
+  ASSERT_SOME(handle);
+  FILE_ID_INFO linkInfo;
+  result = ::GetFileInformationByHandleEx(
+    handle.get(), FileIdInfo, &linkInfo, sizeof(linkInfo));
+  ASSERT_SOME(os::close(handle.get()));
+  ASSERT_EQ(TRUE, result);
+
+  ASSERT_EQ(fileInfo.VolumeSerialNumber, linkInfo.VolumeSerialNumber);
+  ASSERT_TRUE(std::equal(
+    std::begin(fileInfo.FileId.Identifier),
+    std::end(fileInfo.FileId.Identifier),
+    std::begin(linkInfo.FileId.Identifier),
+    std::end(linkInfo.FileId.Identifier)));
+#else
   const Try<ino_t> fileInode = os::stat::inode(testFile);
   ASSERT_SOME(fileInode);
   const Try<ino_t> linkInode = os::stat::inode(testLink);
   ASSERT_SOME(linkInode);
   ASSERT_EQ(fileInode.get(), linkInode.get());
+#endif // __WINDOWS__
 
   // Verify that the symlink resolves correctly.
   Result<string> resolved = os::realpath(testLink);

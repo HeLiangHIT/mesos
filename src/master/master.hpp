@@ -389,7 +389,7 @@ public:
       delay(_delay) {}
 
 protected:
-  virtual void initialize() override
+  void initialize() override
   {
     if (delay.isSome()) {
       process::delay(
@@ -436,7 +436,7 @@ public:
            slaveRemovalLimiter,
          const Flags& flags = Flags());
 
-  virtual ~Master();
+  ~Master() override;
 
   // Message handlers.
   void submitScheduler(
@@ -444,12 +444,11 @@ public:
 
   void registerFramework(
       const process::UPID& from,
-      const FrameworkInfo& frameworkInfo);
+      RegisterFrameworkMessage&& registerFrameworkMessage);
 
   void reregisterFramework(
       const process::UPID& from,
-      const FrameworkInfo& frameworkInfo,
-      bool failover);
+      ReregisterFrameworkMessage&& reregisterFrameworkMessage);
 
   void unregisterFramework(
       const process::UPID& from,
@@ -511,7 +510,7 @@ public:
       ReconcileTasksMessage&& reconcileTasksMessage);
 
   void updateOperationStatus(
-      const UpdateOperationStatusMessage& update);
+      UpdateOperationStatusMessage&& update);
 
   void exitedExecutor(
       const process::UPID& from,
@@ -873,6 +872,71 @@ protected:
       const Offer::Operation::Destroy& destroy,
       const Option<process::http::authentication::Principal>& principal);
 
+  /**
+   * Authorizes resize of a volume triggered by either `GROW_VOLUME` or
+   * `SHRINK_VOLUME` operations.
+   *
+   * Returns whether the triggering operation is authorized with the provided
+   * principal. This function is used for authorization of operations
+   * originating both from frameworks and operators. Note that operations may be
+   * validated AFTER authorization, so it's possible that the operation could be
+   * malformed.
+   *
+   * @param volume The volume being resized.
+   * @param principal An `Option` containing the principal attempting this
+   *     operation.
+   *
+   * @return A `Future` containing a boolean value representing the success or
+   *     failure of this authorization. A failed `Future` implies that
+   *     validation of the operation did not succeed.
+   */
+  process::Future<bool> authorizeResizeVolume(
+      const Resource& volume,
+      const Option<process::http::authentication::Principal>& principal);
+
+
+  /**
+   * Authorizes a `CREATE_DISK` operation.
+   *
+   * Returns whether the `CREATE_DISK` operation is authorized with the
+   * provided principal. This function is used for authorization of operations
+   * originating from frameworks. Note that operations may be validated AFTER
+   * authorization, so it's possible that the operation could be malformed.
+   *
+   * @param createDisk The `CREATE_DISK` operation to be performed.
+   * @param principal An `Option` containing the principal attempting this
+   *     operation.
+   *
+   * @return A `Future` containing a boolean value representing the success or
+   *     failure of this authorization. A failed `Future` implies that
+   *     validation of the operation did not succeed.
+   */
+  process::Future<bool> authorizeCreateDisk(
+      const Offer::Operation::CreateDisk& createDisk,
+      const Option<process::http::authentication::Principal>& principal);
+
+
+  /**
+   * Authorizes a `DESTROY_DISK` operation.
+   *
+   * Returns whether the `DESTROY_DISK` operation is authorized with the
+   * provided principal. This function is used for authorization of operations
+   * originating from frameworks. Note that operations may be validated AFTER
+   * authorization, so it's possible that the operation could be malformed.
+   *
+   * @param destroyDisk The `DESTROY_DISK` operation to be performed.
+   * @param principal An `Option` containing the principal attempting this
+   *     operation.
+   *
+   * @return A `Future` containing a boolean value representing the success or
+   *     failure of this authorization. A failed `Future` implies that
+   *     validation of the operation did not succeed.
+   */
+  process::Future<bool> authorizeDestroyDisk(
+      const Offer::Operation::DestroyDisk& destroyDisk,
+      const Option<process::http::authentication::Principal>& principal);
+
+
   // Determine if a new executor needs to be launched.
   bool isLaunchExecutor (
       const ExecutorID& executorId,
@@ -1038,7 +1102,8 @@ private:
       const SlaveID& slaveId,
       const Resources& offeredResources,
       scheduler::Call::Accept&& accept,
-      const process::Future<std::list<process::Future<bool>>>& authorizations);
+      const process::Future<
+          std::vector<process::Future<bool>>>& authorizations);
 
   void acceptInverseOffers(
       Framework* framework,
@@ -1290,7 +1355,7 @@ private:
 
     process::Future<std::vector<WeightInfo>> _filterWeights(
         const std::vector<WeightInfo>& weightInfos,
-        const std::list<bool>& roleAuthorizations) const;
+        const std::vector<bool>& roleAuthorizations) const;
 
     process::Future<std::vector<WeightInfo>> _getWeights(
         const Option<process::http::authentication::Principal>&
@@ -1677,6 +1742,16 @@ private:
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
+    process::Future<process::http::Response> growVolume(
+        const mesos::master::Call& call,
+        const Option<process::http::authentication::Principal>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> shrinkVolume(
+        const mesos::master::Call& call,
+        const Option<process::http::authentication::Principal>& principal,
+        ContentType contentType) const;
+
     process::Future<process::http::Response> reserveResources(
         const mesos::master::Call& call,
         const Option<process::http::authentication::Principal>& principal,
@@ -1927,6 +2002,13 @@ private:
     // `registry_max_agent_age`, and `registry_max_agent_count` flags.
     LinkedHashMap<SlaveID, TimeInfo> unreachable;
 
+    // This helps us look up all unreachable tasks on an agent so we can remove
+    // them from their primary storage `framework.unreachableTasks` when an
+    // agent reregisters. This map is bounded by the same GC behavior as
+    // `unreachable`. When the agent is GC'd from unreachable it's also
+    // erased from `unreachableTasks`.
+    hashmap<SlaveID, multihashmap<FrameworkID, TaskID>> unreachableTasks;
+
     // Slaves that have been marked gone. We recover this from the
     // registry, so it includes slaves marked as gone by other instances
     // of the master. Note that we use a LinkedHashMap to ensure the order
@@ -2095,7 +2177,7 @@ private:
   // copyable metric types only.
   std::shared_ptr<Metrics> metrics;
 
-  // Gauge handlers.
+  // PullGauge handlers.
   double _uptime_secs()
   {
     return (process::Clock::now() - startTime).secs();

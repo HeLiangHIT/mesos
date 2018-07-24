@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <iomanip>
 #include <list>
 #include <map>
@@ -30,11 +31,16 @@
 #include <utility>
 #include <vector>
 
+#include <glog/logging.h>
+
 #include <mesos/type_utils.hpp>
 
 #include <mesos/authentication/secret_generator.hpp>
 
 #include <mesos/module/authenticatee.hpp>
+
+#include <mesos/state/leveldb.hpp>
+#include <mesos/state/in_memory.hpp>
 
 #include <mesos/resource_provider/storage/disk_profile_adaptor.hpp>
 
@@ -132,6 +138,7 @@ using mesos::slave::QoSController;
 using mesos::slave::QoSCorrection;
 using mesos::slave::ResourceEstimator;
 
+using std::deque;
 using std::find;
 using std::list;
 using std::map;
@@ -772,15 +779,20 @@ void Slave::initialize()
           logRequest(request);
           return http.executor(request, principal);
         });
+  route(
+      "/api/v1/resource_provider",
+      RESOURCE_PROVIDER_HTTP_AUTHENTICATION_REALM,
+      Http::RESOURCE_PROVIDER_HELP(),
+      [this](const http::Request& request, const Option<Principal>& principal)
+        -> Future<http::Response> {
+        logRequest(request);
 
-  route("/api/v1/resource_provider",
-        READWRITE_HTTP_AUTHENTICATION_REALM,
-        Http::RESOURCE_PROVIDER_HELP(),
-        [this](const http::Request& request,
-               const Option<Principal>& principal) {
-          logRequest(request);
-          return resourceProviderManager.api(request, principal);
-        });
+        if (resourceProviderManager.get() == nullptr) {
+          return http::ServiceUnavailable();
+        }
+
+        return resourceProviderManager->api(request, principal);
+      });
 
   // TODO(ijimenez): Remove this endpoint at the end of the
   // deprecation cycle on 0.26.
@@ -936,6 +948,10 @@ void Slave::finalize()
       shutdownFramework(UPID(), frameworkId);
     }
   }
+
+  // Explicitly tear down the resource provider manager to ensure that the
+  // wrapped process is terminated and releases the underlying storage.
+  resourceProviderManager.reset();
 }
 
 
@@ -1502,6 +1518,8 @@ void Slave::registered(
 
       CHECK_SOME(state::checkpoint(path, info));
 
+      initializeResourceProviderManager(flags, info.id());
+
       // We start the local resource providers daemon once the agent is
       // running, so the resource providers can use the agent API.
       localResourceProviderDaemon->start(info.id());
@@ -2043,7 +2061,7 @@ void Slave::run(
     return;
   }
 
-  list<Future<bool>> unschedules;
+  vector<Future<bool>> unschedules;
 
   // If we are about to create a new framework, unschedule the work
   // and meta directories from getting gc'ed.
@@ -2149,7 +2167,7 @@ void Slave::run(
   }
 
   auto onUnscheduleGCFailure =
-    [=](const Future<list<bool>>& unschedules) -> Future<list<bool>> {
+    [=](const Future<vector<bool>>& unschedules) -> Future<vector<bool>> {
       LOG(ERROR) << "Failed to unschedule directories scheduled for gc: "
                  << unschedules.failure();
 
@@ -2383,7 +2401,7 @@ Future<Nothing> Slave::_run(
   // Authorize the task or tasks (as in a task group) to ensure that the
   // task user is allowed to launch tasks on the agent. If authorization
   // fails, the task (or all tasks in a task group) are not launched.
-  list<Future<bool>> authorizations;
+  vector<Future<bool>> authorizations;
 
   LOG(INFO) << "Authorizing " << taskOrTaskGroup(task, taskGroup)
             << " for framework " << frameworkId;
@@ -2429,7 +2447,7 @@ Future<Nothing> Slave::_run(
 
   return collect(authorizations)
     .repair(defer(self(),
-      [=](const Future<list<bool>>& future) -> Future<list<bool>> {
+      [=](const Future<vector<bool>>& future) -> Future<vector<bool>> {
         Framework* _framework = getFramework(frameworkId);
         if (_framework == nullptr) {
           const string error =
@@ -2452,7 +2470,7 @@ Future<Nothing> Slave::_run(
       }
     ))
     .then(defer(self(),
-      [=](const Future<list<bool>>& future) -> Future<Nothing> {
+      [=](const Future<vector<bool>>& future) -> Future<Nothing> {
         Framework* _framework = getFramework(frameworkId);
         if (_framework == nullptr) {
           const string error =
@@ -2465,7 +2483,7 @@ Future<Nothing> Slave::_run(
           return Failure(error);
         }
 
-        list<bool> authorizations = future.get();
+        deque<bool> authorizations(future->begin(), future->end());
 
         foreach (const TaskInfo& _task, tasks) {
           bool authorized = authorizations.front();
@@ -3061,10 +3079,12 @@ void Slave::__run(
                      frameworkId,
                      executorId,
                      executor->containerId,
-                     task.isSome() ? list<TaskInfo>({task.get()})
-                                   : list<TaskInfo>(),
-                     taskGroup.isSome() ? list<TaskGroupInfo>({taskGroup.get()})
-                                        : list<TaskGroupInfo>()));
+                     task.isSome()
+                       ? vector<TaskInfo>({task.get()})
+                       : vector<TaskInfo>(),
+                     taskGroup.isSome()
+                       ? vector<TaskGroupInfo>({taskGroup.get()})
+                       : vector<TaskGroupInfo>()));
 
       break;
     }
@@ -3086,8 +3106,8 @@ void Slave::___run(
     const FrameworkID& frameworkId,
     const ExecutorID& executorId,
     const ContainerID& containerId,
-    const list<TaskInfo>& tasks,
-    const list<TaskGroupInfo>& taskGroups)
+    const vector<TaskInfo>& tasks,
+    const vector<TaskGroupInfo>& taskGroups)
 {
   if (!future.isReady()) {
     LOG(ERROR) << "Failed to update resources for container " << containerId
@@ -3660,7 +3680,7 @@ void Slave::killTask(
     Option<TaskGroupInfo> taskGroup =
       framework->getTaskGroupForPendingTask(taskId);
 
-    list<StatusUpdate> updates;
+    vector<StatusUpdate> updates;
     if (taskGroup.isSome()) {
       foreach (const TaskInfo& task, taskGroup->tasks()) {
         updates.push_back(protobuf::createStatusUpdate(
@@ -3739,7 +3759,7 @@ void Slave::killTask(
       // send a TASK_KILLED update for all tasks in the group.
       Option<TaskGroupInfo> taskGroup = executor->getQueuedTaskGroup(taskId);
 
-      list<StatusUpdate> updates;
+      vector<StatusUpdate> updates;
       if (taskGroup.isSome()) {
         foreach (const TaskInfo& task, taskGroup->tasks()) {
           updates.push_back(protobuf::createStatusUpdate(
@@ -3801,7 +3821,7 @@ void Slave::killTask(
         // send a TASK_KILLED update for all the other tasks.
         Option<TaskGroupInfo> taskGroup = executor->getQueuedTaskGroup(taskId);
 
-        list<StatusUpdate> updates;
+        vector<StatusUpdate> updates;
         if (taskGroup.isSome()) {
           foreach (const TaskInfo& task, taskGroup->tasks()) {
             updates.push_back(protobuf::createStatusUpdate(
@@ -4215,8 +4235,31 @@ void Slave::checkpointResourcesMessage(
 Try<Nothing> Slave::syncCheckpointedResources(
     const Resources& newCheckpointedResources)
 {
-  Resources oldVolumes = checkpointedResources.persistentVolumes();
-  Resources newVolumes = newCheckpointedResources.persistentVolumes();
+  auto toPathMap = [](const string& workDir, const Resources& resources) {
+    hashmap<string, Resource> pathMap;
+    const Resources& persistentVolumes = resources.persistentVolumes();
+
+    foreach (const Resource& volume, persistentVolumes) {
+      // This is validated in master.
+      CHECK(Resources::isReserved(volume));
+      string path = paths::getPersistentVolumePath(workDir, volume);
+      pathMap[path] = volume;
+    }
+
+    return pathMap;
+  };
+
+  const hashmap<string, Resource> oldPathMap =
+    toPathMap(flags.work_dir, checkpointedResources);
+
+  const hashmap<string, Resource> newPathMap =
+    toPathMap(flags.work_dir, newCheckpointedResources);
+
+  const hashset<string> oldPaths = oldPathMap.keys();
+  const hashset<string> newPaths = newPathMap.keys();
+
+  const hashset<string> createPaths = newPaths - oldPaths;
+  const hashset<string> deletePaths = oldPaths - newPaths;
 
   // Create persistent volumes that do not already exist.
   //
@@ -4224,15 +4267,8 @@ Try<Nothing> Slave::syncCheckpointedResources(
   // to support multiple disks, or raw disks. Depending on the
   // DiskInfo, we may want to create either directories under a root
   // directory, or LVM volumes from a given device.
-  foreach (const Resource& volume, newVolumes) {
-    // This is validated in master.
-    CHECK(Resources::isReserved(volume));
-
-    if (oldVolumes.contains(volume)) {
-      continue;
-    }
-
-    string path = paths::getPersistentVolumePath(flags.work_dir, volume);
+  foreach (const string& path, createPaths) {
+    const Resource& volume = newPathMap.at(path);
 
     // If creation of persistent volume fails, the agent exits.
     string volumeDescription = "persistent volume " +
@@ -4262,12 +4298,8 @@ Try<Nothing> Slave::syncCheckpointedResources(
   // remove the filesystem objects for the removed volume. Note that
   // for MOUNT disks, we don't remove the root directory (mount point)
   // of the volume.
-  foreach (const Resource& volume, oldVolumes) {
-    if (newVolumes.contains(volume)) {
-      continue;
-    }
-
-    string path = paths::getPersistentVolumePath(flags.work_dir, volume);
+  foreach (const string& path, deletePaths) {
+    const Resource& volume = oldPathMap.at(path);
 
     LOG(INFO) << "Deleting persistent volume '"
               << volume.disk().persistence().id()
@@ -4344,7 +4376,7 @@ void Slave::applyOperation(const ApplyOperationMessage& message)
   }
 
   if (resourceProviderId.isSome()) {
-    resourceProviderManager.applyOperation(message);
+    CHECK_NOTNULL(resourceProviderManager.get())->applyOperation(message);
     return;
   }
 
@@ -4417,7 +4449,7 @@ void Slave::reconcileOperations(const ReconcileOperationsMessage& message)
   }
 
   if (containsResourceProviderOperations) {
-    resourceProviderManager.reconcileOperations(message);
+    CHECK_NOTNULL(resourceProviderManager.get())->reconcileOperations(message);
   }
 }
 
@@ -4549,7 +4581,19 @@ void Slave::operationStatusAcknowledgement(
 {
   Operation* operation = getOperation(acknowledgement.operation_uuid());
   if (operation != nullptr) {
-    resourceProviderManager.acknowledgeOperationStatus(acknowledgement);
+    // If the operation was on resource provider resources forward the
+    // acknowledgement to the resource provider manager as well.
+    Result<ResourceProviderID> resourceProviderId =
+      getResourceProviderId(operation->info());
+
+    CHECK(!resourceProviderId.isError())
+      << "Could not determine resource provider of operation " << operation
+      << ": " << resourceProviderId.error();
+
+    if (resourceProviderId.isSome()) {
+      CHECK_NOTNULL(resourceProviderManager.get())
+        ->acknowledgeOperationStatus(acknowledgement);
+    }
 
     CHECK(operation->statuses_size() > 0);
     if (protobuf::isTerminalState(
@@ -6227,8 +6271,6 @@ void Slave::executorLaunched(
 }
 
 
-// Called by the isolator when an executor process terminates, and by
-// `Slave::launchExecutor` when executor secret generation fails.
 void Slave::executorTerminated(
     const FrameworkID& frameworkId,
     const ExecutorID& executorId,
@@ -6882,6 +6924,9 @@ Future<Nothing> Slave::recover(const Try<state::State>& state)
     return Failure(state.error());
   }
 
+  LOG(INFO) << "Finished recovering checkpointed state from '" << metaDir
+            << "', beginning agent recovery";
+
   Option<ResourcesState> resourcesState = state->resources;
   Option<SlaveState> slaveState = state->slave;
 
@@ -7108,6 +7153,8 @@ Future<Nothing> Slave::_recoverContainerizer(
 
 Future<Nothing> Slave::_recover()
 {
+  LOG(INFO) << "Recovering executors";
+
   // Alow HTTP based executors to subscribe after the
   // containerizer recovery is complete.
   recoveryInfo.reconnect = true;
@@ -7319,10 +7366,8 @@ void Slave::__recover(const Future<Nothing>& future)
     detection = detector->detect()
       .onAny(defer(self(), &Slave::detected, lambda::_1));
 
-    if (capabilities.resourceProvider) {
-      // Start listening for messages from the resource provider manager.
-      resourceProviderManager.messages().get().onAny(
-          defer(self(), &Self::handleResourceProviderMessage, lambda::_1));
+    if (info.has_id()) {
+      initializeResourceProviderManager(flags, info.id());
     }
 
     // Forward oversubscribed resources.
@@ -7600,7 +7645,7 @@ void Slave::handleResourceProviderMessage(
                << (message.isFailed() ? message.failure() : "future discarded");
 
     // Wait for the next message.
-    resourceProviderManager.messages().get()
+    CHECK_NOTNULL(resourceProviderManager.get())->messages().get()
       .onAny(defer(self(), &Self::handleResourceProviderMessage, lambda::_1));
 
     return;
@@ -7665,41 +7710,49 @@ void Slave::handleResourceProviderMessage(
         // operation.
         //
         // NOTE: We do not mutate operations statuses here; this would
-        // be the responsibility of a operation status update handler.
-        hashset<UUID> disappearedOperations;
-        foreach (const UUID& knownUuid, knownUuids) {
-          if (!receivedUuids.contains(knownUuid)) {
-            disappearedOperations.insert(knownUuid);
-          }
-        }
-
-        foreach (const UUID& uuid, disappearedOperations) {
+        // be the responsibility of an operation status update handler.
+        hashset<UUID> disappearedUuids = knownUuids - receivedUuids;
+        foreach (const UUID& uuid, disappearedUuids) {
           // TODO(bbannier): Instead of simply dropping an operation
           // with `removeOperation` here we should instead send a
           // `Reconcile` message with a failed state to the resource
           // provider so its status update manager can reliably
           // deliver the operation status to the framework.
-          CHECK(resourceProvider->operations.contains(uuid));
           removeOperation(resourceProvider->operations.at(uuid));
         }
 
         // Handle operations known to the resource provider but not
         // the agent. This can happen if the agent failed over and the
         // resource provider reregistered.
-        hashset<UUID> reappearedOperations;
-        foreach (const UUID& receivedUuid, receivedUuids) {
-          if (!knownUuids.contains(receivedUuid)) {
-            reappearedOperations.insert(receivedUuid);
-          }
-        }
-
-        foreach (const UUID& uuid, reappearedOperations) {
+        hashset<UUID> reappearedUuids = receivedUuids - knownUuids;
+        foreach (const UUID& uuid, reappearedUuids) {
           // Start tracking this operation.
           //
           // NOTE: We do not need to update total resources here as its
           // state was sync explicitly with the received total above.
-          CHECK(updateState.operations.contains(uuid));
           addOperation(new Operation(updateState.operations.at(uuid)));
+        }
+
+        // Handle operations known to both the agent and the resource provider.
+        //
+        // If an operation became terminal, its result is already reflected in
+        // the total resources reported by the resource provider, and thus it
+        // should not be applied again in an operation status update handler
+        // when its terminal status update arrives. So we set the terminal
+        // `latest_status` here to prevent resource convervions elsewhere.
+        //
+        // NOTE: We only update the `latest_status` of a known operation if it
+        // is not terminal yet here; its `statuses` would be updated by an
+        // operation status update handler.
+        hashset<UUID> matchedUuids = knownUuids - disappearedUuids;
+        foreach (const UUID& uuid, matchedUuids) {
+          const Operation& operation = updateState.operations.at(uuid);
+          if (operation.has_latest_status() &&
+              protobuf::isTerminalState(operation.latest_status().state())) {
+            updateOperationLatestStatus(
+                getOperation(uuid),
+                operation.latest_status());
+          }
         }
 
         // Update resource version of this resource provider.
@@ -7859,7 +7912,7 @@ void Slave::handleResourceProviderMessage(
   }
 
   // Wait for the next message.
-  resourceProviderManager.messages().get()
+  CHECK_NOTNULL(resourceProviderManager.get())->messages().get()
     .onAny(defer(self(), &Self::handleResourceProviderMessage, lambda::_1));
 }
 
@@ -7907,19 +7960,13 @@ void Slave::updateOperation(
       !protobuf::isTerminalState(operation->latest_status().state()) &&
       protobuf::isTerminalState(latestStatus->state());
 
-    // If the operation has already transitioned to a terminal state,
-    // do not update its state.
-    if (!protobuf::isTerminalState(operation->latest_status().state())) {
-      operation->mutable_latest_status()->CopyFrom(latestStatus.get());
-    }
+    updateOperationLatestStatus(operation, latestStatus.get());
   } else {
     terminated =
       !protobuf::isTerminalState(operation->latest_status().state()) &&
       protobuf::isTerminalState(status.state());
 
-    if (!protobuf::isTerminalState(operation->latest_status().state())) {
-      operation->mutable_latest_status()->CopyFrom(status);
-    }
+    updateOperationLatestStatus(operation, status);
   }
 
   // Adding the update's status to the stored operation below is the one place
@@ -7985,6 +8032,18 @@ void Slave::updateOperation(
       LOG(FATAL) << "Unexpected operation state "
                  << operation->latest_status().state();
     }
+  }
+}
+
+
+void Slave::updateOperationLatestStatus(
+    Operation* operation,
+    const OperationStatus& status)
+{
+  CHECK_NOTNULL(operation);
+
+  if (!protobuf::isTerminalState(operation->latest_status().state())) {
+    operation->mutable_latest_status()->CopyFrom(status);
   }
 }
 
@@ -8114,6 +8173,24 @@ void Slave::apply(Operation* operation)
 Future<Nothing> Slave::publishResources(
     const Option<Resources>& additionalResources)
 {
+  // If the resource provider manager has not been created yet no resource
+  // providers have been added and we do not need to publish anything.
+  if (resourceProviderManager == nullptr) {
+    // We check whether the passed additional resources are compatible
+    // with the expectation that no resource provider resources are in
+    // use, yet. This is not an exhaustive consistency check.
+    if (additionalResources.isSome()) {
+      foreach (const Resource& resource, additionalResources.get()) {
+        CHECK(!resource.has_provider_id())
+          << "Cannot publish resource provider resources "
+          << additionalResources.get()
+          << " until resource providers have subscribed";
+      }
+    }
+
+    return Nothing();
+  }
+
   Resources resources;
 
   // NOTE: For resources providers that serve quantity-based resources
@@ -8134,7 +8211,8 @@ Future<Nothing> Slave::publishResources(
     resources += additionalResources.get();
   }
 
-  return resourceProviderManager.publishResources(resources);
+  return CHECK_NOTNULL(resourceProviderManager.get())
+    ->publishResources(resources);
 }
 
 
@@ -8294,7 +8372,7 @@ Future<ResourceUsage> Slave::usage()
   // constructors. Revisit once we remove the copy constructor for
   // Owned (or C++14 lambda generalized capture is supported).
   Owned<ResourceUsage> usage(new ResourceUsage());
-  list<Future<ResourceStatistics>> futures;
+  vector<Future<ResourceStatistics>> futures;
 
   foreachvalue (const Framework* framework, frameworks) {
     foreachvalue (const Executor* executor, framework->executors) {
@@ -8328,7 +8406,7 @@ Future<ResourceUsage> Slave::usage()
   usage->mutable_total()->CopyFrom(totalResources);
 
   return await(futures).then(
-      [usage](const list<Future<ResourceStatistics>>& futures) {
+      [usage](const vector<Future<ResourceStatistics>>& futures) {
         // NOTE: We add ResourceUsage::Executor to 'usage' the same
         // order as we push future to 'futures'. So the variables
         // 'future' and 'executor' below should be in sync.
@@ -8751,6 +8829,48 @@ double Slave::_resources_revocable_percent(const string& name)
   }
 
   return _resources_revocable_used(name) / total;
+}
+
+
+void Slave::initializeResourceProviderManager(
+    const Flags& flags,
+    const SlaveID& slaveId)
+{
+  // To simplify reasoning about lifetimes we do not allow
+  // reinitialization of the resource provider manager.
+  if (resourceProviderManager.get() != nullptr) {
+    return;
+  }
+
+  // The registrar uses LevelDB as underlying storage. Since LevelDB
+  // is currently not supported on Windows (see MESOS-5932), we fall
+  // back to in-memory storage there.
+  //
+  // TODO(bbannier): Remove this Windows workaround once MESOS-5932 is fixed.
+#ifndef __WINDOWS__
+  Owned<mesos::state::Storage> storage(new mesos::state::LevelDBStorage(
+      paths::getResourceProviderRegistryPath(flags.work_dir, slaveId)));
+#else
+  LOG(WARNING)
+    << "Persisting resource provider manager state is not supported on Windows";
+  Owned<mesos::state::Storage> storage(new mesos::state::InMemoryStorage());
+#endif // __WINDOWS__
+
+  Try<Owned<resource_provider::Registrar>> resourceProviderRegistrar =
+    resource_provider::Registrar::create(std::move(storage));
+
+  CHECK_SOME(resourceProviderRegistrar)
+    << "Could not construct resource provider registrar: "
+    << resourceProviderRegistrar.error();
+
+  resourceProviderManager.reset(
+      new ResourceProviderManager(std::move(resourceProviderRegistrar.get())));
+
+  if (capabilities.resourceProvider) {
+    // Start listening for messages from the resource provider manager.
+    resourceProviderManager->messages().get().onAny(
+        defer(self(), &Self::handleResourceProviderMessage, lambda::_1));
+  }
 }
 
 
@@ -9867,12 +9987,8 @@ map<string, string> executorEnvironment(
   // TODO(tillt): Adapt library towards JNI specific name once libmesos
   // has been split.
   if (environment.count("MESOS_NATIVE_JAVA_LIBRARY") == 0) {
-    string path =
-#ifdef __APPLE__
-      LIBDIR "/libmesos-" VERSION ".dylib";
-#else
-      LIBDIR "/libmesos-" VERSION ".so";
-#endif
+    const string path =
+      path::join(LIBDIR, os::libraries::expandName("mesos-" VERSION));
     if (os::exists(path)) {
       environment["MESOS_NATIVE_JAVA_LIBRARY"] = path;
     }
@@ -9882,12 +9998,8 @@ map<string, string> executorEnvironment(
   // This environment variable is kept for offering non JVM-based
   // frameworks a more compact and JNI independent library.
   if (environment.count("MESOS_NATIVE_LIBRARY") == 0) {
-    string path =
-#ifdef __APPLE__
-      LIBDIR "/libmesos-" VERSION ".dylib";
-#else
-      LIBDIR "/libmesos-" VERSION ".so";
-#endif
+    const string path =
+      path::join(LIBDIR, os::libraries::expandName("mesos-" VERSION));
     if (os::exists(path)) {
       environment["MESOS_NATIVE_LIBRARY"] = path;
     }

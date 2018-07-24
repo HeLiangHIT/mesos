@@ -68,6 +68,8 @@
 #include <stout/unreachable.hpp>
 #include <stout/uuid.hpp>
 
+#include "authentication/executor/jwt_secret_generator.hpp"
+
 #include "common/http.hpp"
 
 #include "messages/messages.hpp" // For google::protobuf::Message.
@@ -319,9 +321,9 @@ public:
   static void TearDownTestCase();
 
 protected:
-  virtual slave::Flags CreateSlaveFlags();
-  virtual void SetUp();
-  virtual void TearDown();
+  slave::Flags CreateSlaveFlags() override;
+  void SetUp() override;
+  void TearDown() override;
 
 private:
   // Base hierarchy for separately mounted cgroup controllers, e.g., if the
@@ -369,13 +371,13 @@ public:
     server = nullptr;
   }
 
-  virtual void SetUp()
+  void SetUp() override
   {
     MesosTest::SetUp();
     server->startNetwork();
   }
 
-  virtual void TearDown()
+  void TearDown() override
   {
     server->shutdownNetwork();
     MesosTest::TearDown();
@@ -384,7 +386,7 @@ public:
 protected:
   MesosZooKeeperTest() : MesosTest(url) {}
 
-  virtual master::Flags CreateMasterFlags()
+  master::Flags CreateMasterFlags() override
   {
     master::Flags flags = MesosTest::CreateMasterFlags();
 
@@ -466,6 +468,7 @@ using mesos::v1::TaskInfo;
 using mesos::v1::TaskGroupInfo;
 using mesos::v1::TaskState;
 using mesos::v1::TaskStatus;
+using mesos::v1::UUID;
 using mesos::v1::WeightInfo;
 
 } // namespace v1 {
@@ -1342,6 +1345,32 @@ inline typename TOffer::Operation DESTROY(const TResources& volumes)
 }
 
 
+template <typename TResource, typename TOffer>
+inline typename TOffer::Operation GROW_VOLUME(
+    const TResource& volume,
+    const TResource& addition)
+{
+  typename TOffer::Operation operation;
+  operation.set_type(TOffer::Operation::GROW_VOLUME);
+  operation.mutable_grow_volume()->mutable_volume()->CopyFrom(volume);
+  operation.mutable_grow_volume()->mutable_addition()->CopyFrom(addition);
+  return operation;
+}
+
+
+template <typename TResource, typename TOffer, typename TValueScalar>
+inline typename TOffer::Operation SHRINK_VOLUME(
+    const TResource& volume,
+    const TValueScalar& subtract)
+{
+  typename TOffer::Operation operation;
+  operation.set_type(TOffer::Operation::SHRINK_VOLUME);
+  operation.mutable_shrink_volume()->mutable_volume()->CopyFrom(volume);
+  operation.mutable_shrink_volume()->mutable_subtract()->CopyFrom(subtract);
+  return operation;
+}
+
+
 template <typename TOffer, typename TTaskInfo>
 inline typename TOffer::Operation LAUNCH(const std::vector<TTaskInfo>& tasks)
 {
@@ -1370,15 +1399,15 @@ inline typename TOffer::Operation LAUNCH_GROUP(
 
 
 template <typename TResource, typename TTargetType, typename TOffer>
-inline typename TOffer::Operation CREATE_VOLUME(
+inline typename TOffer::Operation CREATE_DISK(
     const TResource& source,
     const TTargetType& type,
-    const Option<std::string> operationId = None())
+    const Option<std::string>& operationId = None())
 {
   typename TOffer::Operation operation;
-  operation.set_type(TOffer::Operation::CREATE_VOLUME);
-  operation.mutable_create_volume()->mutable_source()->CopyFrom(source);
-  operation.mutable_create_volume()->set_target_type(type);
+  operation.set_type(TOffer::Operation::CREATE_DISK);
+  operation.mutable_create_disk()->mutable_source()->CopyFrom(source);
+  operation.mutable_create_disk()->set_target_type(type);
 
   if (operationId.isSome()) {
     operation.mutable_id()->set_value(operationId.get());
@@ -1389,31 +1418,12 @@ inline typename TOffer::Operation CREATE_VOLUME(
 
 
 template <typename TResource, typename TOffer>
-inline typename TOffer::Operation DESTROY_VOLUME(const TResource& volume)
+inline typename TOffer::Operation DESTROY_DISK(const TResource& source)
 {
   typename TOffer::Operation operation;
-  operation.set_type(TOffer::Operation::DESTROY_VOLUME);
-  operation.mutable_destroy_volume()->mutable_volume()->CopyFrom(volume);
-  return operation;
-}
+  operation.set_type(TOffer::Operation::DESTROY_DISK);
+  operation.mutable_destroy_disk()->mutable_source()->CopyFrom(source);
 
-
-template <typename TResource, typename TOffer>
-inline typename TOffer::Operation CREATE_BLOCK(const TResource& source)
-{
-  typename TOffer::Operation operation;
-  operation.set_type(TOffer::Operation::CREATE_BLOCK);
-  operation.mutable_create_block()->mutable_source()->CopyFrom(source);
-  return operation;
-}
-
-
-template <typename TResource, typename TOffer>
-inline typename TOffer::Operation DESTROY_BLOCK(const TResource& block)
-{
-  typename TOffer::Operation operation;
-  operation.set_type(TOffer::Operation::DESTROY_BLOCK);
-  operation.mutable_destroy_block()->mutable_block()->CopyFrom(block);
   return operation;
 }
 
@@ -1745,6 +1755,20 @@ inline Offer::Operation DESTROY(Args&&... args)
 }
 
 
+template <typename... Args>
+inline Offer::Operation GROW_VOLUME(Args&&... args)
+{
+  return common::GROW_VOLUME<Resource, Offer>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline Offer::Operation SHRINK_VOLUME(Args&&... args)
+{
+  return common::SHRINK_VOLUME<Resource, Offer>(std::forward<Args>(args)...);
+}
+
+
 // We specify the argument to allow brace initialized construction.
 inline Offer::Operation LAUNCH(const std::vector<TaskInfo>& tasks)
 {
@@ -1761,32 +1785,18 @@ inline Offer::Operation LAUNCH_GROUP(Args&&... args)
 
 
 template <typename... Args>
-inline Offer::Operation CREATE_VOLUME(Args&&... args)
+inline Offer::Operation CREATE_DISK(Args&&... args)
 {
-  return common::CREATE_VOLUME<Resource,
-                               Resource::DiskInfo::Source::Type,
-                               Offer>(std::forward<Args>(args)...);
+  return common::CREATE_DISK<Resource,
+                             Resource::DiskInfo::Source::Type,
+                             Offer>(std::forward<Args>(args)...);
 }
 
 
 template <typename... Args>
-inline Offer::Operation DESTROY_VOLUME(Args&&... args)
+inline Offer::Operation DESTROY_DISK(Args&&... args)
 {
-  return common::DESTROY_VOLUME<Resource, Offer>(std::forward<Args>(args)...);
-}
-
-
-template <typename... Args>
-inline Offer::Operation CREATE_BLOCK(Args&&... args)
-{
-  return common::CREATE_BLOCK<Resource, Offer>(std::forward<Args>(args)...);
-}
-
-
-template <typename... Args>
-inline Offer::Operation DESTROY_BLOCK(Args&&... args)
-{
-  return common::DESTROY_BLOCK<Resource, Offer>(std::forward<Args>(args)...);
+  return common::DESTROY_DISK<Resource, Offer>(std::forward<Args>(args)...);
 }
 
 
@@ -2043,6 +2053,22 @@ inline mesos::v1::Offer::Operation DESTROY(Args&&... args)
 }
 
 
+template <typename... Args>
+inline mesos::v1::Offer::Operation GROW_VOLUME(Args&&... args)
+{
+  return common::GROW_VOLUME<mesos::v1::Resource, mesos::v1::Offer>(
+      std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline mesos::v1::Offer::Operation SHRINK_VOLUME(Args&&... args)
+{
+  return common::SHRINK_VOLUME<mesos::v1::Resource, mesos::v1::Offer>(
+      std::forward<Args>(args)...);
+}
+
+
 // We specify the argument to allow brace initialized construction.
 inline mesos::v1::Offer::Operation LAUNCH(
     const std::vector<mesos::v1::TaskInfo>& tasks)
@@ -2062,35 +2088,19 @@ inline mesos::v1::Offer::Operation LAUNCH_GROUP(Args&&... args)
 
 
 template <typename... Args>
-inline mesos::v1::Offer::Operation CREATE_VOLUME(Args&&... args)
+inline mesos::v1::Offer::Operation CREATE_DISK(Args&&... args)
 {
-  return common::CREATE_VOLUME<mesos::v1::Resource,
-                               mesos::v1::Resource::DiskInfo::Source::Type,
-                               mesos::v1::Offer>(
+  return common::CREATE_DISK<mesos::v1::Resource,
+                             mesos::v1::Resource::DiskInfo::Source::Type,
+                             mesos::v1::Offer>(
       std::forward<Args>(args)...);
 }
 
 
 template <typename... Args>
-inline mesos::v1::Offer::Operation DESTROY_VOLUME(Args&&... args)
+inline mesos::v1::Offer::Operation DESTROY_DISK(Args&&... args)
 {
-  return common::DESTROY_VOLUME<mesos::v1::Resource, mesos::v1::Offer>(
-      std::forward<Args>(args)...);
-}
-
-
-template <typename... Args>
-inline mesos::v1::Offer::Operation CREATE_BLOCK(Args&&... args)
-{
-  return common::CREATE_BLOCK<mesos::v1::Resource, mesos::v1::Offer>(
-      std::forward<Args>(args)...);
-}
-
-
-template <typename... Args>
-inline mesos::v1::Offer::Operation DESTROY_BLOCK(Args&&... args)
-{
-  return common::DESTROY_BLOCK<mesos::v1::Resource, mesos::v1::Offer>(
+  return common::DESTROY_DISK<mesos::v1::Resource, mesos::v1::Offer>(
       std::forward<Args>(args)...);
 }
 
@@ -2267,7 +2277,7 @@ class MockScheduler : public Scheduler
 {
 public:
   MockScheduler();
-  virtual ~MockScheduler();
+  ~MockScheduler() override;
 
   MOCK_METHOD3(registered, void(SchedulerDriver*,
                                 const FrameworkID&,
@@ -2388,7 +2398,7 @@ class MockExecutor : public Executor
 {
 public:
   MockExecutor(const ExecutorID& _id);
-  virtual ~MockExecutor();
+  ~MockExecutor() override;
 
   MOCK_METHOD4(registered, void(ExecutorDriver*,
                                 const ExecutorInfo&,
@@ -2568,7 +2578,7 @@ public:
           v1::DEFAULT_CREDENTIAL,
           detector) {}
 
-  virtual ~TestMesos()
+  ~TestMesos() override
   {
     // Since the destructor for `TestMesos` is invoked first, the library can
     // make more callbacks to the `scheduler` object before the `Mesos` (base
@@ -2777,7 +2787,8 @@ class TestMesos : public Mesos
 public:
   TestMesos(
       ContentType contentType,
-      const std::shared_ptr<MockHTTPExecutor<Mesos, Event>>& executor)
+      const std::shared_ptr<MockHTTPExecutor<Mesos, Event>>& executor,
+      const std::map<std::string, std::string>& environment)
     : Mesos(
           contentType,
           lambda::bind(&MockHTTPExecutor<Mesos, Event>::connected,
@@ -2789,7 +2800,8 @@ public:
           lambda::bind(&MockHTTPExecutor<Mesos, Event>::events,
                        executor,
                        this,
-                       lambda::_1)) {}
+                       lambda::_1),
+          environment) {}
 };
 
 } // namespace executor {
@@ -3010,12 +3022,32 @@ public:
     return driver->send(call);
   }
 
-  template <typename Credential>
   void start(
       process::Owned<mesos::internal::EndpointDetector> detector,
-      ContentType contentType,
-      const Credential& credential)
+      ContentType contentType)
   {
+    Option<std::string> token;
+
+#ifdef USE_SSL_SOCKET
+    mesos::authentication::executor::JWTSecretGenerator secretGenerator(
+        DEFAULT_JWT_SECRET_KEY);
+
+    // For resource provider authentication the chosen claims don't matter,
+    // only the signature has to be valid.
+    // TODO(nfnt): Revisit this once there's authorization of resource provider
+    // API calls.
+    hashmap<std::string, std::string> claims;
+    claims["foo"] = "bar";
+
+    process::http::authentication::Principal principal(None(), claims);
+
+    process::Future<Secret> secret = secretGenerator.generate(principal);
+
+    AWAIT_READY(secret);
+
+    token = secret->value().data();
+#endif // USE_SSL_SOCKET
+
     driver.reset(new Driver(
         std::move(detector),
         contentType,
@@ -3059,7 +3091,7 @@ public:
                 Source>::events,
             this,
             lambda::_1),
-        credential));
+        token));
 
     driver->start();
   }
@@ -3126,39 +3158,25 @@ public:
         break;
       case Operation::DESTROY:
         break;
-      case Operation::CREATE_VOLUME:
+      // TODO(zhitao): Implement default operation for `GROW_VOLUME` and
+      // `SHRINK_VOLUME` on mocked resource provider.
+      case Operation::GROW_VOLUME:
+        break;
+      case Operation::SHRINK_VOLUME:
+        break;
+      case Operation::CREATE_DISK:
         update->mutable_status()->add_converted_resources()->CopyFrom(
-            operation.info().create_volume().source());
+            operation.info().create_disk().source());
         update->mutable_status()
           ->mutable_converted_resources()
           ->Mutable(0)
           ->mutable_disk()
           ->mutable_source()
-          ->set_type(operation.info().create_volume().target_type());
+          ->set_type(operation.info().create_disk().target_type());
         break;
-      case Operation::DESTROY_VOLUME:
+      case Operation::DESTROY_DISK:
         update->mutable_status()->add_converted_resources()->CopyFrom(
-            operation.info().destroy_volume().volume());
-        update->mutable_status()
-          ->mutable_converted_resources()
-          ->Mutable(0)
-          ->mutable_disk()
-          ->mutable_source()
-          ->set_type(Source::RAW);
-        break;
-      case Operation::CREATE_BLOCK:
-        update->mutable_status()->add_converted_resources()->CopyFrom(
-            operation.info().create_block().source());
-        update->mutable_status()
-          ->mutable_converted_resources()
-          ->Mutable(0)
-          ->mutable_disk()
-          ->mutable_source()
-          ->set_type(Source::BLOCK);
-        break;
-      case Operation::DESTROY_BLOCK:
-        update->mutable_status()->add_converted_resources()->CopyFrom(
-            operation.info().destroy_block().block());
+            operation.info().destroy_disk().source());
         update->mutable_status()
           ->mutable_converted_resources()
           ->Mutable(0)
@@ -3252,7 +3270,7 @@ class MockAuthorizer : public Authorizer
 {
 public:
   MockAuthorizer();
-  virtual ~MockAuthorizer();
+  ~MockAuthorizer() override;
 
   MOCK_METHOD1(
       authorized, process::Future<bool>(const authorization::Request& request));
@@ -3268,8 +3286,8 @@ public:
 class MockGarbageCollector : public slave::GarbageCollector
 {
 public:
-  MockGarbageCollector();
-  virtual ~MockGarbageCollector();
+  explicit MockGarbageCollector(const std::string& workDir);
+  ~MockGarbageCollector() override;
 
   // The default action is to always return `true`.
   MOCK_METHOD1(unschedule, process::Future<bool>(const std::string& path));
@@ -3280,7 +3298,7 @@ class MockSecretGenerator : public SecretGenerator
 {
 public:
   MockSecretGenerator() = default;
-  virtual ~MockSecretGenerator() = default;
+  ~MockSecretGenerator() override = default;
 
   MOCK_METHOD1(generate, process::Future<Secret>(
       const process::http::authentication::Principal& principal));

@@ -28,9 +28,11 @@ set(PROCESS_TESTS_SRC
   limiter_tests.cpp
   loop_tests.cpp
   metrics_tests.cpp
+  mpsc_linked_queue_tests.cpp
   mutex_tests.cpp
   owned_tests.cpp
   process_tests.cpp
+  profiler_tests.cpp
   queue_tests.cpp
   rwlock_tests.cpp
   sequence_tests.cpp
@@ -47,6 +49,9 @@ if (NOT WIN32)
   list(APPEND PROCESS_TESTS_SRC
     io_tests.cpp
     reap_tests.cpp)
+elseif (ENABLE_LIBWINIO)
+  list(APPEND PROCESS_TESTS_SRC
+    io_tests.cpp)
 endif ()
 
 if (ENABLE_GRPC)
@@ -87,13 +92,24 @@ target_link_libraries(libprocess-tests PRIVATE process-interface)
 # NOTE: This is for the generated gRPC headers.
 target_include_directories(libprocess-tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
-target_compile_definitions(
-  libprocess-tests PRIVATE
-  BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+if (CMAKE_GENERATOR MATCHES "Visual Studio")
+  target_compile_definitions(
+    libprocess-tests PRIVATE
+    BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>")
+else ()
+  target_compile_definitions(
+    libprocess-tests PRIVATE
+    BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+endif ()
 
 add_executable(test-linkee EXCLUDE_FROM_ALL test_linkee.cpp)
 target_link_libraries(test-linkee PRIVATE process-interface)
 add_dependencies(libprocess-tests test-linkee)
+
+if (WIN32)
+  add_executable(test-echo EXCLUDE_FROM_ALL test_echo.cpp)
+  add_dependencies(libprocess-tests test-echo)
+endif ()
 
 if (ENABLE_SSL)
   add_executable(ssl-client EXCLUDE_FROM_ALL ssl_client.cpp)

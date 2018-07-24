@@ -37,6 +37,8 @@
 
 #include <stout/os/exists.hpp>
 
+#include "common/resources_utils.hpp"
+
 #ifdef __linux__
 #include "linux/fs.hpp"
 #endif // __linux__
@@ -96,7 +98,7 @@ class PersistentVolumeTest
     public WithParamInterface<PersistentVolumeSourceType>
 {
 protected:
-  virtual void SetUp()
+  void SetUp() override
   {
     MesosTest::SetUp();
 
@@ -123,7 +125,7 @@ protected:
     }
   }
 
-  virtual void TearDown()
+  void TearDown() override
   {
 #ifdef __linux__
     if (GetParam() == MOUNT) {
@@ -172,10 +174,10 @@ protected:
           case Offer::Operation::LAUNCH_GROUP:
           case Offer::Operation::RESERVE:
           case Offer::Operation::UNRESERVE:
-          case Offer::Operation::CREATE_VOLUME:
-          case Offer::Operation::DESTROY_VOLUME:
-          case Offer::Operation::CREATE_BLOCK:
-          case Offer::Operation::DESTROY_BLOCK:
+          case Offer::Operation::CREATE_DISK:
+          case Offer::Operation::DESTROY_DISK:
+          case Offer::Operation::GROW_VOLUME:
+          case Offer::Operation::SHRINK_VOLUME:
             UNREACHABLE();
           case Offer::Operation::CREATE: {
             Resources resources = message.operation_info().create().volumes();
@@ -443,6 +445,1026 @@ TEST_P(PersistentVolumeTest, CreateAndDestroyPersistentVolumes)
 
   driver.stop();
   driver.join();
+}
+
+
+// This test verifies that a framework can grow a persistent volume and use the
+// grown volume afterward.
+TEST_P(PersistentVolumeTest, GrowVolume)
+{
+  if (GetParam() == MOUNT) {
+    // It is not possible to have a valid `GrowVolume` on a MOUNT disk because
+    // the volume must use up all disk space at `Create` and no space will be
+    // left for `addition`. Therefore we skip this test.
+    // TODO(zhitao): Make MOUNT a meaningful parameter value for this test, or
+    // create a new fixture to avoid testing against it.
+    return;
+  }
+
+  Clock::pause();
+
+  // Register a framework with role "default-role/foo" for dynamic reservations.
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_roles(0, strings::join("/", DEFAULT_TEST_ROLE, "foo"));
+
+  // Create a master.
+  master::Flags masterFlags = CreateMasterFlags();
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.resources = getSlaveResources();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offersBeforeCreate;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersBeforeCreate));
+
+  driver.start();
+
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersBeforeCreate);
+  ASSERT_FALSE(offersBeforeCreate->empty());
+
+  Offer offer = offersBeforeCreate->at(0);
+
+  // The disk spaces will be merged if the fixture parameter is `NONE`.
+  Bytes totalBytes = GetParam() == NONE ? Megabytes(4096) : Megabytes(2048);
+
+  Bytes additionBytes = Megabytes(512);
+
+  // Construct a dynamic reservation for all disk resources.
+  // NOTE: We dynamically reserve all disk resources so they become checkpointed
+  // resources and thus will be verified on the agent when launching a task.
+  Resource::ReservationInfo dynamicReservation = createDynamicReservationInfo(
+      frameworkInfo.roles(0),
+      frameworkInfo.principal());
+
+  Resource dynamicallyReserved = getDiskResource(totalBytes, 1);
+  dynamicallyReserved.add_reservations()->CopyFrom(dynamicReservation);
+
+  // Construct a persistent volume which does not use up all disk resources.
+  Resource volume = createPersistentVolume(
+      getDiskResource(totalBytes - additionBytes, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+  volume.add_reservations()->CopyFrom(dynamicReservation);
+  ASSERT_TRUE(needCheckpointing(volume));
+
+  Resource addition = getDiskResource(additionBytes, 1);
+  addition.add_reservations()->CopyFrom(dynamicReservation);
+  ASSERT_TRUE(needCheckpointing(addition));
+
+  Resource grownVolume = createPersistentVolume(
+      getDiskResource(totalBytes, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+  grownVolume.add_reservations()->CopyFrom(dynamicReservation);
+  ASSERT_TRUE(needCheckpointing(grownVolume));
+
+  Future<vector<Offer>> offersBeforeGrow;
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersBeforeGrow));
+
+  // We use the filter explicitly here so that the resources will not
+  // be filtered for 5 seconds (the default).
+  Filters filters;
+  filters.set_refuse_seconds(0);
+
+  // Create the persistent volume.
+  driver.acceptOffers(
+      {offer.id()},
+      {RESERVE(dynamicallyReserved), CREATE(volume)},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersBeforeGrow);
+  ASSERT_FALSE(offersBeforeGrow->empty());
+
+  offer = offersBeforeGrow->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(volume), frameworkInfo.roles(0)),
+      Resources(offer.resources()).persistentVolumes());
+
+  EXPECT_TRUE(
+      Resources(offer.resources()).contains(
+      allocatedResources(addition, frameworkInfo.roles(0))));
+
+  // Make sure the volume exists, and leave a non-empty file there.
+  string volumePath = slave::paths::getPersistentVolumePath(
+      slaveFlags.work_dir, volume);
+
+  EXPECT_TRUE(os::exists(volumePath));
+  string filePath = path::join(volumePath, "file");
+  ASSERT_SOME(os::write(filePath, "abc"));
+
+  Future<vector<Offer>> offersAfterGrow;
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersAfterGrow));
+
+  // Grow the volume.
+  driver.acceptOffers(
+      {offer.id()},
+      {GROW_VOLUME(volume, addition)},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterGrow);
+  ASSERT_FALSE(offersAfterGrow->empty());
+
+  offer = offersAfterGrow->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(grownVolume), frameworkInfo.roles(0)),
+      Resources(offer.resources()).persistentVolumes());
+
+  EXPECT_FALSE(
+      Resources(offer.resources()).contains(
+      allocatedResources(addition, frameworkInfo.roles(0))));
+
+  Future<TaskStatus> taskStarting;
+  Future<TaskStatus> taskRunning;
+  Future<TaskStatus> taskFinished;
+
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&taskStarting))
+    .WillOnce(FutureArg<1>(&taskRunning))
+    .WillOnce(FutureArg<1>(&taskFinished));
+
+  TaskInfo task = createTask(
+      offer.slave_id(),
+      offer.resources(),
+      "test `cat path1/file` = abc");
+
+  // Launch a task to verify that `GROW_VOLUME` takes effect on the agent and
+  // the task can use the grown volume.
+  driver.acceptOffers({offer.id()}, {LAUNCH({task})}, filters);
+
+  AWAIT_READY(taskStarting);
+  EXPECT_EQ(task.task_id(), taskStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, taskStarting->state());
+
+  AWAIT_READY(taskRunning);
+  EXPECT_EQ(task.task_id(), taskRunning->task_id());
+  EXPECT_EQ(TASK_RUNNING, taskRunning->state());
+
+  AWAIT_READY(taskFinished);
+  EXPECT_EQ(task.task_id(), taskFinished->task_id());
+  EXPECT_EQ(TASK_FINISHED, taskFinished->state());
+
+  driver.stop();
+  driver.join();
+
+  Clock::resume();
+}
+
+
+// This test verifies that a framework can shrink a persistent volume and use
+// the shrunk volume afterward.
+TEST_P(PersistentVolumeTest, ShrinkVolume)
+{
+  Clock::pause();
+
+  // Register a framework with role "default-role/foo" for dynamic reservations.
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_roles(0, strings::join("/", DEFAULT_TEST_ROLE, "foo"));
+
+  // Create a master.
+  master::Flags masterFlags = CreateMasterFlags();
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.resources = getSlaveResources();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offersBeforeCreate;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersBeforeCreate));
+
+  driver.start();
+
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersBeforeCreate);
+  ASSERT_FALSE(offersBeforeCreate->empty());
+
+  Offer offer = offersBeforeCreate->at(0);
+
+  // The disk spaces will be merged if the fixture parameter is `NONE`.
+  Bytes totalBytes = GetParam() == NONE ? Megabytes(4096) : Megabytes(2048);
+
+  Bytes subtractBytes = Megabytes(512);
+
+  // Construct a dynamic reservation for all disk resources.
+  // NOTE: We dynamically reserve all disk resources so they become checkpointed
+  // resources and thus will be verified on the agent when launching a task.
+  Resource::ReservationInfo dynamicReservation = createDynamicReservationInfo(
+      frameworkInfo.roles(0),
+      frameworkInfo.principal());
+
+  Resource dynamicallyReserved = getDiskResource(totalBytes, 1);
+  dynamicallyReserved.add_reservations()->CopyFrom(dynamicReservation);
+
+  // Construct a persistent volume which uses up all disk resources.
+  Resource volume = createPersistentVolume(
+      getDiskResource(totalBytes, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+  volume.add_reservations()->CopyFrom(dynamicReservation);
+  ASSERT_TRUE(needCheckpointing(volume));
+
+  Resource subtract = getDiskResource(subtractBytes, 1);
+  subtract.add_reservations()->CopyFrom(dynamicReservation);
+  ASSERT_TRUE(needCheckpointing(subtract));
+
+  Resource shrunkVolume = createPersistentVolume(
+      getDiskResource(totalBytes - subtractBytes, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+  shrunkVolume.add_reservations()->CopyFrom(dynamicReservation);
+  ASSERT_TRUE(needCheckpointing(shrunkVolume));
+
+  Future<vector<Offer>> offersBeforeShrink;
+
+  // Expect an offer containing the original volume.
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersBeforeShrink));
+
+  // We use the filter explicitly here so that the resources will not
+  // be filtered for 5 seconds (the default).
+  Filters filters;
+  filters.set_refuse_seconds(0);
+
+  // Create the persistent volume.
+  driver.acceptOffers(
+      {offer.id()},
+      {RESERVE(dynamicallyReserved), CREATE(volume)},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersBeforeShrink);
+  ASSERT_FALSE(offersBeforeShrink->empty());
+
+  offer = offersBeforeShrink->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(volume), frameworkInfo.roles(0)),
+      Resources(offer.resources()).persistentVolumes());
+
+  EXPECT_FALSE(
+      Resources(offer.resources()).contains(
+      allocatedResources(subtract, frameworkInfo.roles(0))));
+
+  // Make sure the volume exists, and leaves a non-empty file there.
+  string volumePath = slave::paths::getPersistentVolumePath(
+      slaveFlags.work_dir, volume);
+
+  EXPECT_TRUE(os::exists(volumePath));
+  string filePath = path::join(volumePath, "file");
+  ASSERT_SOME(os::write(filePath, "abc"));
+
+  Future<vector<Offer>> offersAfterShrink;
+
+  // Expect an offer containing shrunk volume.
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersAfterShrink));
+
+  driver.acceptOffers(
+      {offer.id()},
+      {SHRINK_VOLUME(volume, subtract.scalar())},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterShrink);
+  ASSERT_FALSE(offersAfterShrink->empty());
+
+  offer = offersAfterShrink->at(0);
+
+  if (GetParam() != MOUNT) {
+    EXPECT_EQ(
+        allocatedResources(Resources(shrunkVolume), frameworkInfo.roles(0)),
+        Resources(offer.resources()).persistentVolumes());
+
+    EXPECT_TRUE(
+        Resources(offer.resources()).contains(
+        allocatedResources(subtract, frameworkInfo.roles(0))));
+  } else {
+    EXPECT_EQ(
+        allocatedResources(Resources(volume), frameworkInfo.roles(0)),
+        Resources(offer.resources()).persistentVolumes());
+
+    EXPECT_FALSE(
+        Resources(offer.resources()).contains(
+        allocatedResources(subtract, frameworkInfo.roles(0))));
+  }
+
+  Future<TaskStatus> taskStarting;
+  Future<TaskStatus> taskRunning;
+  Future<TaskStatus> taskFinished;
+
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&taskStarting))
+    .WillOnce(FutureArg<1>(&taskRunning))
+    .WillOnce(FutureArg<1>(&taskFinished));
+
+  TaskInfo task = createTask(
+      offer.slave_id(),
+      offer.resources(),
+      "test `cat path1/file` = abc");
+
+  // Launch a task to verify that: if the fixture parameter is NONE or PATH,
+  // `SHRINK_VOLUME` takes effect on the agent and the task can use the shrunk
+  // volume as well as the freed disk resource; otherwise, `SHRINK_VOLUME`
+  // takes no effect on the agent.
+  driver.acceptOffers({offer.id()}, {LAUNCH({task})}, filters);
+
+  AWAIT_READY(taskStarting);
+  EXPECT_EQ(task.task_id(), taskStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, taskStarting->state());
+
+  AWAIT_READY(taskRunning);
+  EXPECT_EQ(task.task_id(), taskRunning->task_id());
+  EXPECT_EQ(TASK_RUNNING, taskRunning->state());
+
+  AWAIT_READY(taskFinished);
+  EXPECT_EQ(task.task_id(), taskFinished->task_id());
+  EXPECT_EQ(TASK_FINISHED, taskFinished->state());
+
+  driver.stop();
+  driver.join();
+
+  Clock::resume();
+}
+
+
+// This test verifies that any task to launch after a `GROW_VOLUME` in the same
+// `ACCEPT` call is dropped if the task consumes the original or grown volume,
+// because we intend to make `GROW_VOLUME` non-speculative.
+TEST_P(PersistentVolumeTest, NonSpeculativeGrowAndLaunch)
+{
+  if (GetParam() == MOUNT) {
+    // It is not possible to have a valid `GrowVolume` on a MOUNT disk because
+    // the volume must use up all disk space at `Create` and no space will be
+    // left for `addition`. Therefore we skip this test.
+    // TODO(zhitao): Make MOUNT a meaningful parameter value for this test, or
+    // create a new fixture to avoid testing against it.
+    return;
+  }
+
+  Clock::pause();
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_roles(0, DEFAULT_TEST_ROLE);
+
+  // Create a master.
+  master::Flags masterFlags = CreateMasterFlags();
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.resources = getSlaveResources();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offersBeforeOperations;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersBeforeOperations));
+
+  driver.start();
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersBeforeOperations);
+  ASSERT_FALSE(offersBeforeOperations->empty());
+
+  Offer offer = offersBeforeOperations->at(0);
+
+  // Disk spaces will be merged if fixture parameter is `NONE`.
+  Bytes totalBytes = GetParam() == NONE ? Megabytes(4096) : Megabytes(2048);
+
+  Bytes additionBytes = Megabytes(512);
+
+  // Construct a persistent volume which do not use up all disk resources.
+  Resource volume = createPersistentVolume(
+      getDiskResource(totalBytes - additionBytes, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+
+  Resource addition = getDiskResource(additionBytes, 1);
+
+  Resource grownVolume = createPersistentVolume(
+      getDiskResource(totalBytes, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+
+  Future<TaskStatus> taskError1;
+  Future<TaskStatus> taskError2;
+
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&taskError1))
+    .WillOnce(FutureArg<1>(&taskError2));
+
+  TaskInfo task1 = createTask(
+      offer.slave_id(),
+      Resources::parse("cpus:1;mem:128").get() + grownVolume,
+      "echo abc > path1/file");
+
+  TaskInfo task2 = createTask(
+      offer.slave_id(),
+      Resources::parse("cpus:1;mem:128").get() + volume,
+      "echo abc > path1/file");
+
+  Future<vector<Offer>> offersAfterOperations;
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersAfterOperations));
+
+  // We use the filter explicitly here so that the resources will not
+  // be filtered for 5 seconds (the default).
+  Filters filters;
+  filters.set_refuse_seconds(0);
+
+  // The create and grow volume operations will succeed, but the tasks will be
+  // dropped with `TASK_ERROR`.
+  driver.acceptOffers(
+      {offer.id()},
+      {CREATE(volume), GROW_VOLUME(volume, addition), LAUNCH({task1, task2})},
+      filters);
+
+  AWAIT_READY(taskError1);
+  AWAIT_READY(taskError2);
+
+  hashset<TaskID> expectedTasks = {task1.task_id(), task2.task_id()};
+  hashset<TaskID> actualTasks = {taskError1->task_id(), taskError2->task_id()};
+  EXPECT_EQ(expectedTasks, actualTasks);
+  EXPECT_EQ(TASK_ERROR, taskError1->state());
+  EXPECT_EQ(TASK_ERROR, taskError2->state());
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterOperations);
+  ASSERT_FALSE(offersAfterOperations->empty());
+
+  offer = offersAfterOperations->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(grownVolume), frameworkInfo.roles(0)),
+      Resources(offer.resources()).persistentVolumes());
+
+  driver.stop();
+  driver.join();
+
+  Clock::resume();
+}
+
+
+// This test verifies that any task to launch after a `SHRINK_VOLUME` in the
+// same `ACCEPT` call is dropped if the task consumes the original or shrunk
+// volume, because we intend to make `SHRINK_VOLUME` non-speculative.
+TEST_P(PersistentVolumeTest, NonSpeculativeShrinkAndLaunch)
+{
+  if (GetParam() == MOUNT) {
+    // It is not possible to have a valid `GrowVolume` on a MOUNT disk because
+    // the volume must use up all disk space at `Create` and no space will be
+    // left for `addition`. Therefore we skip this test.
+    // TODO(zhitao): Make MOUNT a meaningful parameter value for this test, or
+    // create a new fixture to avoid testing against it.
+    return;
+  }
+
+  Clock::pause();
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_roles(0, DEFAULT_TEST_ROLE);
+
+  // Create a master.
+  master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.resources = getSlaveResources();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offersBeforeOperations;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersBeforeOperations));
+
+  driver.start();
+
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersBeforeOperations);
+  ASSERT_FALSE(offersBeforeOperations->empty());
+
+  Offer offer = offersBeforeOperations->at(0);
+
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(1024), 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+
+  Value::Scalar subtract;
+  subtract.set_value(512);
+
+  Resource shrunkVolume = createPersistentVolume(
+      getDiskResource(Megabytes(512), 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+
+  Future<TaskStatus> taskError1;
+  Future<TaskStatus> taskError2;
+
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&taskError1))
+    .WillOnce(FutureArg<1>(&taskError2));
+
+  TaskInfo task1 = createTask(
+      offer.slave_id(),
+      Resources::parse("cpus:1;mem:128").get() + shrunkVolume,
+      "echo abc > path1/file");
+
+  TaskInfo task2 = createTask(
+      offer.slave_id(),
+      Resources::parse("cpus:1;mem:128").get() + volume,
+      "echo abc > path1/file");
+
+  Future<vector<Offer>> offersAfterOperations;
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersAfterOperations));
+
+  // We use the filter explicitly here so that the resources will not
+  // be filtered for 5 seconds (the default).
+  Filters filters;
+  filters.set_refuse_seconds(0);
+
+  // The create and shrink volume operations will succeed, but the tasks will be
+  // dropped with `TASK_ERROR`.
+  driver.acceptOffers(
+      {offer.id()},
+      {CREATE(volume), SHRINK_VOLUME(volume, subtract), LAUNCH({task1, task2})},
+      filters);
+
+  AWAIT_READY(taskError1);
+  AWAIT_READY(taskError2);
+
+  hashset<TaskID> expectedTasks = {task1.task_id(), task2.task_id()};
+  hashset<TaskID> actualTasks = {taskError1->task_id(), taskError2->task_id()};
+  EXPECT_EQ(expectedTasks, actualTasks);
+  EXPECT_EQ(TASK_ERROR, taskError1->state());
+  EXPECT_EQ(TASK_ERROR, taskError2->state());
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterOperations);
+  ASSERT_FALSE(offersAfterOperations->empty());
+  offer = offersAfterOperations->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(shrunkVolume), frameworkInfo.roles(0)),
+      Resources(offer.resources()).persistentVolumes());
+
+  driver.stop();
+  driver.join();
+
+  Clock::resume();
+}
+
+
+// This test verifies that grow and shrink operations can complete
+// successfully when authorization succeeds.
+TEST_P(PersistentVolumeTest, GoodACLGrowThenShrink)
+{
+  if (GetParam() == MOUNT) {
+    // It is not possible to have a valid `GrowVolume` on a MOUNT disk because
+    // the volume must use up all disk space at `Create` and no space will be
+    // left for `addition`. Therefore we skip this test.
+    // TODO(zhitao): Make MOUNT a meaningful parameter value for this test, or
+    // create a new fixture to avoid testing against it.
+    return;
+  }
+
+  Clock::pause();
+
+  ACLs acls;
+
+  // This ACL declares that the principal of `DEFAULT_CREDENTIAL`
+  // can resize persistent volumes for DEFAULT_TEST_ROLE.
+  mesos::ACL::ResizeVolume* resize = acls.add_resize_volumes();
+  resize->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
+  resize->mutable_roles()->add_values(DEFAULT_TEST_ROLE);
+
+  // Create a master.
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.acls = acls;
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.resources = getSlaveResources();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_roles(0, DEFAULT_TEST_ROLE);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offersBeforeCreate;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersBeforeCreate));
+
+  driver.start();
+
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersBeforeCreate);
+  ASSERT_FALSE(offersBeforeCreate->empty());
+
+  Offer offer = offersBeforeCreate->at(0);
+
+  // The disk spaces will be merged if the fixture parameter is `NONE`.
+  Bytes totalBytes = GetParam() == NONE ? Megabytes(4096) : Megabytes(2048);
+
+  Bytes bytesDifference = Megabytes(512);
+
+  // Construct a persistent volume which do not use up all disk resources.
+  Resource volume = createPersistentVolume(
+      getDiskResource(totalBytes - bytesDifference, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+
+  Resource difference = getDiskResource(bytesDifference, 1);
+
+  Resource grownVolume = createPersistentVolume(
+      getDiskResource(totalBytes, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo.principal());
+
+  Future<vector<Offer>> offersAfterGrow;
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersAfterGrow));
+
+  // We use the filter explicitly here so that the resources will not
+  // be filtered for 5 seconds (the default).
+  Filters filters;
+  filters.set_refuse_seconds(0);
+
+  // Create a persistent volume then grow it.
+  driver.acceptOffers(
+      {offer.id()},
+      {CREATE(volume), GROW_VOLUME(volume, difference)},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterGrow);
+  ASSERT_FALSE(offersAfterGrow->empty());
+
+  offer = offersAfterGrow->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(grownVolume), frameworkInfo.roles(0)),
+      Resources(offer.resources()).persistentVolumes());
+
+  EXPECT_FALSE(
+      Resources(offer.resources()).contains(
+      allocatedResources(difference, frameworkInfo.roles(0))));
+
+  Future<vector<Offer>> offersAfterShrink;
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offersAfterShrink));
+
+  // Shrink the volume back to original size.
+  driver.acceptOffers(
+      {offer.id()},
+      {SHRINK_VOLUME(grownVolume, difference.scalar())},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterShrink);
+  ASSERT_FALSE(offersAfterShrink->empty());
+  offer = offersAfterShrink->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(volume), frameworkInfo.roles(0)),
+      Resources(offer.resources()).persistentVolumes());
+
+  EXPECT_TRUE(
+      Resources(offer.resources()).contains(
+      allocatedResources(difference, frameworkInfo.roles(0))));
+
+  driver.stop();
+  driver.join();
+
+  Clock::resume();
+}
+
+// This test verifies that grow and shrink operations get dropped if
+// authorization fails and no principal is supplied.
+TEST_P(PersistentVolumeTest, BadACLDropGrowAndShrink)
+{
+  if (GetParam() == MOUNT) {
+    // It is not possible to have a valid `GrowVolume` on a MOUNT disk because
+    // the volume must use up all disk space at `Create` and no space will be
+    // left for `addition`. Therefore we skip this test.
+    // TODO(zhitao): Make MOUNT a meaningful parameter value for this test, or
+    // create a new fixture to avoid testing against it.
+    return;
+  }
+
+  Clock::pause();
+
+  ACLs acls;
+
+  // This ACL declares that no principal can resize any volume.
+  mesos::ACL::ResizeVolume* resize = acls.add_resize_volumes();
+  resize->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
+  resize->mutable_roles()->set_type(mesos::ACL::Entity::NONE);
+
+  // Create a master.
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.acls = acls;
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.resources = getSlaveResources();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  // DEFAULT_FRAMEWORK_INFO uses DEFAULT_CREDENTIAL.
+  FrameworkInfo frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo1.set_roles(0, DEFAULT_TEST_ROLE);
+
+  MockScheduler sched1;
+  MesosSchedulerDriver driver1(
+      &sched1, frameworkInfo1, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched1, registered(&driver1, _, _));
+
+  Future<vector<Offer>> offersBeforeCreate;
+  EXPECT_CALL(sched1, resourceOffers(&driver1, _))
+    .WillOnce(FutureArg<1>(&offersBeforeCreate));
+
+  driver1.start();
+
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersBeforeCreate);
+  ASSERT_FALSE(offersBeforeCreate->empty());
+
+  Offer offer = offersBeforeCreate->at(0);
+
+  // Disk spaces will be merged if fixture parameter is `NONE`.
+  Bytes totalBytes = GetParam() == NONE ? Megabytes(4096) : Megabytes(2048);
+
+  Bytes bytesDifference = Megabytes(512);
+
+  // Construct a persistent volume which does not use up all disk resources.
+  Resource volume = createPersistentVolume(
+      getDiskResource(totalBytes - bytesDifference, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo1.principal());
+
+  Resource difference = getDiskResource(bytesDifference, 1);
+
+  Resource grownVolume = createPersistentVolume(
+      getDiskResource(totalBytes, 1),
+      "id1",
+      "path1",
+      None(),
+      frameworkInfo1.principal());
+
+  Future<vector<Offer>> offersAfterGrow1;
+
+  EXPECT_CALL(sched1, resourceOffers(&driver1, _))
+    .WillOnce(FutureArg<1>(&offersAfterGrow1));
+
+  // We use the filter explicitly here so that the resources will not
+  // be filtered for 5 seconds (the default).
+  Filters filters;
+  filters.set_refuse_seconds(0);
+
+  // Creating the persistent volume will succeed, but growing will fail due to
+  // ACL.
+  driver1.acceptOffers(
+      {offer.id()},
+      {CREATE(volume), GROW_VOLUME(volume, difference)},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterGrow1);
+  ASSERT_FALSE(offersAfterGrow1->empty());
+
+  offer = offersAfterGrow1->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(volume), DEFAULT_TEST_ROLE),
+      Resources(offer.resources()).persistentVolumes());
+
+  EXPECT_TRUE(
+      Resources(offer.resources()).contains(
+      allocatedResources(difference, DEFAULT_TEST_ROLE)));
+
+  Future<vector<Offer>> offersAfterShrink1;
+
+  EXPECT_CALL(sched1, resourceOffers(&driver1, _))
+    .WillOnce(FutureArg<1>(&offersAfterShrink1));
+
+  driver1.acceptOffers(
+      {offer.id()},
+      {SHRINK_VOLUME(volume, difference.scalar())},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterShrink1);
+  ASSERT_FALSE(offersAfterShrink1->empty());
+
+  offer = offersAfterShrink1->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(volume), DEFAULT_TEST_ROLE),
+      Resources(offer.resources()).persistentVolumes());
+
+  driver1.stop();
+  driver1.join();
+
+  // Start the second framework with no principal.
+  FrameworkInfo frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo2.clear_principal();
+  frameworkInfo2.set_roles(0, DEFAULT_TEST_ROLE);
+
+  MockScheduler sched2;
+  MesosSchedulerDriver driver2(
+      &sched2, frameworkInfo2, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched2, registered(&driver2, _, _));
+
+  Future<vector<Offer>> offersBeforeGrow2;
+  EXPECT_CALL(sched2, resourceOffers(&driver2, _))
+    .WillOnce(FutureArg<1>(&offersBeforeGrow2));
+
+  driver2.start();
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersBeforeGrow2);
+  ASSERT_FALSE(offersBeforeGrow2->empty());
+
+  offer = offersBeforeGrow2->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(volume), DEFAULT_TEST_ROLE),
+      Resources(offer.resources()).persistentVolumes());
+
+  EXPECT_TRUE(
+      Resources(offer.resources()).contains(
+      allocatedResources(difference, DEFAULT_TEST_ROLE)));
+
+  Future<vector<Offer>> offersAfterGrow2;
+
+  EXPECT_CALL(sched2, resourceOffers(&driver2, _))
+    .WillOnce(FutureArg<1>(&offersAfterGrow2));
+
+  driver2.acceptOffers(
+      {offer.id()},
+      {GROW_VOLUME(volume, difference)},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterGrow2);
+  ASSERT_FALSE(offersAfterGrow2->empty());
+  offer = offersAfterGrow2->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(volume), DEFAULT_TEST_ROLE),
+      Resources(offer.resources()).persistentVolumes());
+
+  Future<vector<Offer>> offersAfterShrink2;
+
+  EXPECT_CALL(sched2, resourceOffers(&driver2, _))
+    .WillOnce(FutureArg<1>(&offersAfterShrink2));
+
+  driver2.acceptOffers(
+      {offer.id()},
+      {SHRINK_VOLUME(volume, difference.scalar())},
+      filters);
+
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offersAfterShrink2);
+  ASSERT_FALSE(offersAfterShrink2->empty());
+  offer = offersAfterShrink2->at(0);
+
+  EXPECT_EQ(
+      allocatedResources(Resources(volume), DEFAULT_TEST_ROLE),
+      Resources(offer.resources()).persistentVolumes());
+
+  driver2.stop();
+  driver2.join();
+
+  Clock::resume();
 }
 
 

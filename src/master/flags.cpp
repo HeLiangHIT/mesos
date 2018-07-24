@@ -176,15 +176,17 @@ mesos::internal::master::Flags::Flags()
       "machines are accepted. Path can be of the form\n"
       "`file:///path/to/file` or `/path/to/file`.\n");
 
-  add(&Flags::user_sorter,
-      "user_sorter",
-      "Policy to use for allocating resources between users. May be one of:\n"
-      "  dominant_resource_fairness (drf)",
+  add(&Flags::role_sorter,
+      "role_sorter",
+      flags::DeprecatedName("user_sorter"),
+      "Policy to use for allocating resources between roles when\n"
+      "allocating up to quota guarantees as well as when allocating\n"
+      "up to quota limits. May be one of: [drf, random]",
       "drf");
 
   add(&Flags::framework_sorter,
       "framework_sorter",
-      "Policy to use for allocating resources between a given user's\n"
+      "Policy to use for allocating resources between a given role's\n"
       "frameworks. Options are the same as for `--user_sorter`.",
       "drf");
 
@@ -473,6 +475,19 @@ mesos::internal::master::Flags::Flags()
       "  https://www.mail-archive.com/dev@mesos.apache.org/msg37571.html\n"
       "  https://issues.apache.org/jira/browse/MESOS-7576",
       true);
+
+  add(&Flags::min_allocatable_resources,
+      "min_allocatable_resources",
+      "One or more sets of resources that define the minimum allocatable\n"
+      "resources for the allocator. The allocator will only offer resources\n"
+      "that contain at least one of the specified sets. The resources in\n"
+      "each set should be delimited by semicolons, and the sets should be\n"
+      "delimited by the pipe character.\n"
+      "(Example: `disk:1|cpu:1;mem:32` configures the allocator to only offer\n"
+      "resources if they contain a disk resource of at least 1 megabyte, or\n"
+      "if they contain both 1 cpu and 32 megabytes of memory.)\n",
+      "cpus:" + stringify(MIN_CPUS) +
+        "|mem:" + stringify((double)MIN_MEM.bytes() / Bytes::MEGABYTES));
 
   add(&Flags::hooks,
       "hooks",

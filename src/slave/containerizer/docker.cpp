@@ -33,6 +33,10 @@
 #include <process/reap.hpp>
 #include <process/subprocess.hpp>
 
+#ifdef __WINDOWS__
+#include <process/windows/jobobject.hpp>
+#endif // __WINDOWS__
+
 #include <stout/adaptor.hpp>
 #include <stout/fs.hpp>
 #include <stout/hashmap.hpp>
@@ -45,6 +49,10 @@
 
 #include <stout/os/killtree.hpp>
 #include <stout/os/which.hpp>
+
+#ifdef __WINDOWS__
+#include <stout/os/windows/jobobject.hpp>
+#endif // __WINDOWS__
 
 #include "common/status_utils.hpp"
 
@@ -445,10 +453,10 @@ Future<Nothing> DockerContainerizerProcess::pull(
 
   string image = container->image();
 
-  Future<Docker::Image> future = docker->pull(
-    container->containerWorkDir,
-    image,
-    container->forcePullImage());
+  Future<Docker::Image> future = metrics.image_pull.time(docker->pull(
+      container->containerWorkDir,
+      image,
+      container->forcePullImage()));
 
   containers_.at(containerId)->pull = future;
 
@@ -908,8 +916,10 @@ Future<Nothing> DockerContainerizerProcess::recover(
 
 Future<Nothing> DockerContainerizerProcess::_recover(
     const Option<SlaveState>& state,
-    const list<Docker::Container>& _containers)
+    const vector<Docker::Container>& _containers)
 {
+  LOG(INFO) << "Got the list of Docker containers";
+
   if (state.isSome()) {
     // This mapping of ContainerIDs to running Docker container names
     // is established for two reasons:
@@ -1036,15 +1046,15 @@ Future<Nothing> DockerContainerizerProcess::_recover(
         pid_t pid = run->forkedPid.get();
 
         // Create a TCP socket.
-        int_fd socket = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (socket < 0) {
+        Try<int_fd> socket = net::socket(AF_INET, SOCK_STREAM, 0);
+        if (socket.isError()) {
           return Failure(
               "Failed to create socket for connecting to executor '" +
-              stringify(executor.id) + "': " + os::strerror(errno));
+              stringify(executor.id) + "': " + socket.error());
         }
 
         Try<Nothing, SocketError> connect = process::network::connect(
-            socket,
+            socket.get(),
             run->libprocessPid->address);
 
         if (connect.isSome()) {
@@ -1058,8 +1068,8 @@ Future<Nothing> DockerContainerizerProcess::_recover(
         }
 
         // Shutdown and close the socket.
-        shutdown(socket, SHUT_RDWR);
-        close(socket);
+        ::shutdown(socket.get(), SHUT_RDWR);
+        os::close(socket.get());
 
         container->status.future()
           ->onAny(defer(self(), &Self::reaped, containerId));
@@ -1099,10 +1109,10 @@ Future<Nothing> DockerContainerizerProcess::_recover(
 
 
 Future<Nothing> DockerContainerizerProcess::__recover(
-    const list<Docker::Container>& _containers)
+    const vector<Docker::Container>& _containers)
 {
-  list<ContainerID> containerIds;
-  list<Future<Nothing>> futures;
+  vector<ContainerID> containerIds;
+  vector<Future<Nothing>> futures;
   foreach (const Docker::Container& container, _containers) {
     VLOG(1) << "Checking if Docker container named '"
             << container.name << "' was started by Mesos";
@@ -1143,6 +1153,8 @@ Future<Nothing> DockerContainerizerProcess::__recover(
                          containerId.value() + "': " + unmount.error());
         }
       }
+
+      LOG(INFO) << "Finished processing orphaned Docker containers";
 
       return Nothing();
     }));
@@ -1376,15 +1388,15 @@ Future<Docker::Container> DockerContainerizerProcess::launchExecutorContainer(
     return Failure("Container is already destroyed");
   }
 
+  if (containers_[containerId]->state == Container::DESTROYING) {
+    return Failure(
+      "Container is being destroyed during launching excutor container");
+  }
+
   Container* container = containers_.at(containerId);
   container->state = Container::RUNNING;
 
-  return logger->prepare(
-      container->containerConfig.executor_info(),
-      container->containerWorkDir,
-      container->containerConfig.has_user()
-        ? container->containerConfig.user()
-        : Option<string>::none())
+  return logger->prepare(container->id, container->containerConfig)
     .then(defer(
         self(),
         [=](const ContainerIO& containerIO)
@@ -1471,6 +1483,11 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
     return Failure("Container is already destroyed");
   }
 
+  if (containers_[containerId]->state == Container::DESTROYING) {
+    return Failure(
+      "Container is being destroyed during launching executor process");
+  }
+
   Container* container = containers_.at(containerId);
   container->state = Container::RUNNING;
 
@@ -1544,12 +1561,7 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
 
   return allocateGpus
     .then(defer(self(), [=]() {
-      return logger->prepare(
-          container->containerConfig.executor_info(),
-          container->containerWorkDir,
-          container->containerConfig.has_user()
-            ? container->containerConfig.user()
-            : Option<string>::none());
+      return logger->prepare(container->id, container->containerConfig);
     }))
     .then(defer(
         self(),
@@ -1584,6 +1596,13 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
       parentHooks.emplace_back(Subprocess::ParentHook(
           &systemd::mesos::extendLifetime));
     }
+#elif __WINDOWS__
+    parentHooks.emplace_back(Subprocess::ParentHook::CREATE_JOB());
+    // Setting the "kill on close" job object limit ties the lifetime of the
+    // docker processes to that of the executor. This ensures that if the
+    // executor exits, the docker processes aren't leaked.
+    parentHooks.emplace_back(Subprocess::ParentHook(
+        [](pid_t pid) { return os::set_job_kill_on_close_limit(pid); }));
 #endif // __linux__
 
     // Prepare the flags to pass to the mesos docker executor process.

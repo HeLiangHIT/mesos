@@ -352,6 +352,253 @@ TEST_F(MasterSlaveReconciliationTest, ReconcileDroppedTask)
 }
 
 
+// This test verifies that the master reconciles operations that are missing
+// from a reregistering slave. In this case, we drop the ApplyOperationMessage
+// and expect the master to send a ReconcileOperationsMessage after the slave
+// reregisters.
+TEST_F(MasterSlaveReconciliationTest, ReconcileDroppedOperation)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  StandaloneMasterDetector detector(master.get()->pid);
+
+  Future<UpdateSlaveMessage> updateSlaveMessage =
+    FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  ASSERT_SOME(slave);
+
+  // Since any out-of-sync operation state in `UpdateSlaveMessage` triggers a
+  // reconciliation, await the message from the initial agent registration
+  // sequence beforce continuing. Otherwise we risk the master reconciling with
+  // the agent before we fail over the master.
+  AWAIT_READY(updateSlaveMessage);
+
+  // Register the framework in a non-`*` role so it can reserve resources.
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_roles(0, DEFAULT_TEST_ROLE);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+
+  // We prevent the operation from reaching the agent.
+  Future<ApplyOperationMessage> applyOperationMessage =
+    DROP_PROTOBUF(ApplyOperationMessage(), _, _);
+
+  // Perform a reserve operation on the offered resources.
+  // This will trigger an `ApplyOperationMessage`.
+  ASSERT_FALSE(offers->empty());
+  const Offer& offer = offers->at(0);
+
+  Resources reservedResources = offer.resources();
+  reservedResources =
+    reservedResources.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.roles(0), frameworkInfo.principal()));
+
+  driver.acceptOffers({offer.id()}, {RESERVE(reservedResources)});
+
+  AWAIT_READY(applyOperationMessage);
+
+  // We expect the master to detect the missing operation when the
+  // slave reregisters and to reconcile the operations on that slave.
+  Future<ReconcileOperationsMessage> reconcileOperationsMessage =
+    FUTURE_PROTOBUF(ReconcileOperationsMessage(), _, _);
+
+  // Simulate a master failover to trigger slave reregistration.
+  detector.appoint(master.get()->pid);
+
+  AWAIT_READY(reconcileOperationsMessage);
+
+  ASSERT_EQ(1, reconcileOperationsMessage->operations_size());
+  EXPECT_EQ(
+      applyOperationMessage->operation_uuid(),
+      reconcileOperationsMessage->operations(0).operation_uuid());
+}
+
+// The master reconciles operations that are missing from a re-registering
+// agent.
+//
+// In this case, the `ApplyOperationMessage` is dropped, so the agent should
+// respond with a OPERATION_DROPPED operation status update.
+//
+// This test verifies that if an operation ID is set, the framework receives
+// the OPERATION_DROPPED operation status update.
+//
+// This is a regression test for MESOS-8784.
+TEST_F(
+    MasterSlaveReconciliationTest,
+    ForwardOperationDroppedAfterExplicitReconciliation)
+{
+  Clock::pause();
+
+  mesos::internal::master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Future<UpdateSlaveMessage> updateSlaveMessage =
+    FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
+
+  auto detector = std::make_shared<StandaloneMasterDetector>(master.get()->pid);
+
+  mesos::internal::slave::Flags slaveFlags = CreateSlaveFlags();
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  // Advance the clock to trigger agent registration.
+  Clock::advance(slaveFlags.registration_backoff_factor);
+
+  // Wait for the agent to register.
+  AWAIT_READY(updateSlaveMessage);
+
+  // Start and register a resource provider.
+
+  v1::ResourceProviderInfo resourceProviderInfo;
+  resourceProviderInfo.set_type("org.apache.mesos.rp.test");
+  resourceProviderInfo.set_name("test");
+
+  v1::Resource disk = v1::createDiskResource(
+      "200", "*", None(), None(), v1::createDiskSourceRaw());
+
+  Owned<v1::MockResourceProvider> resourceProvider(
+      new v1::MockResourceProvider(resourceProviderInfo, v1::Resources(disk)));
+
+  // Make the mock resource provider answer to reconciliation events with
+  // OPERATION_DROPPED operation status updates.
+  auto reconcileOperations =
+    [&resourceProvider](
+        const v1::resource_provider::Event::ReconcileOperations& reconcile) {
+      foreach (const v1::UUID& operationUuid, reconcile.operation_uuids()) {
+        v1::resource_provider::Call call;
+
+        call.set_type(v1::resource_provider::Call::UPDATE_OPERATION_STATUS);
+        call.mutable_resource_provider_id()->CopyFrom(
+            resourceProvider->info.id());
+
+        v1::resource_provider::Call::UpdateOperationStatus*
+          updateOperationStatus = call.mutable_update_operation_status();
+
+        updateOperationStatus->mutable_status()->set_state(
+            v1::OPERATION_DROPPED);
+
+        updateOperationStatus->mutable_operation_uuid()->CopyFrom(
+            operationUuid);
+
+        resourceProvider->send(call);
+      }
+    };
+
+  EXPECT_CALL(*resourceProvider, reconcileOperations(_))
+    .WillOnce(Invoke(reconcileOperations));
+
+  Owned<EndpointDetector> endpointDetector(
+      mesos::internal::tests::resource_provider::createEndpointDetector(
+          slave.get()->pid));
+
+  updateSlaveMessage = FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
+
+  // NOTE: We need to resume the clock so that the resource provider can
+  // fully register.
+  Clock::resume();
+
+  ContentType contentType = ContentType::PROTOBUF;
+
+  resourceProvider->start(endpointDetector, contentType);
+
+  // Wait until the agent's resources have been updated to include the
+  // resource provider resources.
+  AWAIT_READY(updateSlaveMessage);
+
+  Clock::pause();
+
+  // Start a v1 framework.
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+
+  v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_roles(0, DEFAULT_TEST_ROLE);
+
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(v1::scheduler::SendSubscribe(frameworkInfo));
+
+  Future<v1::scheduler::Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  // Ignore heartbeats.
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return());
+
+  Future<v1::scheduler::Event::Offers> offers;
+
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(v1::scheduler::DeclineOffers());
+
+  v1::scheduler::TestMesos mesos(master.get()->pid, contentType, scheduler);
+
+  AWAIT_READY(subscribed);
+  v1::FrameworkID frameworkId(subscribed->framework_id());
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->offers().empty());
+
+  const v1::Offer& offer = offers->offers(0);
+
+  // We'll drop the `ApplyOperationMessage` from the master to the agent.
+  Future<ApplyOperationMessage> applyOperationMessage =
+    DROP_PROTOBUF(ApplyOperationMessage(), master.get()->pid, _);
+
+  v1::Resources resources =
+    v1::Resources(offer.resources()).filter([](const v1::Resource& resource) {
+      return resource.has_provider_id();
+    });
+
+  ASSERT_FALSE(resources.empty());
+
+  v1::Resource reserved = *(resources.begin());
+  reserved.add_reservations()->CopyFrom(
+      v1::createDynamicReservationInfo(
+          frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
+
+  v1::OperationID operationId;
+  operationId.set_value("operation");
+
+  mesos.send(v1::createCallAccept(
+      frameworkId, offer, {v1::RESERVE(reserved, operationId.value())}));
+
+  AWAIT_READY(applyOperationMessage);
+
+  Future<v1::scheduler::Event::UpdateOperationStatus> operationDroppedUpdate;
+  EXPECT_CALL(*scheduler, updateOperationStatus(_, _))
+    .WillOnce(FutureArg<1>(&operationDroppedUpdate));
+
+  // Simulate a spurious master change event (e.g., due to ZooKeeper
+  // expiration) at the slave to force re-registration.
+  detector->appoint(master.get()->pid);
+
+  // Advance the clock, so that the agent re-registers.
+  Clock::advance(slaveFlags.registration_backoff_factor);
+
+  // Wait for the framework to receive the OPERATION_DROPPED update.
+  AWAIT_READY(operationDroppedUpdate);
+
+  EXPECT_EQ(operationId, operationDroppedUpdate->status().operation_id());
+  EXPECT_EQ(v1::OPERATION_DROPPED, operationDroppedUpdate->status().state());
+}
+
 // This test verifies that the master reconciles tasks that are
 // missing from a reregistering slave. In this case, we trigger
 // a race between the slave re-registration message and the launch

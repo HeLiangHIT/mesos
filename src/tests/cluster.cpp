@@ -92,6 +92,7 @@
 #include "slave/slave.hpp"
 #include "slave/task_status_update_manager.hpp"
 
+#include "slave/containerizer/composing.hpp"
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/fetcher.hpp"
 
@@ -434,8 +435,26 @@ Try<process::Owned<Slave>> Slave::create(
       return Error("Failed to create containerizer: " + _containerizer.error());
     }
 
-    slave->ownedContainerizer.reset(_containerizer.get());
     slave->containerizer = _containerizer.get();
+  }
+
+  // As composing containerizer doesn't affect behaviour of underlying
+  // containerizers, we can always use composing containerizer turned on
+  // by default in tests.
+  if (!dynamic_cast<slave::ComposingContainerizer*>(slave->containerizer)) {
+    Try<slave::ComposingContainerizer*> composing =
+      slave::ComposingContainerizer::create({slave->containerizer});
+
+    if (composing.isError()) {
+      return Error(
+          "Failed to create composing containerizer: " + composing.error());
+    }
+
+    slave->containerizer = composing.get();
+  }
+
+  if (containerizer.isNone()) {
+    slave->ownedContainerizer.reset(slave->containerizer);
   }
 
   Option<Authorizer*> authorizer = providedAuthorizer;
@@ -486,7 +505,7 @@ Try<process::Owned<Slave>> Slave::create(
 
   // If the garbage collector is not provided, create a default one.
   if (gc.isNone()) {
-    slave->gc.reset(new slave::GarbageCollector());
+    slave->gc.reset(new slave::GarbageCollector(flags.work_dir));
   }
 
   // If the resource estimator is not provided, create a default one.
@@ -600,6 +619,8 @@ Slave::~Slave()
       slave::READWRITE_HTTP_AUTHENTICATION_REALM);
   process::http::authentication::unsetAuthenticator(
       slave::EXECUTOR_HTTP_AUTHENTICATION_REALM);
+  process::http::authentication::unsetAuthenticator(
+      slave::RESOURCE_PROVIDER_HTTP_AUTHENTICATION_REALM);
 
   // If either `shutdown()` or `terminate()` were called already,
   // skip the below container cleanup logic.  Additionally, we can skip
@@ -652,18 +673,16 @@ Slave::~Slave()
     }
 
     foreach (const ContainerID& containerId, containers.get()) {
-      process::Future<Option<ContainerTermination>> wait =
-        containerizer->wait(containerId);
-
-      process::Future<Option<ContainerTermination>> destroy =
+      process::Future<Option<ContainerTermination>> termination =
         containerizer->destroy(containerId);
 
-      AWAIT(destroy);
-      AWAIT(wait);
+      AWAIT(termination);
 
-      if (!wait.isReady()) {
+      if (!termination.isReady()) {
         LOG(ERROR) << "Failed to destroy container " << containerId << ": "
-                   << (wait.isFailed() ? wait.failure() : "discarded");
+                   << (termination.isFailed() ?
+                       termination.failure() :
+                       "discarded");
       }
     }
 

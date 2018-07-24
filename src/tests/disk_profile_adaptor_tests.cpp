@@ -40,16 +40,18 @@
 
 #include "module/manager.hpp"
 
-#include "resource_provider/storage/uri_disk_profile_adaptor.hpp"
 #include "resource_provider/storage/disk_profile_utils.hpp"
+#include "resource_provider/storage/uri_disk_profile_adaptor.hpp"
 
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
+#include "tests/disk_profile_server.hpp"
 #include "tests/utils.hpp"
 
 using namespace process;
 
 using std::map;
+using std::shared_ptr;
 using std::string;
 using std::tuple;
 using std::vector;
@@ -73,7 +75,7 @@ constexpr char URI_DISK_PROFILE_ADAPTOR_NAME[] =
 class UriDiskProfileAdaptorTest : public MesosTest
 {
 public:
-  virtual void SetUp()
+  void SetUp() override
   {
     MesosTest::SetUp();
 
@@ -89,7 +91,7 @@ public:
     ASSERT_SOME(modules::ModuleManager::load(modules));
   }
 
-  virtual void TearDown()
+  void TearDown() override
   {
     foreach (const Modules::Library& library, modules.libraries()) {
       foreach (const Modules::Library::Module& module, library.modules()) {
@@ -400,9 +402,7 @@ TEST_F(UriDiskProfileAdaptorTest, ParseInvalids)
 // This creates a UriDiskProfileAdaptor module configured to read from a
 // file and tests the basic `watch` -> `translate` workflow which
 // callers of the module are expected to follow.
-//
-// Enable this test once MESOS-8567 is resolved.
-TEST_F(UriDiskProfileAdaptorTest, DISABLED_FetchFromFile)
+TEST_F(UriDiskProfileAdaptorTest, FetchFromFile)
 {
   Clock::pause();
 
@@ -456,6 +456,7 @@ TEST_F(UriDiskProfileAdaptorTest, DISABLED_FetchFromFile)
         params);
 
   ASSERT_SOME(_module);
+
   Owned<DiskProfileAdaptor> module(_module.get());
 
   // Start watching for updates.
@@ -480,82 +481,30 @@ TEST_F(UriDiskProfileAdaptorTest, DISABLED_FetchFromFile)
     module->translate(profileName, resourceProviderInfo);
 
   AWAIT_ASSERT_READY(mapping);
-  ASSERT_TRUE(mapping.get().capability.has_block());
+  ASSERT_TRUE(mapping->capability.has_block());
   ASSERT_EQ(
       csi::v0::VolumeCapability::AccessMode::MULTI_NODE_SINGLE_WRITER,
-      mapping.get().capability.access_mode().mode());
+      mapping->capability.access_mode().mode());
 
   Clock::resume();
 }
 
 
-// Basic helper for UriDiskProfileAdaptor modules configured to fetch
-// from HTTP URIs.
-class MockProfileServer : public Process<MockProfileServer>
-{
-public:
-  MOCK_METHOD1(profiles, Future<http::Response>(const http::Request&));
-
-protected:
-  virtual void initialize()
-  {
-    route("/profiles", None(), &MockProfileServer::profiles);
-  }
-};
-
-
-class ServerWrapper
-{
-public:
-  ServerWrapper() : process(new MockProfileServer())
-  {
-    spawn(process.get());
-  }
-
-  ~ServerWrapper()
-  {
-    terminate(process.get());
-    wait(process.get());
-  }
-
-  Owned<MockProfileServer> process;
-};
-
-
 // This creates a UriDiskProfileAdaptor module configured to read from
 // an HTTP URI. The HTTP server will return a different profile mapping
-// between each of the calls. We expect the module to ignore the second
-// call because the module does not allow profiles to be renamed. This
+// between each of the calls. We expect the module to ignore the third
+// call because the module does not allow profiles to be mutated. This
 // is not a fatal error however, as the HTTP server can be "fixed"
 // without restarting the agent.
 TEST_F(UriDiskProfileAdaptorTest, FetchFromHTTP)
 {
   Clock::pause();
 
-  const string contents1 =R"~(
+  const string contents1 =
+    R"~(
     {
       "profile_matrix" : {
         "profile" : {
-          "resource_provider_selector" : {
-            "resource_providers" : [
-              {
-                "type" : "resource_provider_type",
-                "name" : "resource_provider_name"
-              }
-            ]
-          },
-          "volume_capabilities" : {
-            "block" : {},
-            "access_mode" : { "mode": "MULTI_NODE_MULTI_WRITER" }
-          }
-        }
-      }
-    })~";
-
-  const string contents2 =R"~(
-    {
-      "profile_matrix" : {
-        "renamed-profile" : {
           "resource_provider_selector" : {
             "resource_providers" : [
               {
@@ -570,25 +519,13 @@ TEST_F(UriDiskProfileAdaptorTest, FetchFromHTTP)
           }
         }
       }
-    })~";
+    }
+    )~";
 
-  const string contents3 =R"~(
+  const string contents2 =
+    R"~(
     {
       "profile_matrix" : {
-        "profile" : {
-          "resource_provider_selector" : {
-            "resource_providers" : [
-              {
-                "type" : "resource_provider_type",
-                "name" : "resource_provider_name"
-              }
-            ]
-          },
-          "volume_capabilities" : {
-            "block" : {},
-            "access_mode" : { "mode": "MULTI_NODE_MULTI_WRITER" }
-          }
-        },
         "another-profile" : {
           "resource_provider_selector" : {
             "resource_providers" : [
@@ -600,11 +537,34 @@ TEST_F(UriDiskProfileAdaptorTest, FetchFromHTTP)
           },
           "volume_capabilities" : {
             "block" : {},
-            "access_mode" : { "mode": "SINGLE_NODE_WRITER" }
+            "access_mode" : { "mode": "MULTI_NODE_MULTI_WRITER" }
           }
         }
       }
-    })~";
+    }
+    )~";
+
+  const string contents3 =
+    R"~(
+    {
+      "profile_matrix" : {
+        "profile" : {
+          "resource_provider_selector" : {
+            "resource_providers" : [
+              {
+                "type" : "resource_provider_type",
+                "name" : "resource_provider_name"
+              }
+            ]
+          },
+          "volume_capabilities" : {
+            "block" : {},
+            "access_mode" : { "mode": "MULTI_NODE_MULTI_WRITER" }
+          }
+        }
+      }
+    }
+    )~";
 
   const Duration pollInterval = Seconds(10);
 
@@ -612,19 +572,19 @@ TEST_F(UriDiskProfileAdaptorTest, FetchFromHTTP)
   resourceProviderInfo.set_type("resource_provider_type");
   resourceProviderInfo.set_name("resource_provider_name");
 
-  ServerWrapper server;
-
-  // Wait for the server to finish initializing so that the routes are ready.
-  AWAIT_READY(dispatch(server.process->self(), []() { return Nothing(); }));
+  Future<shared_ptr<TestDiskProfileServer>> server =
+    TestDiskProfileServer::create();
+  AWAIT_READY(server);
 
   // We need to intercept this call since the module is expected to
-  // ignore the result of the second call.
-  Future<Nothing> secondCall;
+  // ignore the result of the third call.
+  Future<Nothing> thirdCall;
 
-  EXPECT_CALL(*server.process, profiles(_))
+  EXPECT_CALL(*server.get()->process, profiles(_))
     .WillOnce(Return(http::OK(contents1)))
-    .WillOnce(DoAll(FutureSatisfy(&secondCall), Return(http::OK(contents2))))
-    .WillOnce(Return(http::OK(contents3)));
+    .WillOnce(Return(http::OK(contents2)))
+    .WillOnce(DoAll(FutureSatisfy(&thirdCall), Return(http::OK(contents3))))
+    .WillOnce(Return(http::OK(contents1)));
 
   Parameters params;
 
@@ -634,11 +594,7 @@ TEST_F(UriDiskProfileAdaptorTest, FetchFromHTTP)
 
   Parameter* uriFlag = params.add_parameter();
   uriFlag->set_key("uri");
-  uriFlag->set_value(stringify(process::http::URL(
-      "http",
-      process::address().ip,
-      process::address().port,
-      server.process->self().id + "/profiles")));
+  uriFlag->set_value(stringify(server.get()->process->url()));
 
   Try<DiskProfileAdaptor*> _module =
     modules::ModuleManager::create<DiskProfileAdaptor>(
@@ -646,42 +602,53 @@ TEST_F(UriDiskProfileAdaptorTest, FetchFromHTTP)
         params);
 
   ASSERT_SOME(_module);
+
   Owned<DiskProfileAdaptor> module(_module.get());
 
   // Wait for the first HTTP poll to complete.
   Future<hashset<string>> future =
     module->watch(hashset<string>::EMPTY, resourceProviderInfo);
 
-  AWAIT_ASSERT_READY(future);
+  AWAIT_READY(future);
   ASSERT_EQ(1u, future->size());
-  EXPECT_EQ("profile", *(future->begin()));
+  EXPECT_EQ("profile", *future->begin());
 
   // Start watching for an update to the list of profiles.
   future = module->watch({"profile"}, resourceProviderInfo);
 
   // Trigger the second HTTP poll.
   Clock::advance(pollInterval);
-  AWAIT_ASSERT_READY(secondCall);
 
-  // Dispatch a call to the module, which ensures that the polling has actually
-  // completed (not just the HTTP call).
-  AWAIT_ASSERT_READY(module->translate("profile", resourceProviderInfo));
+  AWAIT_READY(future);
+  ASSERT_EQ(1u, future->size());
+  EXPECT_EQ("another-profile", *future->begin());
+
+  // Watching for another update to the list of profiles.
+  future = module->watch({"another-profile"}, resourceProviderInfo);
+
+  Future<Nothing> contentsPolled =
+    FUTURE_DISPATCH(_, &storage::UriDiskProfileAdaptorProcess::_poll);
+
+  // Trigger the third HTTP poll.
+  Clock::advance(pollInterval);
+  AWAIT_READY(thirdCall);
+
+  // Ensure that the polling has actually completed.
+  AWAIT_READY(contentsPolled);
 
   // We don't expect the module to notify watcher(s) because the server's
   // response is considered invalid (the module does not allow profiles
   // to be renamed).
+  Clock::settle();
   ASSERT_TRUE(future.isPending());
 
-  // Trigger the third HTTP poll.
+  // Trigger the fourth HTTP poll.
   Clock::advance(pollInterval);
 
-  // This time, the server's response is correct and also includes a second
-  // profile, which means that the watcher(s) should be notified.
-  AWAIT_ASSERT_READY(future);
-  ASSERT_EQ(2u, future->size());
-  EXPECT_EQ((hashset<string>{"profile", "another-profile"}), future.get());
-
-  Clock::resume();
+  // This time, the server's response includes the correct first profile.
+  AWAIT_READY(future);
+  ASSERT_EQ(1u, future->size());
+  EXPECT_EQ("profile", *future->begin());
 }
 
 } // namespace tests {

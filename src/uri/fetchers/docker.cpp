@@ -14,7 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <list>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -49,7 +48,6 @@ namespace http = process::http;
 namespace io = process::io;
 namespace spec = docker::spec;
 
-using std::list;
 using std::set;
 using std::string;
 using std::tuple;
@@ -702,7 +700,7 @@ Future<Nothing> DockerFetcherPluginProcess::__fetch(
   }
 
   // Download all the filesystem layers.
-  list<Future<Nothing>> futures;
+  vector<Future<Nothing>> futures;
   for (int i = 0; i < manifest->fslayers_size(); i++) {
     URI blob = uri::docker::blob(
         uri.path(),                         // The 'repository'.
@@ -870,6 +868,11 @@ Future<http::Headers> DockerFetcherPluginProcess::getAuthHeader(
 
         return getAuthHeaderBearer(token->value);
       });
+  }
+
+  if (authScheme == "BASIC"){
+    return Failure(
+        "Unexpected BASIC Authorization response status: " + response.status);
   }
 
   return Failure("Unsupported auth-scheme: " + authScheme);

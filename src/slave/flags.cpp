@@ -122,14 +122,17 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::isolation,
       "isolation",
-      "Isolation mechanisms to use, e.g., `posix/cpu,posix/mem` (or \n"
+      "Isolation mechanisms to use, e.g., `posix/cpu,posix/mem` (or\n"
       "`windows/cpu,windows/mem` if you are on Windows), or\n"
       "`cgroups/cpu,cgroups/mem`, or `network/port_mapping`\n"
       "(configure with flag: `--with-network-isolator` to enable),\n"
       "or `gpu/nvidia` for nvidia specific gpu isolation,\n"
       "or load an alternate isolator module using the `--modules`\n"
-      "flag. Note that this flag is only relevant for the Mesos\n"
-      "Containerizer.",
+      "flag. if `cgroups/all` is specified, any other cgroups related\n"
+      "isolation options (e.g., `cgroups/cpu`) will be ignored, and all\n"
+      "the local enabled cgroups subsystems on the agent host will be\n"
+      "automatically loaded by the cgroups isolator. Note that this flag\n"
+      "is only relevant for the Mesos Containerizer.",
 #ifndef __WINDOWS__
       "posix/cpu,posix/mem"
 #else
@@ -200,9 +203,11 @@ mesos::internal::slave::Flags::Flags()
       "docker_registry",
       "The default url for Mesos containerizer to pull Docker images. It\n"
       "could either be a Docker registry server url (i.e: `https://registry.docker.io`),\n" // NOLINT(whitespace/line_length)
-      "or a local path (i.e: `/tmp/docker/images`) in which Docker image\n"
-      "archives (result of `docker save`) are stored. Note that this option\n"
-      "won't change the default registry server for Docker containerizer.",
+      "or a source that Docker image archives (result of `docker save`) are\n"
+      "stored. The Docker archive source could be specified either as a local\n"
+      "path (i.e: `/tmp/docker/images`), or as an HDFS URI\n"
+      "(i.e: `hdfs://localhost:8020/archives/`). Note that this option won't\n"
+      "change the default registry server for Docker containerizer.",
       "https://registry-1.docker.io");
 
   add(&Flags::docker_store_dir,
@@ -307,8 +312,7 @@ mesos::internal::slave::Flags::Flags()
       "Path to find Hadoop installed (for\n"
       "fetching framework executors from HDFS)\n"
       "(no default, look for `HADOOP_HOME` in\n"
-      "environment or find hadoop on `PATH`)",
-      "");
+      "environment or find hadoop on `PATH`)");
 
 #ifndef __WINDOWS__
   add(&Flags::switch_user,
@@ -740,6 +744,11 @@ mesos::internal::slave::Flags::Flags()
                 "At least the following agent features need to be enabled: "
                 "MULTI_ROLE, HIERARCHICAL_ROLE, RESERVATION_REFINEMENT");
           }
+
+          if (capabilities.resizeVolume && !capabilities.resourceProvider) {
+            return Error(
+                "RESIZE_VOLUME feature requires RESOURCE_PROVIDER feature");
+          }
         }
 
         return None();
@@ -1112,6 +1121,11 @@ mesos::internal::slave::Flags::Flags()
       "published by the agent's resources. Otherwise tasks are restricted\n"
       "to only listen on ports for which they have been assigned resources.",
       false);
+  add(&Flags::enforce_container_ports,
+      "enforce_container_ports",
+      "Whether to enable port enforcement for containers. This flag\n"
+      "is used by `network/ports` isolator.",
+      false);
 #endif // ENABLE_NETWORK_PORTS_ISOLATOR
 
   add(&Flags::network_cni_plugins_dir,
@@ -1131,7 +1145,7 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::container_disk_watch_interval,
       "container_disk_watch_interval",
       "The interval between disk quota checks for containers. This flag is\n"
-      "used by the `disk/du` isolator.",
+      "used by the `disk/du` and `disk/xfs` isolators.",
       Seconds(15));
 
   // TODO(jieyu): Consider enabling this flag by default. Remember
@@ -1310,6 +1324,12 @@ mesos::internal::slave::Flags::Flags()
       "xfs_project_range",
       "The ranges of XFS project IDs to use for tracking directory quotas",
       "[5000-10000]");
+
+  add(&Flags::xfs_kill_containers,
+      "xfs_kill_containers",
+      "Whether the `disk/xfs` isolator should detect and terminate\n"
+      "containers that exceed their allocated disk quota.",
+      false);
 #endif
 
   add(&Flags::http_command_executor,

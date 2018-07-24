@@ -14,285 +14,323 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <utility>
+
 #include "csi/client.hpp"
 
 using process::Failure;
 using process::Future;
 
-using process::grpc::RpcResult;
+using process::grpc::StatusError;
+
+using process::grpc::client::CallOptions;
 
 namespace mesos {
 namespace csi {
 namespace v0 {
 
-Future<GetPluginInfoResponse> Client::GetPluginInfo(
-    const GetPluginInfoRequest& request)
+template <>
+Future<GetPluginInfoResponse>
+Client::call<GET_PLUGIN_INFO>(
+    GetPluginInfoRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Identity, GetPluginInfo), request)
-    .then([](const RpcResult<GetPluginInfoResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Identity, GetPluginInfo),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<GetPluginInfoResponse, StatusError>& result)
         -> Future<GetPluginInfoResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<GetPluginCapabilitiesResponse> Client::GetPluginCapabilities(
-    const GetPluginCapabilitiesRequest& request)
+template <>
+Future<GetPluginCapabilitiesResponse>
+Client::call<GET_PLUGIN_CAPABILITIES>(
+    GetPluginCapabilitiesRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Identity, GetPluginCapabilities), request)
-    .then([](const RpcResult<GetPluginCapabilitiesResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Identity, GetPluginCapabilities),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<GetPluginCapabilitiesResponse, StatusError>& result)
         -> Future<GetPluginCapabilitiesResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<ProbeResponse> Client::Probe(
-    const ProbeRequest& request)
+template <>
+Future<ProbeResponse>
+Client::call<PROBE>(
+    ProbeRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Identity, Probe), request)
-    .then([](const RpcResult<ProbeResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Identity, Probe),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<ProbeResponse, StatusError>& result)
         -> Future<ProbeResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<CreateVolumeResponse> Client::CreateVolume(
-    const CreateVolumeRequest& request)
+template <>
+Future<CreateVolumeResponse>
+Client::call<CREATE_VOLUME>(
+    CreateVolumeRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Controller, CreateVolume), request)
-    .then([](const RpcResult<CreateVolumeResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Controller, CreateVolume),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<CreateVolumeResponse, StatusError>& result)
         -> Future<CreateVolumeResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<DeleteVolumeResponse> Client::DeleteVolume(
-    const DeleteVolumeRequest& request)
+template <>
+Future<DeleteVolumeResponse>
+Client::call<DELETE_VOLUME>(
+    DeleteVolumeRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Controller, DeleteVolume), request)
-    .then([](const RpcResult<DeleteVolumeResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Controller, DeleteVolume),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<DeleteVolumeResponse, StatusError>& result)
         -> Future<DeleteVolumeResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<ControllerPublishVolumeResponse> Client::ControllerPublishVolume(
-    const ControllerPublishVolumeRequest& request)
+template <>
+Future<ControllerPublishVolumeResponse>
+Client::call<CONTROLLER_PUBLISH_VOLUME>(
+    ControllerPublishVolumeRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Controller, ControllerPublishVolume), request)
-    .then([](const RpcResult<ControllerPublishVolumeResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Controller, ControllerPublishVolume),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<ControllerPublishVolumeResponse, StatusError>& result)
         -> Future<ControllerPublishVolumeResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<ControllerUnpublishVolumeResponse> Client::ControllerUnpublishVolume(
-    const ControllerUnpublishVolumeRequest& request)
+template <>
+Future<ControllerUnpublishVolumeResponse>
+Client::call<CONTROLLER_UNPUBLISH_VOLUME>(
+    ControllerUnpublishVolumeRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Controller, ControllerUnpublishVolume), request)
-    .then([](const RpcResult<ControllerUnpublishVolumeResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Controller, ControllerUnpublishVolume),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<ControllerUnpublishVolumeResponse, StatusError>& result)
         -> Future<ControllerUnpublishVolumeResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<ValidateVolumeCapabilitiesResponse> Client::ValidateVolumeCapabilities(
-    const ValidateVolumeCapabilitiesRequest& request)
+template <>
+Future<ValidateVolumeCapabilitiesResponse>
+Client::call<VALIDATE_VOLUME_CAPABILITIES>(
+    ValidateVolumeCapabilitiesRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Controller, ValidateVolumeCapabilities), request)
-    .then([](const RpcResult<ValidateVolumeCapabilitiesResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Controller, ValidateVolumeCapabilities),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<ValidateVolumeCapabilitiesResponse, StatusError>& result)
         -> Future<ValidateVolumeCapabilitiesResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<ListVolumesResponse> Client::ListVolumes(
-    const ListVolumesRequest& request)
+template <>
+Future<ListVolumesResponse>
+Client::call<LIST_VOLUMES>(
+    ListVolumesRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Controller, ListVolumes), request)
-    .then([](const RpcResult<ListVolumesResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Controller, ListVolumes),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<ListVolumesResponse, StatusError>& result)
         -> Future<ListVolumesResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<GetCapacityResponse> Client::GetCapacity(
-    const GetCapacityRequest& request)
+template <>
+Future<GetCapacityResponse>
+Client::call<GET_CAPACITY>(
+    GetCapacityRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Controller, GetCapacity), request)
-    .then([](const RpcResult<GetCapacityResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Controller, GetCapacity),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<GetCapacityResponse, StatusError>& result)
         -> Future<GetCapacityResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<ControllerGetCapabilitiesResponse> Client::ControllerGetCapabilities(
-    const ControllerGetCapabilitiesRequest& request)
+template <>
+Future<ControllerGetCapabilitiesResponse>
+Client::call<CONTROLLER_GET_CAPABILITIES>(
+    ControllerGetCapabilitiesRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Controller, ControllerGetCapabilities), request)
-    .then([](const RpcResult<ControllerGetCapabilitiesResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Controller, ControllerGetCapabilities),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<ControllerGetCapabilitiesResponse, StatusError>& result)
         -> Future<ControllerGetCapabilitiesResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<NodeStageVolumeResponse> Client::NodeStageVolume(
-    const NodeStageVolumeRequest& request)
+template <>
+Future<NodeStageVolumeResponse>
+Client::call<NODE_STAGE_VOLUME>(
+    NodeStageVolumeRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Node, NodeStageVolume), request)
-    .then([](const RpcResult<NodeStageVolumeResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Node, NodeStageVolume),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<NodeStageVolumeResponse, StatusError>& result)
         -> Future<NodeStageVolumeResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<NodeUnstageVolumeResponse> Client::NodeUnstageVolume(
-    const NodeUnstageVolumeRequest& request)
+template <>
+Future<NodeUnstageVolumeResponse>
+Client::call<NODE_UNSTAGE_VOLUME>(
+    NodeUnstageVolumeRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Node, NodeUnstageVolume), request)
-    .then([](const RpcResult<NodeUnstageVolumeResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Node, NodeUnstageVolume),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<NodeUnstageVolumeResponse, StatusError>& result)
         -> Future<NodeUnstageVolumeResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<NodePublishVolumeResponse> Client::NodePublishVolume(
-    const NodePublishVolumeRequest& request)
+template <>
+Future<NodePublishVolumeResponse>
+Client::call<NODE_PUBLISH_VOLUME>(
+    NodePublishVolumeRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Node, NodePublishVolume), request)
-    .then([](const RpcResult<NodePublishVolumeResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Node, NodePublishVolume),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<NodePublishVolumeResponse, StatusError>& result)
         -> Future<NodePublishVolumeResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<NodeUnpublishVolumeResponse> Client::NodeUnpublishVolume(
-    const NodeUnpublishVolumeRequest& request)
+template <>
+Future<NodeUnpublishVolumeResponse>
+Client::call<NODE_UNPUBLISH_VOLUME>(
+    NodeUnpublishVolumeRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Node, NodeUnpublishVolume), request)
-    .then([](const RpcResult<NodeUnpublishVolumeResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Node, NodeUnpublishVolume),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<NodeUnpublishVolumeResponse, StatusError>& result)
         -> Future<NodeUnpublishVolumeResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<NodeGetIdResponse> Client::NodeGetId(
-    const NodeGetIdRequest& request)
+template <>
+Future<NodeGetIdResponse>
+Client::call<NODE_GET_ID>(
+    NodeGetIdRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Node, NodeGetId), request)
-    .then([](const RpcResult<NodeGetIdResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Node, NodeGetId),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<NodeGetIdResponse, StatusError>& result)
         -> Future<NodeGetIdResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 
 
-Future<NodeGetCapabilitiesResponse> Client::NodeGetCapabilities(
-    const NodeGetCapabilitiesRequest& request)
+template <>
+Future<NodeGetCapabilitiesResponse>
+Client::call<NODE_GET_CAPABILITIES>(
+    NodeGetCapabilitiesRequest request)
 {
   return runtime
-    .call(channel, GRPC_RPC(Node, NodeGetCapabilities), request)
-    .then([](const RpcResult<NodeGetCapabilitiesResponse>& result)
+    .call(
+        connection,
+        GRPC_CLIENT_METHOD(Node, NodeGetCapabilities),
+        std::move(request),
+        CallOptions())
+    .then([](const Try<NodeGetCapabilitiesResponse, StatusError>& result)
         -> Future<NodeGetCapabilitiesResponse> {
-      if (result.status.ok()) {
-        return result.response;
-      } else {
-        return Failure(result.status.error_message());
-      }
+      return result;
     });
 }
 

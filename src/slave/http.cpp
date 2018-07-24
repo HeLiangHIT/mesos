@@ -14,7 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <list>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -62,6 +61,7 @@
 #include "common/http.hpp"
 #include "common/recordio.hpp"
 #include "common/resources_utils.hpp"
+#include "common/validation.hpp"
 
 #include "internal/devolve.hpp"
 
@@ -467,6 +467,8 @@ Future<Response> Http::api(
 
   Option<ContentType> messageAcceptType;
   if (streamingMediaType(acceptType)) {
+    // Note that `acceptsMediaType()` returns true if the given headers
+    // field does not exist, i.e. by default we return JSON here.
     if (request.acceptsMediaType(MESSAGE_ACCEPT, APPLICATION_JSON)) {
       messageAcceptType = ContentType::JSON;
     } else if (request.acceptsMediaType(MESSAGE_ACCEPT, APPLICATION_PROTOBUF)) {
@@ -542,13 +544,20 @@ Future<Response> Http::_api(
   if (streamingMediaType(mediaTypes.content) &&
       call.type() != mesos::agent::Call::ATTACH_CONTAINER_INPUT) {
     return UnsupportedMediaType(
-        "Streaming 'Content-Type' " + stringify(mediaTypes.content) + " is not "
-        "supported for " + stringify(call.type()) + " call");
+        "Streaming 'Content-Type' " + stringify(mediaTypes.content) + " is "
+        "not supported for " + stringify(call.type()) + " call");
   } else if (!streamingMediaType(mediaTypes.content) &&
              call.type() == mesos::agent::Call::ATTACH_CONTAINER_INPUT) {
     return UnsupportedMediaType(
         string("Expecting 'Content-Type' to be ") + APPLICATION_RECORDIO +
         " for " + stringify(call.type()) + " call");
+  }
+
+  if (streamingMediaType(mediaTypes.accept) &&
+      call.type() != mesos::agent::Call::ATTACH_CONTAINER_OUTPUT &&
+      call.type() != mesos::agent::Call::LAUNCH_NESTED_CONTAINER_SESSION) {
+    return NotAcceptable("Streaming response is not supported for " +
+        stringify(call.type()) + " call");
   }
 
   // Each handler must log separately to add context
@@ -759,7 +768,7 @@ Future<Response> Http::executor(
 
   const executor::Call call = devolve(v1Call);
 
-  Option<Error> error = validation::executor::call::validate(call);
+  Option<Error> error = common::validation::validateExecutorCall(call);
 
   if (error.isSome()) {
     return BadRequest("Failed to validate Executor::Call: " + error->message);
@@ -1038,7 +1047,7 @@ Future<Response> Http::getMetrics(
   }
 
   return process::metrics::snapshot(timeout)
-      .then([acceptType](const hashmap<string, double>& metrics) -> Response {
+      .then([acceptType](const map<string, double>& metrics) -> Response {
           mesos::agent::Response response;
         response.set_type(mesos::agent::Response::GET_METRICS);
         mesos::agent::Response::GetMetrics* _getMetrics =
@@ -1218,7 +1227,6 @@ string Http::STATE_HELP() {
         "         \"docker_kill_orphans\" : \"true\",",
         "         \"switch_user\" : \"true\",",
         "         \"logging_level\" : \"INFO\",",
-        "         \"hadoop_home\" : \"\",",
         "         \"strict\" : \"true\",",
         "         \"executor_registration_timeout\" : \"1mins\",",
         "         \"recovery_timeout\" : \"15mins\",",
@@ -1583,19 +1591,49 @@ Future<Response> Http::getOperations(
 
   LOG(INFO) << "Processing GET_OPERATIONS call";
 
-  // TODO(nfnt): Authorize this call (MESOS-8473).
+  return ObjectApprovers::create(slave->authorizer, principal, {VIEW_ROLE})
+    .then(defer(
+        slave->self(),
+        [=](const Owned<ObjectApprovers>& approvers) -> Response {
+          // We consider a principal to be authorized to view an operation if it
+          // is authorized to view the resources the operation is performed on.
+          auto approved = [&approvers](const Operation& operation) {
+            Try<Resources> consumedResources =
+              protobuf::getConsumedResources(operation.info());
 
-  agent::Response response;
-  response.set_type(mesos::agent::Response::GET_OPERATIONS);
+            if (consumedResources.isError()) {
+              LOG(WARNING)
+                << "Could not approve operation " << operation.uuid()
+                << " since its consumed resources could not be determined: "
+                << consumedResources.error();
 
-  agent::Response::GetOperations* operations =
-    response.mutable_get_operations();
+              return false;
+            }
 
-  foreachvalue (Operation* operation, slave->operations) {
-    operations->add_operations()->CopyFrom(*operation);
-  }
+            foreach (const Resource& resource, consumedResources.get()) {
+              if (!approvers->approved<VIEW_ROLE>(resource)) {
+                return false;
+              }
+            }
 
-  return OK(serialize(acceptType, evolve(response)), stringify(acceptType));
+            return true;
+          };
+
+          agent::Response response;
+          response.set_type(mesos::agent::Response::GET_OPERATIONS);
+
+          agent::Response::GetOperations* operations =
+            response.mutable_get_operations();
+
+          foreachvalue (Operation* operation, slave->operations) {
+            if (approved(*operation)) {
+              operations->add_operations()->CopyFrom(*operation);
+            }
+          }
+
+          return OK(
+              serialize(acceptType, evolve(response)), stringify(acceptType));
+        }));
 }
 
 
@@ -2110,9 +2148,9 @@ Future<JSON::Array> Http::__containers(
 {
   return slave->containerizer->containers()
     .then(defer(slave->self(), [=](const hashset<ContainerID> containerIds) {
-      Owned<list<JSON::Object>> metadata(new list<JSON::Object>());
-      list<Future<ContainerStatus>> statusFutures;
-      list<Future<ResourceStatistics>> statsFutures;
+      Owned<vector<JSON::Object>> metadata(new vector<JSON::Object>());
+      vector<Future<ContainerStatus>> statusFutures;
+      vector<Future<ResourceStatistics>> statsFutures;
 
       hashset<ContainerID> executorContainerIds;
       hashset<ContainerID> authorizedExecutorContainerIds;
@@ -2210,13 +2248,13 @@ Future<JSON::Array> Http::__containers(
 
       return await(await(statusFutures), await(statsFutures)).then(
           [metadata](const tuple<
-              Future<list<Future<ContainerStatus>>>,
-              Future<list<Future<ResourceStatistics>>>>& t)
+              Future<vector<Future<ContainerStatus>>>,
+              Future<vector<Future<ResourceStatistics>>>>& t)
               -> Future<JSON::Array> {
-            const list<Future<ContainerStatus>>& status =
+            const vector<Future<ContainerStatus>>& status =
               std::get<0>(t).get();
 
-            const list<Future<ResourceStatistics>>& stats =
+            const vector<Future<ResourceStatistics>>& stats =
               std::get<1>(t).get();
 
             CHECK_EQ(status.size(), stats.size());
@@ -2482,7 +2520,7 @@ Future<Response> Http::_launchContainer(
     const Option<Resources>& resources,
     const Option<ContainerInfo>& containerInfo,
     const Option<ContainerClass>& containerClass,
-    ContentType acceptType,
+    ContentType,
     const Owned<ObjectApprovers>& approvers) const
 {
   Option<string> user;

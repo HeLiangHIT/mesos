@@ -34,12 +34,17 @@
 
 #include "checks/checker.hpp"
 
+#include "common/validation.hpp"
+
 #include "slave/containerizer/fetcher.hpp"
 
 #include "tests/flags.hpp"
 #include "tests/http_server_test_helper.hpp"
 #include "tests/mesos.hpp"
 #include "tests/utils.hpp"
+
+using mesos::internal::common::validation::validateCheckInfo;
+using mesos::internal::common::validation::validateCheckStatusInfo;
 
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::MesosContainerizer;
@@ -1330,7 +1335,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, TCPCheckDelivered)
 class DefaultExecutorCheckTest : public CheckTest
 {
 protected:
-  slave::Flags CreateSlaveFlags()
+  slave::Flags CreateSlaveFlags() override
   {
     slave::Flags flags = CheckTest::CreateSlaveFlags();
 
@@ -1971,47 +1976,22 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
-  // Default executor delegates launching both the task and its check to the
-  // agent. To avoid a race, we explicitly synchronize.
-  Try<std::array<int_fd, 2>> pipes_ = os::pipe();
-  ASSERT_SOME(pipes_);
-
-  const std::array<int_fd, 2>& pipes = pipes_.get();
-
   const string filename = "nested_inherits_work_dir";
 
-  // NOTE: We use a non-shell command here to use 'bash -c' to execute
-  // the 'echo', which deals with the file descriptor, because of a bug
-  // in ubuntu dash. Multi-digit file descriptor is not supported in
-  // ubuntu dash, which executes the shell command.
-  v1::CommandInfo command;
-  command.set_shell(false);
-  command.set_value("/bin/bash");
-  command.add_arguments("bash");
-  command.add_arguments("-c");
-  command.add_arguments(
-      "touch " + filename + ";echo running >&" +
-      stringify(pipes[1]) + ";sleep 1000");
-
-  v1::TaskInfo taskInfo = v1::createTask(agentId, resources, command);
+  v1::TaskInfo taskInfo = v1::createTask(
+      agentId,
+      resources,
+      v1::createCommandInfo(
+          strings::format("touch %s; sleep 1000", filename).get()));
 
   v1::CheckInfo* checkInfo = taskInfo.mutable_check();
   checkInfo->set_type(v1::CheckInfo::COMMAND);
   checkInfo->set_delay_seconds(0);
   checkInfo->set_interval_seconds(0);
 
-  // NOTE: We use a non-shell command here to use 'bash -c' to execute
-  // the 'read', which deals with the file descriptor, because of a bug
-  // in ubuntu dash. Multi-digit file descriptor is not supported in
-  // ubuntu dash, which executes the shell command.
-  v1::CommandInfo* checkCommand =
-    checkInfo->mutable_command()->mutable_command();
-  checkCommand->set_shell(false);
-  checkCommand->set_value("/bin/bash");
-  checkCommand->add_arguments("bash");
-  checkCommand->add_arguments("-c");
-  checkCommand->add_arguments(
-      "read INPUT <&" + stringify(pipes[0]) + ";ls " + filename);
+  // Wait in a busy loop until the file has been created.
+  checkInfo->mutable_command()->mutable_command()->CopyFrom(
+      v1::createCommandInfo("while [ -f " + filename + "]; do :; done"));
 
   v1::TaskGroupInfo taskGroup;
   taskGroup.add_tasks()->CopyFrom(taskInfo);
@@ -2890,12 +2870,12 @@ TEST_F(CheckTest, CheckInfoValidation)
   {
     CheckInfo checkInfo;
 
-    Option<Error> validate = validation::checkInfo(checkInfo);
+    Option<Error> validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ("CheckInfo must specify 'type'", validate->message);
 
     checkInfo.set_type(CheckInfo::UNKNOWN);
-    validate = validation::checkInfo(checkInfo);
+    validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ("'UNKNOWN' is not a valid check type", validate->message);
   }
@@ -2905,21 +2885,21 @@ TEST_F(CheckTest, CheckInfoValidation)
     CheckInfo checkInfo;
 
     checkInfo.set_type(CheckInfo::COMMAND);
-    Option<Error> validate = validation::checkInfo(checkInfo);
+    Option<Error> validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "Expecting 'command' to be set for COMMAND check",
         validate->message);
 
     checkInfo.set_type(CheckInfo::HTTP);
-    validate = validation::checkInfo(checkInfo);
+    validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "Expecting 'http' to be set for HTTP check",
         validate->message);
 
     checkInfo.set_type(CheckInfo::TCP);
-    validate = validation::checkInfo(checkInfo);
+    validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "Expecting 'tcp' to be set for TCP check",
@@ -2932,12 +2912,12 @@ TEST_F(CheckTest, CheckInfoValidation)
 
     checkInfo.set_type(CheckInfo::COMMAND);
     checkInfo.mutable_command()->CopyFrom(CheckInfo::Command());
-    Option<Error> validate = validation::checkInfo(checkInfo);
+    Option<Error> validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ("Command check must contain 'shell command'", validate->message);
 
     checkInfo.mutable_command()->mutable_command()->CopyFrom(CommandInfo());
-    validate = validation::checkInfo(checkInfo);
+    validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ("Command check must contain 'shell command'", validate->message);
   }
@@ -2951,7 +2931,7 @@ TEST_F(CheckTest, CheckInfoValidation)
     checkInfo.mutable_command()->mutable_command()->CopyFrom(
         createCommandInfo("exit 0"));
 
-    Option<Error> validate = validation::checkInfo(checkInfo);
+    Option<Error> validate = validateCheckInfo(checkInfo);
     EXPECT_NONE(validate);
 
     Environment::Variable* variable =
@@ -2959,7 +2939,7 @@ TEST_F(CheckTest, CheckInfoValidation)
           ->mutable_variables()->Add();
     variable->set_name("ENV_VAR_KEY");
 
-    validate = validation::checkInfo(checkInfo);
+    validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
   }
 
@@ -2970,11 +2950,11 @@ TEST_F(CheckTest, CheckInfoValidation)
     checkInfo.set_type(CheckInfo::HTTP);
     checkInfo.mutable_http()->set_port(8080);
 
-    Option<Error> validate = validation::checkInfo(checkInfo);
+    Option<Error> validate = validateCheckInfo(checkInfo);
     EXPECT_NONE(validate);
 
     checkInfo.mutable_http()->set_path("healthz");
-    validate = validation::checkInfo(checkInfo);
+    validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "The path 'healthz' of HTTP check must start with '/'",
@@ -2989,7 +2969,7 @@ TEST_F(CheckTest, CheckInfoValidation)
     checkInfo.mutable_http()->set_port(8080);
 
     checkInfo.set_delay_seconds(-1.0);
-    Option<Error> validate = validation::checkInfo(checkInfo);
+    Option<Error> validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "Expecting 'delay_seconds' to be non-negative",
@@ -2997,7 +2977,7 @@ TEST_F(CheckTest, CheckInfoValidation)
 
     checkInfo.set_delay_seconds(0.0);
     checkInfo.set_interval_seconds(-1.0);
-    validate = validation::checkInfo(checkInfo);
+    validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "Expecting 'interval_seconds' to be non-negative",
@@ -3005,14 +2985,14 @@ TEST_F(CheckTest, CheckInfoValidation)
 
     checkInfo.set_interval_seconds(0.0);
     checkInfo.set_timeout_seconds(-1.0);
-    validate = validation::checkInfo(checkInfo);
+    validate = validateCheckInfo(checkInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "Expecting 'timeout_seconds' to be non-negative",
         validate->message);
 
     checkInfo.set_timeout_seconds(0.0);
-    validate = validation::checkInfo(checkInfo);
+    validate = validateCheckInfo(checkInfo);
     EXPECT_NONE(validate);
   }
 }
@@ -3027,12 +3007,12 @@ TEST_F(CheckTest, CheckStatusInfoValidation)
   {
     CheckStatusInfo checkStatusInfo;
 
-    Option<Error> validate = validation::checkStatusInfo(checkStatusInfo);
+    Option<Error> validate = validateCheckStatusInfo(checkStatusInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ("CheckStatusInfo must specify 'type'", validate->message);
 
     checkStatusInfo.set_type(CheckInfo::UNKNOWN);
-    validate = validation::checkStatusInfo(checkStatusInfo);
+    validate = validateCheckStatusInfo(checkStatusInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "'UNKNOWN' is not a valid check's status type",
@@ -3044,21 +3024,21 @@ TEST_F(CheckTest, CheckStatusInfoValidation)
     CheckStatusInfo checkStatusInfo;
 
     checkStatusInfo.set_type(CheckInfo::COMMAND);
-    Option<Error> validate = validation::checkStatusInfo(checkStatusInfo);
+    Option<Error> validate = validateCheckStatusInfo(checkStatusInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "Expecting 'command' to be set for COMMAND check's status",
         validate->message);
 
     checkStatusInfo.set_type(CheckInfo::HTTP);
-    validate = validation::checkStatusInfo(checkStatusInfo);
+    validate = validateCheckStatusInfo(checkStatusInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "Expecting 'http' to be set for HTTP check's status",
         validate->message);
 
     checkStatusInfo.set_type(CheckInfo::TCP);
-    validate = validation::checkStatusInfo(checkStatusInfo);
+    validate = validateCheckStatusInfo(checkStatusInfo);
     EXPECT_SOME(validate);
     EXPECT_EQ(
         "Expecting 'tcp' to be set for TCP check's status",

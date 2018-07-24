@@ -42,16 +42,13 @@
 #include <stout/os/read.hpp>
 
 #include <stout/os/raw/environment.hpp>
-#include <stout/os/windows/fd.hpp>
 
 // NOTE: These system headers must be included after `stout/windows.hpp`
 // as they may include `Windows.h`. See comments in `stout/windows.hpp`
 // for why this ordering is important.
-#include <direct.h>
-#include <io.h>
-#include <Psapi.h>
-#include <TlHelp32.h>
-#include <Userenv.h>
+#include <Psapi.h>    // For `EnumProcesses` and `GetProcessMemoryInfo`.
+#include <TlHelp32.h> // For `PROCESSENTRY32W` and `CreateToolhelp32Snapshot`.
+#include <Userenv.h>  // For `GetAllUsersProfileDirectoryW`.
 
 namespace os {
 namespace internal {
@@ -81,6 +78,36 @@ inline Try<std::string> nodename()
   }
 
   return stringify(std::wstring(buffer.data()));
+}
+
+
+// Converts a `FILETIME` from an absoute Windows time, which is the number of
+// 100-nanosecond intervals since 1601-01-01 00:00:00 +0000, to an UNIX
+// absolute time, which is number of seconds from 1970-01-01 00:00:00 +0000.
+inline double windows_to_unix_epoch(const FILETIME& filetime)
+{
+  ULARGE_INTEGER time;
+
+  // `FILETIME` isn't 8 byte aligned so they suggest not do cast to int64*.
+  time.HighPart = filetime.dwHighDateTime;
+  time.LowPart = filetime.dwLowDateTime;
+
+  // Constant taken from here:
+  // https://msdn.microsoft.com/en-us/library/windows/desktop/ms724228(v=vs.85).aspx. // NOLINT(whitespace/line_length)
+  // It is the number of 100ns periods between the Windows and UNIX epochs.
+  constexpr uint64_t epoch_offset = 116444736000000000ULL;
+
+  // Now the `QuadPart` field is the 64-bit representation due to the
+  // layout of the `ULARGE_INTEGER` struct.
+  static_assert(
+      std::is_same<decltype(time.QuadPart), uint64_t>::value,
+      "Expected `ULARGE_INTEGER.QuadPart` to be of type `uint64_t`");
+
+  CHECK_GE(time.QuadPart, epoch_offset)
+    << "windows_to_unix_epoch: Given time was before UNIX epoch: "
+    << time.QuadPart;
+
+  return static_cast<double>(time.QuadPart - epoch_offset) / 10000000;
 }
 
 } // namespace internal {
@@ -175,7 +202,10 @@ inline void unsetenv(const std::string& key)
 }
 
 
-// NOTE: This exists for compatibility with the POSIX API.
+// NOTE: This exists for compatibility with the POSIX API. On Windows,
+// either function is suitable for clearing a secret from the
+// environment, as the pointers returned by `GetEnvironmentVariable`
+// and `GetEnvironmentStrings` are to blocks allocated on invocation.
 inline void eraseenv(const std::string& key)
 {
   unsetenv(key);
@@ -333,6 +363,10 @@ inline Try<Nothing> mknod(
 // Mesos only requires millisecond resolution, so this is ok for now.
 inline Try<Nothing> sleep(const Duration& duration)
 {
+  if (duration.ms() < 0) {
+    return WindowsError(ERROR_INVALID_PARAMETER);
+  }
+
   ::Sleep(static_cast<DWORD>(duration.ms()));
 
   return Nothing();

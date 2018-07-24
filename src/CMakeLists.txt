@@ -175,7 +175,7 @@ set(AGENT_SRC
   slave/containerizer/mesos/provisioner/appc/paths.cpp
   slave/containerizer/mesos/provisioner/appc/store.cpp
   slave/containerizer/mesos/provisioner/backends/copy.cpp
-  slave/containerizer/mesos/provisioner/docker/local_puller.cpp
+  slave/containerizer/mesos/provisioner/docker/image_tar_puller.cpp
   slave/containerizer/mesos/provisioner/docker/metadata_manager.cpp
   slave/containerizer/mesos/provisioner/docker/paths.cpp
   slave/containerizer/mesos/provisioner/docker/puller.cpp
@@ -242,7 +242,8 @@ set(CSI_SRC
 
 if (ENABLE_GRPC)
   list(APPEND CSI_SRC
-    csi/client.cpp)
+    csi/client.cpp
+    csi/rpc.cpp)
 endif ()
 
 set(DOCKER_SRC
@@ -302,6 +303,7 @@ set(LINUX_SRC
   slave/containerizer/mesos/isolators/gpu/nvml.cpp
   slave/containerizer/mesos/isolators/gpu/volume.cpp
   slave/containerizer/mesos/isolators/linux/capabilities.cpp
+  slave/containerizer/mesos/isolators/linux/devices.cpp
   slave/containerizer/mesos/isolators/namespaces/ipc.cpp
   slave/containerizer/mesos/isolators/namespaces/pid.cpp
   slave/containerizer/mesos/isolators/network/cni/cni.cpp
@@ -353,6 +355,7 @@ set(MASTER_SRC
   master/allocator/mesos/metrics.cpp
   master/allocator/sorter/drf/metrics.cpp
   master/allocator/sorter/drf/sorter.cpp
+  master/allocator/sorter/random/sorter.cpp
   master/contender/contender.cpp
   master/contender/standalone.cpp
   master/contender/zookeeper.cpp

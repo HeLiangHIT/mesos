@@ -112,7 +112,7 @@ JSON::Array createMachineList(std::initializer_list<MachineID> _ids)
 class MasterMaintenanceTest : public MesosTest
 {
 public:
-  virtual void SetUp()
+  void SetUp() override
   {
     MesosTest::SetUp();
 
@@ -130,7 +130,7 @@ public:
     unavailability = createUnavailability(Clock::now());
   }
 
-  virtual slave::Flags CreateSlaveFlags()
+  slave::Flags CreateSlaveFlags() override
   {
     slave::Flags slaveFlags = MesosTest::CreateSlaveFlags();
     slaveFlags.hostname = maintenanceHostname;
@@ -1470,8 +1470,7 @@ TEST_F(MasterMaintenanceTest, InverseOffersFilters)
 
   // Capture the registration message for the second slave.
   Future<SlaveRegisteredMessage> slave2RegisteredMessage =
-    FUTURE_PROTOBUF(
-        SlaveRegisteredMessage(), master.get()->pid, Not(slave1.get()->pid));
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, Not(slave1.get()->pid));
 
   slave::Flags slaveFlags2 = MesosTest::CreateSlaveFlags();
   slaveFlags2.hostname = maintenanceHostname + "-2";

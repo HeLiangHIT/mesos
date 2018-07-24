@@ -32,7 +32,7 @@
 #include <process/time.hpp>
 
 #include <process/metrics/counter.hpp>
-#include <process/metrics/gauge.hpp>
+#include <process/metrics/pull_gauge.hpp>
 #include <process/metrics/metrics.hpp>
 
 #include <stout/bytes.hpp>
@@ -61,7 +61,7 @@ using google::protobuf::RepeatedPtrField;
 using process::Clock;
 using process::defer;
 
-using process::metrics::Gauge;
+using process::metrics::PullGauge;
 using process::metrics::Counter;
 
 const double CPUS_PER_TASK = 0.1;
@@ -280,7 +280,6 @@ public:
         taskActive = false;
         if (status.reason() == TaskStatus::REASON_CONTAINER_LIMITATION_MEMORY) {
           ++metrics.tasks_oomed;
-          break;
         }
 
         // NOTE: Fetching the executor (e.g. `--executor_uri`) may fail
@@ -288,8 +287,8 @@ public:
         // enough that it makes sense to track this failure metric separately.
         if (status.reason() == TaskStatus::REASON_CONTAINER_LAUNCH_FAILED) {
           ++metrics.launch_failures;
-          break;
         }
+        break;
       case TASK_KILLED:
       case TASK_LOST:
       case TASK_ERROR:
@@ -297,9 +296,22 @@ public:
 
         if (status.reason() != TaskStatus::REASON_INVALID_OFFERS) {
           ++metrics.abnormal_terminations;
-          break;
         }
-      default:
+        break;
+      case TASK_RUNNING:
+        ++metrics.tasks_running;
+        break;
+      // We ignore uninteresting transient task status updates.
+      case TASK_KILLING:
+      case TASK_STAGING:
+      case TASK_STARTING:
+        break;
+      // We ignore task status updates related to reconciliation.
+      case TASK_DROPPED:
+      case TASK_GONE:
+      case TASK_GONE_BY_OPERATOR:
+      case TASK_UNKNOWN:
+      case TASK_UNREACHABLE:
         break;
     }
   }
@@ -335,6 +347,7 @@ private:
             defer(_scheduler, &BalloonSchedulerProcess::_registered)),
         tasks_finished(string(FRAMEWORK_METRICS_PREFIX) + "/tasks_finished"),
         tasks_oomed(string(FRAMEWORK_METRICS_PREFIX) + "/tasks_oomed"),
+        tasks_running(string(FRAMEWORK_METRICS_PREFIX) + "/tasks_running"),
         launch_failures(string(FRAMEWORK_METRICS_PREFIX) + "/launch_failures"),
         abnormal_terminations(
             string(FRAMEWORK_METRICS_PREFIX) + "/abnormal_terminations")
@@ -343,6 +356,7 @@ private:
       process::metrics::add(registered);
       process::metrics::add(tasks_finished);
       process::metrics::add(tasks_oomed);
+      process::metrics::add(tasks_running);
       process::metrics::add(launch_failures);
       process::metrics::add(abnormal_terminations);
     }
@@ -357,11 +371,12 @@ private:
       process::metrics::remove(abnormal_terminations);
     }
 
-    process::metrics::Gauge uptime_secs;
-    process::metrics::Gauge registered;
+    process::metrics::PullGauge uptime_secs;
+    process::metrics::PullGauge registered;
 
     process::metrics::Counter tasks_finished;
     process::metrics::Counter tasks_oomed;
+    process::metrics::Counter tasks_running;
     process::metrics::Counter launch_failures;
     process::metrics::Counter abnormal_terminations;
   } metrics;
@@ -384,39 +399,39 @@ public:
     process::spawn(process);
   }
 
-  virtual ~BalloonScheduler()
+  ~BalloonScheduler() override
   {
     process::terminate(process);
     process::wait(process);
   }
 
-  virtual void registered(
+  void registered(
       SchedulerDriver*,
       const FrameworkID& frameworkId,
-      const MasterInfo&)
+      const MasterInfo&) override
   {
     LOG(INFO) << "Registered with framework ID: " << frameworkId;
 
     process::dispatch(&process, &BalloonSchedulerProcess::registered);
   }
 
-  virtual void reregistered(SchedulerDriver*, const MasterInfo& masterInfo)
+  void reregistered(SchedulerDriver*, const MasterInfo& masterInfo) override
   {
     LOG(INFO) << "Reregistered";
 
     process::dispatch(&process, &BalloonSchedulerProcess::registered);
   }
 
-  virtual void disconnected(SchedulerDriver* driver)
+  void disconnected(SchedulerDriver* driver) override
   {
     LOG(INFO) << "Disconnected";
 
     process::dispatch(&process, &BalloonSchedulerProcess::disconnected);
   }
 
-  virtual void resourceOffers(
+  void resourceOffers(
       SchedulerDriver* driver,
-      const std::vector<Offer>& offers)
+      const std::vector<Offer>& offers) override
   {
     LOG(INFO) << "Resource offers received";
 
@@ -427,12 +442,12 @@ public:
         offers);
   }
 
-  virtual void offerRescinded(SchedulerDriver* driver, const OfferID& offerId)
+  void offerRescinded(SchedulerDriver* driver, const OfferID& offerId) override
   {
     LOG(INFO) << "Offer rescinded";
   }
 
-  virtual void statusUpdate(SchedulerDriver* driver, const TaskStatus& status)
+  void statusUpdate(SchedulerDriver* driver, const TaskStatus& status) override
   {
     LOG(INFO) << "Task " << status.task_id() << " in state "
               << TaskState_Name(status.state())
@@ -447,30 +462,30 @@ public:
         status);
   }
 
-  virtual void frameworkMessage(
+  void frameworkMessage(
       SchedulerDriver* driver,
       const ExecutorID& executorId,
       const SlaveID& slaveId,
-      const string& data)
+      const string& data) override
   {
     LOG(INFO) << "Framework message: " << data;
   }
 
-  virtual void slaveLost(SchedulerDriver* driver, const SlaveID& slaveId)
+  void slaveLost(SchedulerDriver* driver, const SlaveID& slaveId) override
   {
     LOG(INFO) << "Agent lost: " << slaveId;
   }
 
-  virtual void executorLost(
+  void executorLost(
       SchedulerDriver* driver,
       const ExecutorID& executorId,
       const SlaveID& slaveId,
-      int status)
+      int status) override
   {
     LOG(INFO) << "Executor '" << executorId << "' lost on agent: " << slaveId;
   }
 
-  virtual void error(SchedulerDriver* driver, const string& message)
+  void error(SchedulerDriver* driver, const string& message) override
   {
     LOG(INFO) << "Error message: " << message;
   }

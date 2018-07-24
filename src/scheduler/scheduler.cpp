@@ -56,7 +56,7 @@
 #include <process/process.hpp>
 #include <process/protobuf.hpp>
 
-#include <process/metrics/gauge.hpp>
+#include <process/metrics/pull_gauge.hpp>
 #include <process/metrics/metrics.hpp>
 
 #include <process/ssl/flags.hpp>
@@ -210,7 +210,7 @@ public:
     }
   }
 
-  virtual ~MesosProcess()
+  ~MesosProcess() override
   {
     disconnect();
 
@@ -325,7 +325,7 @@ public:
   }
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     // Initialize modules.
     if (flags.modules.isSome() && flags.modulesDir.isSome()) {
@@ -920,8 +920,8 @@ private:
     }
 
     // Process metrics.
-    process::metrics::Gauge event_queue_messages;
-    process::metrics::Gauge event_queue_dispatches;
+    process::metrics::PullGauge event_queue_messages;
+    process::metrics::PullGauge event_queue_dispatches;
   } metrics;
 
   double _event_queue_messages()

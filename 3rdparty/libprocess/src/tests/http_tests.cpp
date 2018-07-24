@@ -127,7 +127,7 @@ public:
       Future<http::Response>(const http::Request&, const Option<Principal>&));
 
 protected:
-  virtual void initialize()
+  void initialize() override
   {
     route("/body", None(), &HttpProcess::body);
     route("/pipe", None(), &HttpProcess::pipe);
@@ -173,7 +173,7 @@ class HTTPTest : public SSLTemporaryDirectoryTest,
 // These are only needed if libprocess is compiled with SSL support.
 #ifdef USE_SSL_SOCKET
 protected:
-  virtual void SetUp()
+  void SetUp() override
   {
     // We must run the parent's `SetUp` first so that we `chdir` into the test
     // directory before SSL helpers like `key_path()` are called.
@@ -231,6 +231,12 @@ INSTANTIATE_TEST_CASE_P(
 
 // TODO(vinod): Use AWAIT_EXPECT_RESPONSE_STATUS_EQ in the tests.
 
+TEST_P(HTTPTest, Statuses)
+{
+  EXPECT_TRUE(process::http::isValidStatus(200));
+  EXPECT_TRUE(process::http::isValidStatus(404));
+  EXPECT_FALSE(process::http::isValidStatus(1337));
+}
 
 TEST_P(HTTPTest, Endpoints)
 {
@@ -1780,7 +1786,7 @@ public:
       authenticate,
       Future<AuthenticationResult>(const http::Request&));
 
-  virtual string scheme() const { return "Basic"; }
+  string scheme() const override { return "Basic"; }
 };
 
 
@@ -1796,7 +1802,7 @@ protected:
     return authentication::setAuthenticator(realm, authenticator);
   }
 
-  virtual void TearDown()
+  void TearDown() override
   {
     foreach (const string& realm, realms) {
       // We need to wait in order to ensure that the operation
@@ -2083,9 +2089,7 @@ TEST_F(HttpAuthenticationTest, JWT)
 
     Try<JWT, JWTError> jwt = JWT::create(payload, "a different secret");
 
-    // TODO(nfnt): Change this to `EXPECT_SOME(jwt)`
-    // once MESOS-7220 is resolved.
-    EXPECT_TRUE(jwt.isSome());
+    EXPECT_SOME(jwt);
 
     http::Headers headers;
     headers["Authorization"] = "Bearer " + stringify(jwt.get());
@@ -2111,9 +2115,7 @@ TEST_F(HttpAuthenticationTest, JWT)
 
     Try<JWT, JWTError> jwt = JWT::create(payload, "secret");
 
-    // TODO(nfnt): Change this to `EXPECT_SOME(jwt)`
-    // once MESOS-7220 is resolved.
-    EXPECT_TRUE(jwt.isSome());
+    EXPECT_SOME(jwt);
 
     http::Headers headers;
     headers["Authorization"] = "Bearer " + stringify(jwt.get());

@@ -462,7 +462,7 @@ Future<Nothing> FetcherProcess::_fetch(
 {
   // Get out all of the futures we need to wait for so we can wait on
   // them together via 'await'.
-  list<Future<shared_ptr<Cache::Entry>>> futures;
+  vector<Future<shared_ptr<Cache::Entry>>> futures;
 
   foreachvalue (const Option<Future<shared_ptr<Cache::Entry>>>& entry,
                 entries) {
@@ -585,7 +585,7 @@ Future<Nothing> FetcherProcess::__fetch(
       return future; // Always propagate the failure!
     })
     // Call to `operator` here forces the conversion on MSVC. This is implicit
-    // on clang an gcc.
+    // on clang and gcc.
     .operator std::function<process::Future<Nothing>(
         const process::Future<Nothing> &)>())
     .then(defer(self(), [=]() {
@@ -861,8 +861,8 @@ Future<Nothing> FetcherProcess::run(
 
   environment["MESOS_FETCHER_INFO"] = stringify(JSON::protobuf(info));
 
-  if (!flags.hadoop_home.empty()) {
-    environment["HADOOP_HOME"] = flags.hadoop_home;
+  if (flags.hadoop_home.isSome()) {
+    environment["HADOOP_HOME"] = flags.hadoop_home.get();
   }
 
   // TODO(jieyu): This is to make sure the libprocess of the fetcher

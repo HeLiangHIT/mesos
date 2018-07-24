@@ -17,7 +17,6 @@
 #ifndef __RESOURCE_PROVIDER_URI_DISK_PROFILE_ADAPTOR_HPP__
 #define __RESOURCE_PROVIDER_URI_DISK_PROFILE_ADAPTOR_HPP__
 
-#include <map>
 #include <string>
 #include <tuple>
 
@@ -34,6 +33,7 @@
 #include <stout/duration.hpp>
 #include <stout/error.hpp>
 #include <stout/flags.hpp>
+#include <stout/hashmap.hpp>
 #include <stout/option.hpp>
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
@@ -184,13 +184,13 @@ public:
 
   UriDiskProfileAdaptor(const Flags& _flags);
 
-  virtual ~UriDiskProfileAdaptor();
+  ~UriDiskProfileAdaptor() override;
 
-  virtual process::Future<DiskProfileAdaptor::ProfileInfo> translate(
+  process::Future<DiskProfileAdaptor::ProfileInfo> translate(
       const std::string& profile,
       const ResourceProviderInfo& resourceProviderInfo) override;
 
-  virtual process::Future<hashset<std::string>> watch(
+  process::Future<hashset<std::string>> watch(
       const hashset<std::string>& knownProfiles,
       const ResourceProviderInfo& resourceProviderInfo) override;
 
@@ -206,7 +206,7 @@ class UriDiskProfileAdaptorProcess :
 public:
   UriDiskProfileAdaptorProcess(const UriDiskProfileAdaptor::Flags& _flags);
 
-  virtual void initialize() override;
+  void initialize() override;
 
   process::Future<DiskProfileAdaptor::ProfileInfo> translate(
       const std::string& profile,
@@ -216,13 +216,15 @@ public:
       const hashset<std::string>& knownProfiles,
       const ResourceProviderInfo& resourceProviderInfo);
 
-private:
   // Helpers for fetching the `--uri`.
   // If `--poll_interval` is set, this method will dispatch to itself with
   // a delay once the fetch is complete.
+  // Made public for testing purpose.
   void poll();
-  void _poll(const Try<std::string>& fetched);
+  void _poll(const process::Future<process::http::Response>& future);
+  void __poll(const Try<std::string>& fetched);
 
+private:
   // Helper that is called upon successfully polling and parsing the `--uri`.
   // This method will check the following conditions before updating the state
   // of the module:
@@ -230,17 +232,22 @@ private:
   //   * All properties of known profiles must match those in the updated set.
   void notify(const resource_provider::DiskProfileMapping& parsed);
 
-private:
   UriDiskProfileAdaptor::Flags flags;
 
-  // The last fetched profile mapping.
-  // This module assumes that profiles can only be added and never
-  // removed. Once added, a profile's volume capability and parameters
-  // cannot be changed either.
+  struct ProfileRecord
+  {
+    resource_provider::DiskProfileMapping::CSIManifest manifest;
+
+    // True if the profile is seen in the last fetched profile mapping.
+    bool active;
+  };
+
+  // The mapping of all profiles seen so far.
+  // Profiles can only be added and never removed from this mapping. Once added,
+  // a profile's volume capability and parameters cannot be changed.
   //
   // TODO(josephw): Consider persisting this mapping across agent restarts.
-  std::map<std::string, resource_provider::DiskProfileMapping::CSIManifest>
-    profileMatrix;
+  hashmap<std::string, ProfileRecord> profileMatrix;
 
   // Will be satisfied whenever `profileMatrix` is changed.
   process::Owned<process::Promise<Nothing>> watchPromise;

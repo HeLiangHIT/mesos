@@ -157,8 +157,13 @@ list(APPEND MESOS_TESTS_SRC
 list(APPEND MESOS_TESTS_SRC
   containerizer/containerizer_tests.cpp
   containerizer/cpu_isolator_tests.cpp
-  containerizer/memory_isolator_tests.cpp
-  containerizer/docker_tests.cpp)
+  containerizer/docker_tests.cpp
+  containerizer/memory_isolator_tests.cpp)
+
+if (NOT WIN32 OR ENABLE_LIBWINIO)
+  list(APPEND MESOS_TESTS_SRC
+    containerizer/docker_containerizer_tests.cpp)
+endif ()
 
 if (NOT WIN32)
   list(APPEND MESOS_TESTS_SRC
@@ -197,7 +202,6 @@ if (NOT WIN32)
   list(APPEND MESOS_TESTS_SRC
     containerizer/appc_spec_tests.cpp
     containerizer/composing_containerizer_tests.cpp
-    containerizer/docker_containerizer_tests.cpp
     containerizer/docker_spec_tests.cpp
     containerizer/environment_secret_isolator_tests.cpp
     containerizer/io_switchboard_tests.cpp
@@ -224,6 +228,7 @@ if (LINUX)
     containerizer/docker_volume_isolator_tests.cpp
     containerizer/fs_tests.cpp
     containerizer/linux_capabilities_isolator_tests.cpp
+    containerizer/linux_devices_isolator_tests.cpp
     containerizer/linux_filesystem_isolator_tests.cpp
     containerizer/memory_pressure_tests.cpp
     containerizer/nested_mesos_containerizer_tests.cpp

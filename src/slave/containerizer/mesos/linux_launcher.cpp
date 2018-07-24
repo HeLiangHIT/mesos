@@ -37,12 +37,12 @@
 
 #include "mesos/resources.hpp"
 
+#include "slave/containerizer/mesos/constants.hpp"
 #include "slave/containerizer/mesos/linux_launcher.hpp"
 #include "slave/containerizer/mesos/paths.hpp"
 
 using namespace process;
 
-using std::list;
 using std::map;
 using std::set;
 using std::string;
@@ -53,9 +53,6 @@ using mesos::slave::ContainerState;
 namespace mesos {
 namespace internal {
 namespace slave {
-
-static const char CGROUP_SEPARATOR[] = "mesos";
-
 
 // Launcher for Linux systems with cgroups. Uses a freezer cgroup to
 // track pids.
@@ -68,19 +65,18 @@ public:
       const Option<string>& systemdHierarchy);
 
   virtual process::Future<hashset<ContainerID>> recover(
-      const list<mesos::slave::ContainerState>& states);
+      const vector<mesos::slave::ContainerState>& states);
 
   virtual Try<pid_t> fork(
       const ContainerID& containerId,
       const string& path,
       const vector<string>& argv,
-      const process::Subprocess::IO& in,
-      const process::Subprocess::IO& out,
-      const process::Subprocess::IO& err,
+      const mesos::slave::ContainerIO& containerIO,
       const flags::FlagsBase* flags,
       const Option<map<string, string>>& environment,
       const Option<int>& enterNamespaces,
-      const Option<int>& cloneNamespaces);
+      const Option<int>& cloneNamespaces,
+      const vector<int_fd>& whitelistFds);
 
   virtual process::Future<Nothing> destroy(const ContainerID& containerId);
 
@@ -240,7 +236,7 @@ LinuxLauncher::~LinuxLauncher()
 
 
 Future<hashset<ContainerID>> LinuxLauncher::recover(
-    const list<mesos::slave::ContainerState>& states)
+    const vector<mesos::slave::ContainerState>& states)
 {
   return dispatch(process.get(), &LinuxLauncherProcess::recover, states);
 }
@@ -250,13 +246,12 @@ Try<pid_t> LinuxLauncher::fork(
     const ContainerID& containerId,
     const string& path,
     const vector<string>& argv,
-    const process::Subprocess::IO& in,
-    const process::Subprocess::IO& out,
-    const process::Subprocess::IO& err,
+    const mesos::slave::ContainerIO& containerIO,
     const flags::FlagsBase* flags,
     const Option<map<string, string>>& environment,
     const Option<int>& enterNamespaces,
-    const Option<int>& cloneNamespaces)
+    const Option<int>& cloneNamespaces,
+    const vector<int_fd>& whitelistFds)
 {
   return dispatch(
       process.get(),
@@ -264,13 +259,12 @@ Try<pid_t> LinuxLauncher::fork(
       containerId,
       path,
       argv,
-      in,
-      out,
-      err,
+      containerIO,
       flags,
       environment,
       enterNamespaces,
-      cloneNamespaces).get();
+      cloneNamespaces,
+      whitelistFds).get();
 }
 
 
@@ -298,8 +292,10 @@ LinuxLauncherProcess::LinuxLauncherProcess(
 
 
 Future<hashset<ContainerID>> LinuxLauncherProcess::recover(
-    const list<ContainerState>& states)
+    const vector<ContainerState>& states)
 {
+  LOG(INFO) << "Recovering Linux launcher";
+
   // Recover all of the "containers" we know about based on the
   // existing cgroups. Note that we check both the freezer hierarchy
   // and the systemd hierarchy (if enabled), and combine the results.
@@ -462,13 +458,12 @@ Try<pid_t> LinuxLauncherProcess::fork(
     const ContainerID& containerId,
     const string& path,
     const vector<string>& argv,
-    const process::Subprocess::IO& in,
-    const process::Subprocess::IO& out,
-    const process::Subprocess::IO& err,
+    const mesos::slave::ContainerIO& containerIO,
     const flags::FlagsBase* flags,
     const Option<map<string, string>>& environment,
     const Option<int>& enterNamespaces,
-    const Option<int>& cloneNamespaces)
+    const Option<int>& cloneNamespaces,
+    const vector<int_fd>& whitelistFds)
 {
   // Make sure this container (nested or not) is unique.
   if (containers.contains(containerId)) {
@@ -543,9 +538,9 @@ Try<pid_t> LinuxLauncherProcess::fork(
   Try<Subprocess> child = subprocess(
       path,
       argv,
-      in,
-      out,
-      err,
+      containerIO.in,
+      containerIO.out,
+      containerIO.err,
       flags,
       environment,
       [target, enterFlags, cloneFlags](const lambda::function<int()>& child) {

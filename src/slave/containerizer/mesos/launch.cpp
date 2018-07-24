@@ -35,8 +35,8 @@
 #include <stout/foreach.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
-#include <stout/protobuf.hpp>
 #include <stout/path.hpp>
+#include <stout/protobuf.hpp>
 #include <stout/stringify.hpp>
 #include <stout/try.hpp>
 #include <stout/unreachable.hpp>
@@ -73,8 +73,8 @@
 #include "slave/containerizer/mesos/paths.hpp"
 
 using std::cerr;
-using std::cout;
 using std::endl;
+using std::list;
 using std::set;
 using std::string;
 using std::vector;
@@ -301,7 +301,7 @@ static Try<Nothing> prepareMounts(const ContainerLaunchInfo& launchInfo)
       return Error("Failed to mark '/' as rslave: " + mnt.error());
     }
 
-    cout << "Marked '/' as rslave" << endl;
+    cerr << "Marked '/' as rslave" << endl;
   } else {
     hashset<string> sharedMountTargets;
     foreach (const ContainerMountInfo& mount, launchInfo.mounts()) {
@@ -396,6 +396,32 @@ static Try<Nothing> prepareMounts(const ContainerLaunchInfo& launchInfo)
       }
     }
 
+    // If the mount target doesn't exist yet, create it. The isolator
+    // is responsible for ensuring the target path is safe.
+    if (mount.has_source() && !os::exists(mount.target())) {
+      const string dirname = Path(mount.target()).dirname();
+
+      if (!os::exists(dirname)) {
+        Try<Nothing> mkdir = os::mkdir(Path(mount.target()).dirname());
+
+        if (mkdir.isError()) {
+          return Error(
+              "Failed to create mount target directory '" + dirname + "': " +
+              mkdir.error());
+        }
+      }
+
+      Try<Nothing> target = os::stat::isdir(mount.source())
+        ? os::mkdir(mount.target())
+        : os::touch(mount.target());
+
+      if (target.isError()) {
+        return Error(
+            "Failed to create mount target '" + mount.target() + "': " +
+            target.error());
+      }
+    }
+
     Try<Nothing> mnt = fs::mount(
         (mount.has_source() ? Option<string>(mount.source()) : None()),
         mount.target(),
@@ -409,7 +435,7 @@ static Try<Nothing> prepareMounts(const ContainerLaunchInfo& launchInfo)
           "': " + mnt.error());
     }
 
-    cout << "Prepared mount '" << JSON::protobuf(mount) << "'" << endl;
+    cerr << "Prepared mount '" << JSON::protobuf(mount) << "'" << endl;
   }
 #endif // __linux__
 
@@ -437,7 +463,7 @@ static Try<Nothing> installResourceLimits(const RLimitInfo& limits)
 }
 
 
-static Try<Nothing> enterChroot(const string& rootfs)
+static Try<Nothing> prepareChroot(const string& rootfs)
 {
 #ifdef __WINDOWS__
   return Error("Changing rootfs is not supported on Windows");
@@ -455,6 +481,25 @@ static Try<Nothing> enterChroot(const string& rootfs)
   }
 
 #ifdef __linux__
+  Try<Nothing> prepare = fs::chroot::prepare(rootfs);
+  if (prepare.isError()) {
+    return Error(
+        "Failed to prepare chroot '" + rootfs + "': " +
+        prepare.error());
+  }
+#endif // __linux__
+
+  return Nothing();
+#endif // __WINDOWS__
+}
+
+
+static Try<Nothing> enterChroot(const string& rootfs)
+{
+#ifdef __WINDOWS__
+  return Error("Changing rootfs is not supported on Windows");
+#else
+#ifdef __linux__
   Try<Nothing> chroot = fs::chroot::enter(rootfs);
 #else
   // For any other platform we'll just use POSIX chroot.
@@ -471,6 +516,40 @@ static Try<Nothing> enterChroot(const string& rootfs)
 #endif // __WINDOWS__
 }
 
+
+// On Windows all new processes create by Mesos go through the
+// `create_process` wrapper which with the completion of MESOS-8926
+// will prevent inadvertent leaks making this code unnecessary there.
+//
+// TODO(bbannier): Consider moving this to stout as e.g., `os::lsof`.
+#ifndef __WINDOWS__
+static Try<hashset<int_fd>> getOpenFileDescriptors()
+{
+  Try<list<string>> fds =
+#if defined(__linux__)
+    os::ls("/proc/self/fd");
+#elif defined(__APPLE__)
+    os::ls("/dev/fd");
+#endif
+
+  if (fds.isError()) {
+    return Error(fds.error());
+  }
+
+  hashset<int_fd> result;
+  foreach (const string& fd, fds.get()) {
+    Try<int_fd> fd_ = numify<int_fd>(fd);
+
+    if (fd_.isError()) {
+      return Error("Could not interpret file descriptor: " + fd_.error());
+    }
+
+    result.insert(fd_.get());
+  }
+
+  return result;
+}
+#endif // __WINDOWS__
 
 int MesosContainerizerLaunch::execute()
 {
@@ -625,6 +704,46 @@ int MesosContainerizerLaunch::execute()
   }
 #endif // __WINDOWS__
 
+#ifdef __linux__
+  // If we need a new mount namespace, we have to do it before
+  // we make the mounts needed to prepare the rootfs template.
+  if (flags.unshare_namespace_mnt) {
+    if (unshare(CLONE_NEWNS) != 0) {
+      cerr << "Failed to unshare mount namespace: "
+           << os::strerror(errno) << endl;
+      exitWithStatus(EXIT_FAILURE);
+    }
+  }
+
+  if (flags.namespace_mnt_target.isSome()) {
+    if (!launchInfo.mounts().empty()) {
+      cerr << "Mounts are not supported if "
+           << "'namespace_mnt_target' is set" << endl;
+      exitWithStatus(EXIT_FAILURE);
+    }
+
+    if (launchInfo.has_rootfs()) {
+      cerr << "Container rootfs is not supported if "
+           << "'namespace_mnt_target' is set" << endl;
+      exitWithStatus(EXIT_FAILURE);
+    }
+  }
+#endif // __linux__
+
+  // Prepare root to a new root, if provided. Make sure that we do this before
+  // processing the container mounts so that container mounts can be made on
+  // top of the rootfs template.
+  if (launchInfo.has_rootfs()) {
+    cerr << "Preparing rootfs at " << launchInfo.rootfs() << endl;
+
+    Try<Nothing> prepare = prepareChroot(launchInfo.rootfs());
+
+    if (prepare.isError()) {
+      cerr << prepare.error() << endl;
+      exitWithStatus(EXIT_FAILURE);
+    }
+  }
+
   Try<Nothing> mount = prepareMounts(launchInfo);
   if (mount.isError()) {
     cerr << "Failed to prepare mounts: " << mount.error() << endl;
@@ -639,7 +758,7 @@ int MesosContainerizerLaunch::execute()
       exitWithStatus(EXIT_FAILURE);
     }
 
-    cout << "Executing pre-exec command '"
+    cerr << "Executing pre-exec command '"
          << JSON::protobuf(command) << "'" << endl;
 
     Option<int> status;
@@ -758,12 +877,6 @@ int MesosContainerizerLaunch::execute()
 
 #ifdef __linux__
   if (flags.namespace_mnt_target.isSome()) {
-    if (!launchInfo.mounts().empty()) {
-      cerr << "Mounts are not supported if "
-           << "'namespace_mnt_target' is set" << endl;
-      exitWithStatus(EXIT_FAILURE);
-    }
-
     string path = path::join(
         "/proc",
         stringify(flags.namespace_mnt_target.get()),
@@ -777,30 +890,16 @@ int MesosContainerizerLaunch::execute()
       exitWithStatus(EXIT_FAILURE);
     }
   }
-
-  if (flags.unshare_namespace_mnt) {
-    if (!launchInfo.mounts().empty()) {
-      cerr << "Mounts are not supported if "
-           << "'unshare_namespace_mnt' is set" << endl;
-      exitWithStatus(EXIT_FAILURE);
-    }
-
-    if (unshare(CLONE_NEWNS) != 0) {
-      cerr << "Failed to unshare mount namespace: "
-           << os::strerror(errno) << endl;
-      exitWithStatus(EXIT_FAILURE);
-    }
-  }
 #endif // __linux__
 
   // Change root to a new root, if provided.
   if (launchInfo.has_rootfs()) {
-    cout << "Changing root to " << launchInfo.rootfs() << endl;
+    cerr << "Changing root to " << launchInfo.rootfs() << endl;
 
-    Try<Nothing> chroot = enterChroot(launchInfo.rootfs());
+    Try<Nothing> enter = enterChroot(launchInfo.rootfs());
 
-    if (chroot.isError()) {
-      cerr << chroot.error() << endl;
+    if (enter.isError()) {
+      cerr << enter.error() << endl;
       exitWithStatus(EXIT_FAILURE);
     }
   }
@@ -983,7 +1082,7 @@ int MesosContainerizerLaunch::execute()
       // TODO(tillt): Once we have a solution for MESOS-7292, allow
       // logging of values.
       if (environment.contains(name) && environment[name] != value) {
-        cout << "Overwriting environment variable '" << name << "'" << endl;
+        cerr << "Overwriting environment variable '" << name << "'" << endl;
       }
 
       environment[name] = value;
@@ -997,6 +1096,18 @@ int MesosContainerizerLaunch::execute()
   }
 
 #ifndef __WINDOWS__
+  // Construct a set of file descriptors to close before `exec`'ing.
+  Try<hashset<int_fd>> fds = getOpenFileDescriptors();
+  CHECK_SOME(fds);
+
+  std::set<int_fd> whitelistedFds = {
+    STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO};
+
+  // Exclude required file descriptors from closing.
+  foreach (int_fd fd, whitelistedFds) {
+    fds->erase(fd);
+  }
+
   // If we have `containerStatusFd` set, then we need to fork-exec the
   // command we are launching and checkpoint its status on exit. We
   // use fork-exec directly (as opposed to `process::subprocess()`) to
@@ -1066,6 +1177,13 @@ int MesosContainerizerLaunch::execute()
       signalSafeWriteStatus(status);
       os::close(containerStatusFd.get());
       ::_exit(EXIT_SUCCESS);
+    }
+
+    // Avoid leaking not required file descriptors into the forked process.
+    foreach (int_fd fd, fds.get()) {
+      // We use the unwrapped `::close` as opposed to `os::close`
+      // since the former is guaranteed to be async signal safe.
+      ::close(fd);
     }
   }
 #endif // __WINDOWS__

@@ -30,18 +30,12 @@
 #include <winioctl.h> // For `DeviceIoControl`
 #include <Windows.h>  // For everything else.
 
-#include <direct.h>   // For `_mkdir`.
-#include <errno.h>    // For `_set_errno`.
-#include <fcntl.h>    // For file access flags like `_O_CREAT`.
-#include <io.h>       // For `_read`, `_write`.
-#include <process.h>  // For `_getpid`.
-#include <stdlib.h>   // For `_PATH_MAX`.
-
 #include <sys/stat.h> // For permissions flags.
 
 #include <basetsd.h>  // For `SSIZE_T`.
 
 #include <memory>
+#include <type_traits>
 
 #include <glog/logging.h>
 
@@ -334,11 +328,6 @@ const mode_t S_IRWXO = S_IROTH | S_IWOTH | S_IXOTH;
 const mode_t S_ISUID = 0x08000000;        // No-op.
 const mode_t S_ISGID = 0x04000000;        // No-op.
 const mode_t S_ISVTX = 0x02000000;        // No-op.
-
-
-// Flags not supported by Windows.
-const mode_t O_SYNC     = 0x00000000;     // No-op.
-const mode_t O_NONBLOCK = 0x00000000;     // No-op.
 
 // Even though SIGKILL doesn't exist on Windows, we define
 // it here, because Docker defines it. So, the docker

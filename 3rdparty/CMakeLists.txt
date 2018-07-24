@@ -24,6 +24,7 @@ endif ()
 
 # TODO(andschwa): Move each URL to the dependency itself.
 set(BOOST_URL           ${FETCH_URL}/boost-${BOOST_VERSION}.tar.gz)
+set(BZIP2_URL           ${FETCH_URL}/bzip2-${BZIP2_VERSION}.tar.gz)
 set(CONCURRENTQUEUE_URL ${FETCH_URL}/concurrentqueue-${CONCURRENTQUEUE_VERSION}.tar.gz)
 set(CSI_URL             ${FETCH_URL}/csi-${CSI_VERSION}.tar.gz)
 set(ELFIO_URL           ${FETCH_URL}/elfio-${ELFIO_VERSION}.tar.gz)
@@ -35,8 +36,10 @@ set(JEMALLOC_URL        ${FETCH_URL}/jemalloc-${JEMALLOC_VERSION}.tar.gz)
 set(PICOJSON_URL        ${FETCH_URL}/picojson-${PICOJSON_VERSION}.tar.gz)
 set(PROTOBUF_URL        ${FETCH_URL}/protobuf-${PROTOBUF_VERSION}.tar.gz)
 set(LEVELDB_URL         ${FETCH_URL}/leveldb-${LEVELDB_VERSION}.tar.gz)
+set(LIBARCHIVE_URL      ${FETCH_URL}/libarchive-${LIBARCHIVE_VERSION}.tar.gz)
 set(LIBEV_URL           ${FETCH_URL}/libev-${LIBEV_VERSION}.tar.gz)
 set(NVML_URL            ${FETCH_URL}/nvml-${NVML_VERSION}.tar.gz)
+set(XZ_URL              ${FETCH_URL}/xz-${XZ_VERSION}-modified.tar.gz)
 set(ZOOKEEPER_URL       ${FETCH_URL}/zookeeper-${ZOOKEEPER_VERSION}.tar.gz)
 
 # NOTE: libevent doesn't come rebundled, so this URL is always the same. But,
@@ -411,14 +414,12 @@ add_library(picojson INTERFACE)
 add_dependencies(picojson ${PICOJSON_TARGET})
 target_include_directories(picojson INTERFACE ${PICOJSON_ROOT})
 
-# Enable the INT64 support for PicoJSON.
 # NOTE: PicoJson requires __STDC_FORMAT_MACROS to be defined before importing
 # 'inttypes.h'.  Since other libraries may also import this header, it must
 # be globally defined so that PicoJSON has access to the macros, regardless
 # of the order of inclusion.
 target_compile_definitions(
   picojson INTERFACE
-  PICOJSON_USE_INT64
   __STDC_FORMAT_MACROS)
 
 ExternalProject_Add(
@@ -506,58 +507,71 @@ if (ENABLE_LIBEVENT)
   # libevent: An event notification library.
   # http://libevent.org/
   ##########################################
-  EXTERNAL(libevent ${LIBEVENT_VERSION} ${CMAKE_CURRENT_BINARY_DIR})
-  add_library(libevent ${LIBRARY_LINKAGE} IMPORTED)
-  add_dependencies(libevent ${LIBEVENT_TARGET})
+  if (NOT UNBUNDLED_LIBEVENT)
+    EXTERNAL(libevent ${LIBEVENT_VERSION} ${CMAKE_CURRENT_BINARY_DIR})
+    add_library(libevent ${LIBRARY_LINKAGE} IMPORTED)
+    add_dependencies(libevent ${LIBEVENT_TARGET})
 
-  set_target_properties(
-    libevent PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${LIBEVENT_ROOT}/include;${LIBEVENT_ROOT}-build/include")
+    set_target_properties(
+      libevent PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${LIBEVENT_ROOT}/include;${LIBEVENT_ROOT}-build/include")
 
-  if (WIN32)
-    if (CMAKE_GENERATOR MATCHES "Visual Studio")
-      set_target_properties(
-        libevent PROPERTIES
-        IMPORTED_LOCATION_DEBUG ${LIBEVENT_ROOT}-build/lib/Debug/event${LIBRARY_SUFFIX}
-        IMPORTED_LOCATION_RELEASE ${LIBEVENT_ROOT}-build/lib/Release/event${LIBRARY_SUFFIX})
+    if (WIN32)
+      if (CMAKE_GENERATOR MATCHES "Visual Studio")
+        set_target_properties(
+          libevent PROPERTIES
+          IMPORTED_LOCATION_DEBUG ${LIBEVENT_ROOT}-build/lib/Debug/event${LIBRARY_SUFFIX}
+          IMPORTED_LOCATION_RELEASE ${LIBEVENT_ROOT}-build/lib/Release/event${LIBRARY_SUFFIX})
+      else ()
+        set_target_properties(
+          libevent PROPERTIES
+          IMPORTED_LOCATION ${LIBEVENT_ROOT}-build/lib/event${LIBRARY_SUFFIX})
+      endif ()
     else ()
       set_target_properties(
         libevent PROPERTIES
-        IMPORTED_LOCATION ${LIBEVENT_ROOT}-build/lib/event${LIBRARY_SUFFIX})
+        IMPORTED_LOCATION ${LIBEVENT_ROOT}-build/lib/libevent${LIBRARY_SUFFIX})
     endif ()
+
+    set(LIBEVENT_CMAKE_FORWARD_ARGS
+      ${CMAKE_C_FORWARD_ARGS}
+      ${CMAKE_SSL_FORWARD_ARGS}
+      # NOTE: Libevent does not respect the BUILD_SHARED_LIBS global flag.
+      -DEVENT__BUILD_SHARED_LIBRARIES=${BUILD_SHARED_LIBS}
+      -DEVENT__DISABLE_OPENSSL=$<NOT:$<BOOL:${ENABLE_SSL}>>
+      -DEVENT__DISABLE_BENCHMARK=ON
+      -DEVENT__DISABLE_REGRESS=ON
+      -DEVENT__DISABLE_SAMPLES=ON
+      -DEVENT__DISABLE_TESTS=ON)
+
+    if (CMAKE_C_COMPILER_ID MATCHES GNU OR CMAKE_C_COMPILER_ID MATCHES Clang)
+      list(APPEND LIBEVENT_CMAKE_FORWARD_ARGS -DCMAKE_C_FLAGS=-fPIC)
+    endif ()
+
+    MAKE_INCLUDE_DIR(libevent)
+    GET_BYPRODUCTS(libevent)
+
+    ExternalProject_Add(
+      ${LIBEVENT_TARGET}
+      PREFIX            ${LIBEVENT_CMAKE_ROOT}
+      BUILD_BYPRODUCTS  ${LIBEVENT_BYPRODUCTS}
+      CMAKE_ARGS        ${LIBEVENT_CMAKE_FORWARD_ARGS}
+      INSTALL_COMMAND   ${CMAKE_NOOP}
+      URL               ${LIBEVENT_URL}
+      URL_HASH          ${LIBEVENT_HASH})
   else ()
-    set_target_properties(
-      libevent PROPERTIES
-      IMPORTED_LOCATION ${LIBEVENT_ROOT}-build/lib/libevent${LIBRARY_SUFFIX})
+    find_package(LIBEVENT REQUIRED)
+
+    foreach (lib ${LIBEVENT_LIBS})
+      get_filename_component(LIBEVENT_LIB ${lib} NAME_WE)
+      add_library(${LIBEVENT_LIB} SHARED IMPORTED)
+      set_target_properties(${LIBEVENT_LIB} PROPERTIES
+        IMPORTED_LOCATION ${lib}
+        INTERFACE_INCLUDE_DIRECTORIES ${LIBEVENT_INCLUDE_DIR})
+      target_link_libraries(libevent INTERFACE ${LIBEVENT_LIB})
+    endforeach ()
   endif ()
-
-  set(LIBEVENT_CMAKE_FORWARD_ARGS
-    ${CMAKE_C_FORWARD_ARGS}
-    ${CMAKE_SSL_FORWARD_ARGS}
-    # NOTE: Libevent does not respect the BUILD_SHARED_LIBS global flag.
-    -DEVENT__BUILD_SHARED_LIBRARIES=${BUILD_SHARED_LIBS}
-    -DEVENT__DISABLE_OPENSSL=$<NOT:$<BOOL:${ENABLE_SSL}>>
-    -DEVENT__DISABLE_BENCHMARK=ON
-    -DEVENT__DISABLE_REGRESS=ON
-    -DEVENT__DISABLE_SAMPLES=ON
-    -DEVENT__DISABLE_TESTS=ON)
-
-  if (CMAKE_C_COMPILER_ID MATCHES GNU OR CMAKE_C_COMPILER_ID MATCHES Clang)
-    list(APPEND LIBEVENT_CMAKE_FORWARD_ARGS -DCMAKE_C_FLAGS=-fPIC)
-  endif ()
-
-  MAKE_INCLUDE_DIR(libevent)
-  GET_BYPRODUCTS(libevent)
-
-  ExternalProject_Add(
-    ${LIBEVENT_TARGET}
-    PREFIX            ${LIBEVENT_CMAKE_ROOT}
-    BUILD_BYPRODUCTS  ${LIBEVENT_BYPRODUCTS}
-    CMAKE_ARGS        ${LIBEVENT_CMAKE_FORWARD_ARGS}
-    INSTALL_COMMAND   ${CMAKE_NOOP}
-    URL               ${LIBEVENT_URL}
-    URL_HASH          ${LIBEVENT_HASH})
-else ()
+elseif (NOT ENABLE_LIBWINIO)
   # libev: Full-featured high-performance event loop.
   # https://github.com/enki/libev
   ###################################################
@@ -626,7 +640,7 @@ if (WIN32)
     URL               ${LIBAPR_URL}
     URL_HASH          ${LIBAPR_HASH})
 else ()
-  find_package(Apr REQUIRED)
+  find_package(APR REQUIRED)
   add_library(apr SHARED IMPORTED)
 
   set_target_properties(
@@ -642,7 +656,7 @@ endif ()
 if (NOT WIN32)
   # NOTE: This does not use `FindSubversion` because it finds the `svn`
   # executable, but we're looking for the library.
-  find_package(Svn REQUIRED)
+  find_package(SVN REQUIRED)
   add_library(svn INTERFACE)
   target_include_directories(svn INTERFACE ${SVN_INCLUDE_DIR})
 
@@ -739,8 +753,11 @@ if (WIN32)
   # This copies the file `curl.exe` from the `3rdparty` build folder to
   # `build/src`, next to the other produced executables. This is necessary for
   # code that shells out to cURL on Windows.
-  add_custom_command(TARGET ${CURL_TARGET} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:curl> ${CMAKE_BINARY_DIR}/src/curl.exe)
+  #
+  # TODO(andschwa): Change this to an `INSTALL` step.
+  ExternalProject_Add_Step(${CURL_TARGET} copy
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:curl> ${CMAKE_BINARY_DIR}/src/curl.exe
+    DEPENDEES build)
 else ()
   find_package(CURL REQUIRED)
   add_library(libcurl SHARED IMPORTED)
@@ -751,6 +768,99 @@ else ()
     INTERFACE_INCLUDE_DIRECTORIES ${CURL_INCLUDE_DIRS})
 endif ()
 
+
+# bzip2: A high-quality data compressor.
+# http://www.bzip.org
+########################################
+if (WIN32)
+  EXTERNAL(bzip2 ${BZIP2_VERSION} ${CMAKE_CURRENT_BINARY_DIR})
+  add_library(bzip2 STATIC IMPORTED)
+  add_dependencies(bzip2 ${BZIP2_TARGET})
+
+  set_target_properties(
+    bzip2 PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${BZIP2_ROOT};${BZIP2_ROOT}-build")
+
+  if (CMAKE_GENERATOR MATCHES "Visual Studio")
+    set_target_properties(
+      bzip2 PROPERTIES
+      IMPORTED_LOCATION_DEBUG ${BZIP2_ROOT}-build/Debug/bzip2${BZIP2_SHARED}${LIBRARY_SUFFIX}
+      IMPORTED_LOCATION_RELEASE ${BZIP2_ROOT}-build/Release/bzip2${BZIP2_SHARED}${LIBRARY_SUFFIX}
+      IMPORTED_IMPLIB_DEBUG ${BZIP2_ROOT}-build/Debug/bzip2${CMAKE_IMPORT_LIBRARY_SUFFIX}
+      IMPORTED_IMPLIB_RELEASE ${BZIP2_ROOT}-build/Release/bzip2${CMAKE_IMPORT_LIBRARY_SUFFIX})
+  else ()
+    set_target_properties(
+      bzip2 PROPERTIES
+      IMPORTED_LOCATION ${BZIP2_ROOT}-build/bzip2${BZIP2_SHARED}${LIBRARY_SUFFIX})
+  endif ()
+
+  PATCH_CMD(BZIP2_PATCH_CMD bzip2-${BZIP2_VERSION}.patch)
+
+  MAKE_INCLUDE_DIR(bzip2)
+  GET_BYPRODUCTS(bzip2)
+
+  set(BZIP2_CMAKE_ARGS
+    ${CMAKE_FORWARD_ARGS}
+    ${CMAKE_C_FORWARD_ARGS}
+    -DBZIP2_INSTALL_DIR=${BZIP2_ROOT}-lib)
+
+  ExternalProject_Add(
+    ${BZIP2_TARGET}
+    PREFIX            ${BZIP2_CMAKE_ROOT}
+    BUILD_BYPRODUCTS  ${BZIP2_BYPRODUCTS}
+    PATCH_COMMAND     ${BZIP2_PATCH_CMD}
+    CMAKE_ARGS        ${BZIP2_CMAKE_ARGS}
+    INSTALL_DIR       ${BZIP2_ROOT}-lib
+    URL               ${BZIP2_URL}
+    URL_HASH          ${BZIP2_HASH})
+endif ()
+
+# xz: A Massively Spiffy Yet Delicately Unobtrusive Compression Library.
+# https://tukaani.org/xz/
+########################################################################
+if (WIN32)
+  EXTERNAL(xz ${XZ_VERSION} ${CMAKE_CURRENT_BINARY_DIR})
+  add_library(xz STATIC IMPORTED)
+  add_dependencies(xz ${XZ_TARGET})
+
+  set_target_properties(
+    xz PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${XZ_ROOT};${XZ_ROOT}-build")
+
+
+  if (CMAKE_GENERATOR MATCHES "Visual Studio")
+    set_target_properties(
+      xz PROPERTIES
+      IMPORTED_LOCATION_DEBUG ${XZ_ROOT}-build/Debug/lzma${XZ_SHARED}${LIBRARY_SUFFIX}
+      IMPORTED_LOCATION_RELEASE ${XZ_ROOT}-build/Release/lzma${XZ_SHARED}${LIBRARY_SUFFIX}
+      IMPORTED_IMPLIB_DEBUG ${XZ_ROOT}-build/Debug/lzma${CMAKE_IMPORT_LIBRARY_SUFFIX}
+      IMPORTED_IMPLIB_RELEASE ${XZ_ROOT}-build/Release/lzma${CMAKE_IMPORT_LIBRARY_SUFFIX})
+  else ()
+    set_target_properties(
+      xz PROPERTIES
+      IMPORTED_LOCATION ${XZ_ROOT}-build/lzma${CMAKE_IMPORT_LIBRARY_SUFFIX})
+  endif ()
+
+  PATCH_CMD(XZ_PATCH_CMD xz-${XZ_VERSION}.patch)
+
+  MAKE_INCLUDE_DIR(xz)
+  GET_BYPRODUCTS(xz)
+
+  set(XZ_CMAKE_ARGS
+    ${CMAKE_FORWARD_ARGS}
+    ${CMAKE_C_FORWARD_ARGS}
+    -DXZ_INSTALL_DIR=${XZ_ROOT}-lib)
+
+  ExternalProject_Add(
+    ${XZ_TARGET}
+    PREFIX            ${XZ_CMAKE_ROOT}
+    BUILD_BYPRODUCTS  ${XZ_BYPRODUCTS}
+    PATCH_COMMAND     ${XZ_PATCH_CMD}
+    CMAKE_ARGS        ${XZ_CMAKE_ARGS}
+    INSTALL_DIR       ${XZ_ROOT}-lib
+    URL               ${XZ_URL}
+    URL_HASH          ${XZ_HASH})
+endif ()
 
 # zlib: A Massively Spiffy Yet Delicately Unobtrusive Compression Library.
 # https://zlib.net
@@ -824,6 +934,89 @@ set_target_properties(
   zlib PROPERTIES
   INTERFACE_COMPILE_DEFINITIONS HAVE_LIBZ)
 
+# libarchive: Multi-format archive and compression library.
+# https://github.com/libarchive/libarchive
+###########################################################
+if (WIN32 OR REBUNDLED)
+  EXTERNAL(libarchive ${LIBARCHIVE_VERSION} ${CMAKE_CURRENT_BINARY_DIR})
+
+  add_library(libarchive STATIC IMPORTED GLOBAL)
+  add_dependencies(libarchive ${LIBARCHIVE_TARGET})
+
+  set(LIBARCHIVE_CMAKE_ARGS
+    ${CMAKE_FORWARD_ARGS}
+    ${CMAKE_C_FORWARD_ARGS}
+    -DENABLE_ACL=OFF
+    -DENABLE_CNG=OFF
+    -DENABLE_CPIO=OFF
+    -DENABLE_EXPAT=OFF
+    -DENABLE_ICONV=OFF
+    -DENABLE_LibGCC=OFF
+    -DENABLE_LIBXML2=OFF
+    -DENABLE_LZO=OFF
+    -DENABLE_NETTLE=OFF
+    -DENABLE_OPENSSL=OFF
+    -DENABLE_PCREPOSIX=OFF
+    -DENABLE_TEST=OFF
+    -DCMAKE_PREFIX_PATH=${ZLIB_ROOT}-lib@@${BZIP2_ROOT}-lib@@${XZ_ROOT}-lib
+    -DCMAKE_INSTALL_PREFIX=${LIBARCHIVE_ROOT}-build)
+
+  PATCH_CMD(LIBARCHIVE_PATCH_CMD libarchive-${LIBARCHIVE_VERSION}.patch)
+
+  # NOTE: On Windows, libarchive is linked against several compression
+  # libraries included in the build chain, such as bzip2, xz, and zlib.
+  # On other platforms, libarchive links to zlib only, as bzip2 and xz
+  # are not in the build chain.
+  if (WIN32)
+    set_target_properties(
+      libarchive PROPERTIES
+      INTERFACE_COMPILE_DEFINITIONS LIBARCHIVE_STATIC
+      # NOTE: The install step avoids the need for separate DEBUG and
+      # RELEASE paths.
+      IMPORTED_LOCATION ${LIBARCHIVE_ROOT}-build/lib/archive_static${LIBRARY_SUFFIX}
+      INTERFACE_INCLUDE_DIRECTORIES ${LIBARCHIVE_ROOT}-build/include
+      INTERFACE_LINK_LIBRARIES "bzip2;xz;zlib")
+    set(LIBARCHIVE_DEPENDS bzip2 xz zlib)
+
+    # Make libarchive link against the same zlib the rest of the build
+    # links to. This is necessary because the zlib project
+    # unconditionally builds both shared and static libraries, and we
+    # need to be consistent about which is linked.
+    list(APPEND LIBARCHIVE_CMAKE_ARGS
+      -DZLIB_LIBRARY=$<TARGET_FILE:zlib>)
+  else ()
+    list(APPEND LIBARCHIVE_CMAKE_ARGS
+      -DENABLE_BZip2=OFF
+      -DENABLE_LZMA=OFF)
+
+    set_target_properties(
+      libarchive PROPERTIES
+      IMPORTED_LOCATION ${LIBARCHIVE_ROOT}-build/lib/libarchive${CMAKE_STATIC_LIBRARY_SUFFIX}
+      INTERFACE_INCLUDE_DIRECTORIES ${LIBARCHIVE_ROOT}-build/include
+      INTERFACE_LINK_LIBRARIES "zlib")
+    set(LIBARCHIVE_DEPENDS zlib)
+  endif ()
+
+  MAKE_INCLUDE_DIR(libarchive)
+  GET_BYPRODUCTS(libarchive)
+
+  ExternalProject_Add(
+    ${LIBARCHIVE_TARGET}
+    DEPENDS           ${LIBARCHIVE_DEPENDS}
+    PREFIX            ${LIBARCHIVE_CMAKE_ROOT}
+    BUILD_BYPRODUCTS  ${LIBARCHIVE_BYPRODUCTS}
+    PATCH_COMMAND     ${LIBARCHIVE_PATCH_CMD}
+    LIST_SEPARATOR    @@
+    CMAKE_ARGS        ${LIBARCHIVE_CMAKE_ARGS}
+    URL               ${LIBARCHIVE_URL}
+    URL_HASH          ${LIBARCHIVE_HASH})
+else ()
+  find_package(LibArchive REQUIRED)
+  add_library(libarchive SHARED IMPORTED GLOBAL)
+  set_target_properties(libarchive PROPERTIES
+    IMPORTED_LOCATION ${LibArchive_LIBRARIES}
+    INTERFACE_INCLUDE_DIRECTORIES ${LibArchive_INCLUDE_DIRS})
+endif ()
 
 # Google Test: Google's C++ test framework (GoogleTest and GoogleMock).
 # https://github.com/google/googletest
@@ -1006,7 +1199,7 @@ if (ENABLE_GRPC)
   add_dependencies(libgrpc++ ${GRPC_TARGET})
 
   add_library(grpc INTERFACE)
-  target_link_libraries(grpc INTERFACE libgpr libgrpc libgrpc++)
+  target_link_libraries(grpc INTERFACE libgrpc++ libgrpc libgpr)
 
   # TODO(chhsiao): Move grpc so these don't have to be GLOBAL.
   add_executable(grpc_cpp_plugin IMPORTED GLOBAL)
@@ -1021,16 +1214,17 @@ if (ENABLE_GRPC)
     -DgRPC_ZLIB_PROVIDER=package)
 
   if (ENABLE_SSL)
+    set(GRPC_VARIANT "")
     list(APPEND GRPC_CMAKE_ARGS -DgRPC_SSL_PROVIDER=package ${CMAKE_SSL_FORWARD_ARGS})
   else ()
-    set(GRPC_UNSECURE _unsecure)
+    set(GRPC_VARIANT "_unsecure")
     list(APPEND GRPC_CMAKE_ARGS -DgRPC_SSL_PROVIDER=none)
   endif ()
 
   set(GRPC_BUILD_CMD
     ${CMAKE_COMMAND} --build . --target gpr &&
-    ${CMAKE_COMMAND} --build . --target grpc${GRPC_UNSECURE} &&
-    ${CMAKE_COMMAND} --build . --target grpc++${GRPC_UNSECURE} &&
+    ${CMAKE_COMMAND} --build . --target grpc${GRPC_VARIANT} &&
+    ${CMAKE_COMMAND} --build . --target grpc++${GRPC_VARIANT} &&
     ${CMAKE_COMMAND} --build . --target grpc_cpp_plugin)
 
   set_target_properties(
@@ -1052,17 +1246,17 @@ if (ENABLE_GRPC)
 
       set_target_properties(
         libgrpc PROPERTIES
-        IMPORTED_LOCATION_DEBUG ${GRPC_ROOT}-build/Debug/grpc${GRPC_UNSECURE}${LIBRARY_SUFFIX}
-        IMPORTED_LOCATION_RELEASE ${GRPC_ROOT}-build/Release/grpc${GRPC_UNSECURE}${LIBRARY_SUFFIX}
-        IMPORTED_IMPLIB_DEBUG ${GRPC_ROOT}-build/Debug/grpc${GRPC_UNSECURE}${CMAKE_IMPORT_LIBRARY_SUFFIX}
-        IMPORTED_IMPLIB_RELEASE ${GRPC_ROOT}-build/Release/grpc${GRPC_UNSECURE}${CMAKE_IMPORT_LIBRARY_SUFFIX})
+        IMPORTED_LOCATION_DEBUG ${GRPC_ROOT}-build/Debug/grpc${GRPC_VARIANT}${LIBRARY_SUFFIX}
+        IMPORTED_LOCATION_RELEASE ${GRPC_ROOT}-build/Release/grpc${GRPC_VARIANT}${LIBRARY_SUFFIX}
+        IMPORTED_IMPLIB_DEBUG ${GRPC_ROOT}-build/Debug/grpc${GRPC_VARIANT}${CMAKE_IMPORT_LIBRARY_SUFFIX}
+        IMPORTED_IMPLIB_RELEASE ${GRPC_ROOT}-build/Release/grpc${GRPC_VARIANT}${CMAKE_IMPORT_LIBRARY_SUFFIX})
 
       set_target_properties(
         libgrpc++ PROPERTIES
-        IMPORTED_LOCATION_DEBUG ${GRPC_ROOT}-build/Debug/grpc++${GRPC_UNSECURE}${LIBRARY_SUFFIX}
-        IMPORTED_LOCATION_RELEASE ${GRPC_ROOT}-build/Release/grpc++${GRPC_UNSECURE}${LIBRARY_SUFFIX}
-        IMPORTED_IMPLIB_DEBUG ${GRPC_ROOT}-build/Debug/grpc++${GRPC_UNSECURE}${CMAKE_IMPORT_LIBRARY_SUFFIX}
-        IMPORTED_IMPLIB_RELEASE ${GRPC_ROOT}-build/Release/grpc++${GRPC_UNSECURE}${CMAKE_IMPORT_LIBRARY_SUFFIX})
+        IMPORTED_LOCATION_DEBUG ${GRPC_ROOT}-build/Debug/grpc++${GRPC_VARIANT}${LIBRARY_SUFFIX}
+        IMPORTED_LOCATION_RELEASE ${GRPC_ROOT}-build/Release/grpc++${GRPC_VARIANT}${LIBRARY_SUFFIX}
+        IMPORTED_IMPLIB_DEBUG ${GRPC_ROOT}-build/Debug/grpc++${GRPC_VARIANT}${CMAKE_IMPORT_LIBRARY_SUFFIX}
+        IMPORTED_IMPLIB_RELEASE ${GRPC_ROOT}-build/Release/grpc++${GRPC_VARIANT}${CMAKE_IMPORT_LIBRARY_SUFFIX})
 
       set_target_properties(
         grpc_cpp_plugin PROPERTIES
@@ -1076,13 +1270,13 @@ if (ENABLE_GRPC)
 
       set_target_properties(
         libgrpc PROPERTIES
-        IMPORTED_LOCATION ${GRPC_ROOT}-build/grpc${GRPC_UNSECURE}${LIBRARY_SUFFIX}
-        IMPORTED_IMPLIB ${GRPC_ROOT}-build/grpc${GRPC_UNSECURE}${CMAKE_IMPORT_LIBRARY_SUFFIX})
+        IMPORTED_LOCATION ${GRPC_ROOT}-build/grpc${GRPC_VARIANT}${LIBRARY_SUFFIX}
+        IMPORTED_IMPLIB ${GRPC_ROOT}-build/grpc${GRPC_VARIANT}${CMAKE_IMPORT_LIBRARY_SUFFIX})
 
       set_target_properties(
         libgrpc++ PROPERTIES
-        IMPORTED_LOCATION ${GRPC_ROOT}-build/grpc++${GRPC_UNSECURE}${LIBRARY_SUFFIX}
-        IMPORTED_IMPLIB ${GRPC_ROOT}-build/grpc++${GRPC_UNSECURE}${CMAKE_IMPORT_LIBRARY_SUFFIX})
+        IMPORTED_LOCATION ${GRPC_ROOT}-build/grpc++${GRPC_VARIANT}${LIBRARY_SUFFIX}
+        IMPORTED_IMPLIB ${GRPC_ROOT}-build/grpc++${GRPC_VARIANT}${CMAKE_IMPORT_LIBRARY_SUFFIX})
 
       set_target_properties(
         grpc_cpp_plugin PROPERTIES
@@ -1095,11 +1289,11 @@ if (ENABLE_GRPC)
 
     set_target_properties(
       libgrpc PROPERTIES
-      IMPORTED_LOCATION ${GRPC_ROOT}-build/libgrpc${GRPC_UNSECURE}${LIBRARY_SUFFIX})
+      IMPORTED_LOCATION ${GRPC_ROOT}-build/libgrpc${GRPC_VARIANT}${LIBRARY_SUFFIX})
 
     set_target_properties(
       libgrpc++ PROPERTIES
-      IMPORTED_LOCATION ${GRPC_ROOT}-build/libgrpc++${GRPC_UNSECURE}${LIBRARY_SUFFIX})
+      IMPORTED_LOCATION ${GRPC_ROOT}-build/libgrpc++${GRPC_VARIANT}${LIBRARY_SUFFIX})
 
     set_target_properties(
       grpc_cpp_plugin PROPERTIES
@@ -1142,9 +1336,12 @@ if (ENABLE_JEMALLOC_ALLOCATOR)
     JEMALLOC_CONFIGURE_COMMAND
     ${JEMALLOC_ROOT}/configure --enable-stats --enable-prof --with-malloc-conf=prof:true,prof_active:false)
 
+  GET_BYPRODUCTS(jemalloc)
+
   ExternalProject_Add(
     ${JEMALLOC_TARGET}
     PREFIX            ${JEMALLOC_CMAKE_ROOT}
+    BUILD_BYPRODUCTS  ${JEMALLOC_BYPRODUCTS}
     CONFIGURE_COMMAND ${JEMALLOC_CONFIGURE_COMMAND}
     INSTALL_COMMAND   ${CMAKE_NOOP}
     URL               ${JEMALLOC_URL}
