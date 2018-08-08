@@ -26,6 +26,7 @@
 #include <process/id.hpp>
 #include <process/owned.hpp>
 
+#include <stout/boundedhashmap.hpp>
 #include <stout/duration.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
@@ -87,6 +88,7 @@ public:
     : initialized(false),
       paused(true),
       metrics(*this),
+      completedFrameworkMetrics(0),
       roleSorter(roleSorterFactory()),
       quotaRoleSorter(quotaRoleSorterFactory()),
       frameworkSorterFactory(_frameworkSorterFactory) {}
@@ -113,7 +115,8 @@ public:
       bool filterGpuResources = true,
       const Option<DomainInfo>& domain = None(),
       const Option<std::vector<Resources>>&
-        minAllocatableResources = None()) override;
+        minAllocatableResources = None(),
+      const size_t maxCompletedFrameworks = 0) override;
 
   void recover(
       const int _expectedAgentCount,
@@ -335,6 +338,8 @@ protected:
     hashmap<SlaveID, hashset<InverseOfferFilter*>> inverseOfferFilters;
 
     bool active;
+
+    process::Owned<FrameworkMetrics> metrics;
   };
 
   double _event_queue_dispatches()
@@ -357,6 +362,9 @@ protected:
 
   hashmap<FrameworkID, Framework> frameworks;
 
+  BoundedHashMap<FrameworkID, process::Owned<FrameworkMetrics>>
+    completedFrameworkMetrics;
+
   // TODO(mzhu): Pull out the nested Slave class for clearer
   // logic division with the allocator.
   class Slave
@@ -372,14 +380,10 @@ protected:
         capabilities(_capabilities),
         activated(_activated),
         total(_total),
-        allocated(_allocated)
+        allocated(_allocated),
+        shared(_total.shared())
     {
-      // In order to subtract from the total,
-      // we strip the allocation information.
-      Resources allocated_ = allocated;
-      allocated_.unallocate();
-
-      available = total - allocated_;
+      updateAvailable();
     }
 
     const Resources& getTotal() const { return total; }
@@ -390,6 +394,7 @@ protected:
 
     void updateTotal(const Resources& newTotal) {
       total = newTotal;
+      shared = total.shared();
 
       updateAvailable();
     }
@@ -461,7 +466,21 @@ protected:
       Resources allocated_ = allocated;
       allocated_.unallocate();
 
-      available = total - allocated_;
+      // Calling `nonShared()` currently copies the underlying resources
+      // and is therefore rather expensive. We avoid it in the common
+      // case that there are no shared resources.
+      //
+      // TODO(mzhu): Ideally there would be a single logical path here.
+      // One solution is to have `Resources` be copy-on-write such that
+      // `nonShared()` performs no copying and instead points to a
+      // subset of the original `Resource` objects.
+      if (shared.empty()) {
+        available = total - allocated_;
+      } else {
+        // Since shared resources are offerable even when they are in use, we
+        // always include them as part of available resources.
+        available = (total.nonShared() - allocated_.nonShared()) + shared;
+      }
     }
 
     // Total amount of regular *and* oversubscribed resources.
@@ -480,14 +499,22 @@ protected:
     // hasn't reregistered. See MESOS-2919 for details.
     Resources allocated;
 
-    // We track the total and allocated resources on the slave, the
-    // available resources are computed as follows:
+    // We track the total and allocated resources on the slave to
+    // avoid calculating it in place every time.
     //
-    //   available = total - allocated
+    // Note that `available` always contains all the shared resources on the
+    // agent regardless whether they have ever been allocated or not.
+    // NOTE, however, we currently only offer a shared resource only if it has
+    // not been offered in an allocation cycle to a framework. We do this mainly
+    // to preserve the normal offer behavior. This may change in the future
+    // depending on use cases.
     //
     // Note that it's possible for the slave to be over-allocated!
     // In this case, allocated > total.
     Resources available;
+
+    // We keep a copy of the shared resources to avoid unnecessary copying.
+    Resources shared;
   };
 
   hashmap<SlaveID, Slave> slaves;
@@ -654,6 +681,15 @@ private:
   bool isCapableOfReceivingAgent(
       const protobuf::framework::Capabilities& frameworkCapabilities,
       const Slave& slave) const;
+
+  // Helper function that removes any resources that the framework is not
+  // capable of receiving based on the given framework capability.
+  //
+  // TODO(mzhu): Make this a `Framework` member function once we pull
+  // `struct Framework` out from being nested.
+  Resources stripIncapableResources(
+      const Resources& resources,
+      const protobuf::framework::Capabilities& frameworkCapabilities) const;
 
   // Helper to track allocated resources on an agent.
   void trackAllocatedResources(

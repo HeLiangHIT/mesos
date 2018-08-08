@@ -408,56 +408,6 @@ struct BoundedRateLimiter
 };
 
 
-bool Framework::isTrackedUnderRole(const string& role) const
-{
-  CHECK(master->isWhitelistedRole(role))
-    << "Unknown role '" << role << "'" << " of framework " << *this;
-
-  return master->roles.contains(role) &&
-         master->roles.at(role)->frameworks.contains(id());
-}
-
-
-void Framework::trackUnderRole(const string& role)
-{
-  CHECK(master->isWhitelistedRole(role))
-    << "Unknown role '" << role << "'" << " of framework " << *this;
-
-  CHECK(!isTrackedUnderRole(role));
-
-  if (!master->roles.contains(role)) {
-    master->roles[role] = new Role(role);
-  }
-  master->roles.at(role)->addFramework(this);
-}
-
-
-void Framework::untrackUnderRole(const string& role)
-{
-  CHECK(master->isWhitelistedRole(role))
-    << "Unknown role '" << role << "'" << " of framework " << *this;
-
-  CHECK(isTrackedUnderRole(role));
-
-  // NOTE: Ideally we would also `CHECK` that we're not currently subscribed
-  // to the role. We don't do this currently because this function is used in
-  // `Master::removeFramework` where we're still subscribed to `roles`.
-
-  auto allocatedToRole = [&role](const Resource& resource) {
-    return resource.allocation_info().role() == role;
-  };
-
-  CHECK(totalUsedResources.filter(allocatedToRole).empty());
-  CHECK(totalOfferedResources.filter(allocatedToRole).empty());
-
-  master->roles.at(role)->removeFramework(this);
-  if (master->roles.at(role)->frameworks.empty()) {
-    delete master->roles.at(role);
-    master->roles.erase(role);
-  }
-}
-
-
 void Master::initialize()
 {
   LOG(INFO) << "Master " << info_.id() << " (" << info_.hostname() << ")"
@@ -812,7 +762,8 @@ void Master::initialize()
       flags.fair_sharing_excluded_resource_names,
       flags.filter_gpu_resources,
       flags.domain,
-      CHECK_NOTERROR(minAllocatableResources));
+      CHECK_NOTERROR(minAllocatableResources),
+      flags.max_completed_frameworks);
 
   // Parse the whitelist. Passing Allocator::updateWhitelist()
   // callback is safe because we shut down the whitelistWatcher in
@@ -2409,6 +2360,8 @@ void Master::receive(
     return;
   }
 
+  framework->metrics.incrementCall(call.type());
+
   // This is possible when master --> framework link is broken (i.e., one
   // way network partition) and the framework is not aware of it. There
   // is no way for driver based frameworks to detect this in the absence
@@ -2726,6 +2679,8 @@ void Master::_subscribe(
 
     addFramework(framework, suppressedRoles);
 
+    framework->metrics.incrementCall(scheduler::Call::SUBSCRIBE);
+
     FrameworkRegisteredMessage message;
     message.mutable_framework_id()->MergeFrom(framework->id());
     message.mutable_master_info()->MergeFrom(info_);
@@ -2758,6 +2713,8 @@ void Master::_subscribe(
   }
 
   CHECK_NOTNULL(framework);
+
+  framework->metrics.incrementCall(scheduler::Call::SUBSCRIBE);
 
   if (!framework->recovered()) {
     // The framework has previously been registered with this master;
@@ -3162,7 +3119,7 @@ void Master::_subscribe(
       // NOTE: We do this after recovering resources (above) so that
       // the allocator has the correct view of the framework's share.
       if (!framework->active()) {
-        framework->state = Framework::State::ACTIVE;
+        framework->setFrameworkState(Framework::State::ACTIVE);
         allocator->activateFramework(framework->id());
       }
 
@@ -3279,7 +3236,7 @@ void Master::disconnect(Framework* framework)
 
   LOG(INFO) << "Disconnecting framework " << *framework;
 
-  framework->state = Framework::State::DISCONNECTED;
+  framework->setFrameworkState(Framework::State::DISCONNECTED);
 
   if (framework->pid.isSome()) {
     // Remove the framework from authenticated. This is safe because
@@ -3302,7 +3259,7 @@ void Master::deactivate(Framework* framework, bool rescind)
 
   LOG(INFO) << "Deactivating framework " << *framework;
 
-  framework->state = Framework::State::INACTIVE;
+  framework->setFrameworkState(Framework::State::INACTIVE);
 
   // Tell the allocator to stop allocating resources to this framework.
   allocator->deactivateFramework(framework->id());
@@ -4120,6 +4077,8 @@ void Master::accept(
     // Validate the offers.
     error = validation::offer::validate(accept.offer_ids(), this, framework);
 
+    size_t offersAccepted = 0;
+
     // Compute offered resources and remove the offers. If the
     // validation failed, return resources to the allocator.
     foreach (const OfferID& offerId, accept.offer_ids()) {
@@ -4137,6 +4096,8 @@ void Master::accept(
           slaveId = offer->slave_id();
           allocationInfo = offer->allocation_info();
           offeredResources += offer->resources();
+
+          offersAccepted++;
         }
 
         removeOffer(offer);
@@ -4148,6 +4109,8 @@ void Master::accept(
       LOG(WARNING) << "Ignoring accept of offer " << offerId
                    << " since it is no longer valid";
     }
+
+    framework->metrics.offers_accepted += offersAccepted;
   }
 
   // If invalid, send TASK_DROPPED for the launch attempts. If the
@@ -5466,6 +5429,10 @@ void Master::_accept(
                       << (launchExecutor ?
                           " new executor" : " existing executor");
 
+            // Increment this metric here for LAUNCH since it
+            // does not make use of the `_apply()` function.
+            framework->metrics.incrementOperation(operation);
+
             send(slave->pid, message);
           }
         }
@@ -5686,6 +5653,10 @@ void Master::_accept(
                   << *slave << " on "
                   << (launchExecutor ? " new executor" : " existing executor");
 
+        // Increment this metric here for LAUNCH_GROUP since it
+        // does not make use of the `_apply()` function.
+        framework->metrics.incrementOperation(operation);
+
         send(slave->pid, message);
 
         break;
@@ -5868,6 +5839,8 @@ void Master::decline(
 
   ++metrics->messages_decline_offers;
 
+  size_t offersDeclined = 0;
+
   //  Return resources to the allocator.
   foreach (const OfferID& offerId, decline.offer_ids()) {
     Offer* offer = getOffer(offerId);
@@ -5879,6 +5852,8 @@ void Master::decline(
           decline.filters());
 
       removeOffer(offer);
+
+      offersDeclined++;
       continue;
     }
 
@@ -5887,6 +5862,8 @@ void Master::decline(
     LOG(WARNING) << "Ignoring decline of offer " << offerId
                  << " since it is no longer valid";
   }
+
+  framework->metrics.offers_declined += offersDeclined;
 }
 
 
@@ -9467,6 +9444,7 @@ void Master::offer(
 
   LOG(INFO) << "Sending offers " << offerIds << " to framework " << *framework;
 
+  framework->metrics.offers_sent += message.offers().size();
   framework->send(message);
 }
 
@@ -10010,7 +9988,7 @@ Try<Nothing> Master::activateRecoveredFramework(
   }
 
   // Activate the framework.
-  framework->state = Framework::State::ACTIVE;
+  framework->setFrameworkState(Framework::State::ACTIVE);
   allocator->activateFramework(framework->id());
 
   // Export framework metrics if a principal is specified in `FrameworkInfo`.
@@ -10160,7 +10138,7 @@ void Master::_failoverFramework(Framework* framework)
   // NOTE: We do this after recovering resources (above) so that
   // the allocator has the correct view of the framework's share.
   if (!framework->active()) {
-    framework->state = Framework::State::ACTIVE;
+    framework->setFrameworkState(Framework::State::ACTIVE);
     allocator->activateFramework(framework->id());
   }
 
@@ -10848,6 +10826,8 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     latestState = update.latest_state();
   }
 
+  const TaskState updateState = latestState.getOrElse(status.state());
+
   // Determine whether the task transitioned to terminal or
   // unreachable prior to changing the task state.
   auto isTerminalOrUnreachableState = [](const TaskState& state) {
@@ -10856,11 +10836,13 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
 
   bool transitionedToTerminalOrUnreachable =
     !isTerminalOrUnreachableState(task->state()) &&
-    isTerminalOrUnreachableState(latestState.getOrElse(status.state()));
+    isTerminalOrUnreachableState(updateState);
 
   // Indicates whether we should send a notification to subscribers,
   // set if the task transitioned to a new state.
   bool sendSubscribersUpdate = false;
+
+  Framework* framework = getFramework(task->framework_id());
 
   // If the task has already transitioned to a terminal state,
   // do not update its state. Note that we are being defensive
@@ -10874,7 +10856,15 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
       sendSubscribersUpdate = true;
     }
 
-    task->set_state(latestState.getOrElse(status.state()));
+    if (task->state() != updateState && framework != nullptr) {
+      // When we observe a transition away from a non-terminal state,
+      // decrement the relevant metric.
+      framework->metrics.decrementActiveTaskState(task->state());
+
+      framework->metrics.incrementTaskState(updateState);
+    }
+
+    task->set_state(updateState);
   }
 
   // If this is a (health) check status update, always forward it to
@@ -10904,7 +10894,6 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     // transitioned to `TASK_KILLED` by `removeFramework()`, thus
     // `sendSubscribersUpdate` shouldn't have been set to true.
     // TODO(chhsiao): This may be changed after MESOS-6608 is resolved.
-    Framework* framework = getFramework(task->framework_id());
     CHECK_NOTNULL(framework);
 
     subscribers.send(
@@ -10934,7 +10923,6 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
 
     slave->recoverResources(task);
 
-    Framework* framework = getFramework(task->framework_id());
     if (framework != nullptr) {
       framework->recoverResources(task);
     }
@@ -11389,6 +11377,12 @@ void Master::_apply(
 
     send(slave->pid, message);
   }
+
+  if (framework != nullptr) {
+    // We increment per-framework operation metrics for all operations except
+    // LAUNCH and LAUNCH_GROUP here.
+    framework->metrics.incrementOperation(operationInfo);
+  }
 }
 
 
@@ -11427,6 +11421,7 @@ void Master::removeOffer(Offer* offer, bool rescind)
   if (rescind) {
     RescindResourceOfferMessage message;
     message.mutable_offer_id()->MergeFrom(offer->id());
+    framework->metrics.offers_rescinded++;
     framework->send(message);
   }
 

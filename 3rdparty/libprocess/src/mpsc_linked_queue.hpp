@@ -75,7 +75,7 @@ public:
 
     // Exchange is guaranteed to only give the old value to one
     // producer, so this is safe and wait-free.
-    auto oldhead = head.exchange(newNode, std::memory_order_release);
+    auto oldhead = head.exchange(newNode, std::memory_order_acq_rel);
 
     // At this point if this thread context switches out we may block
     // the consumer from doing a dequeue (see below). Eventually we'll
@@ -91,9 +91,7 @@ public:
 
     // Check and see if there is an actual element linked from `tail`
     // since we use `tail` as a "stub" rather than the actual element.
-    auto nextTail = currentTail->next.exchange(
-        nullptr,
-        std::memory_order_relaxed);
+    auto nextTail = currentTail->next.load(std::memory_order_acquire);
 
     // There are three possible cases here:
     //
@@ -115,13 +113,15 @@ public:
       // connect it to the tail, yet, so we spin-wait. At this point
       // we are not wait-free anymore.
       do {
-        nextTail = currentTail->next.exchange(
-            nullptr,
-            std::memory_order_relaxed);
+        nextTail = currentTail->next.load(std::memory_order_acquire);
       } while (nextTail == nullptr);
     }
 
     CHECK_NOTNULL(nextTail);
+
+    // Set next pointer of current tail to null to disconnect it
+    // from the queue.
+    currentTail->next.store(nullptr, std::memory_order_release);
 
     auto element = nextTail->element;
     nextTail->element = nullptr;
@@ -168,10 +168,17 @@ public:
   }
 
 private:
-  std::atomic<Node<T>*> head;
-
   // TODO(drexin): Programatically get the cache line size.
-  alignas(128) Node<T>* tail;
+  //
+  // We align head to 64 bytes (x86 cache line size) to guarantee
+  // it to be put on a new cache line. This is to prevent false
+  // sharing with other objects that could otherwise end up on
+  // the same cache line as this queue. We also align tail to
+  // avoid false sharing with head and add padding after tail
+  // to avoid false sharing with other objects.
+  alignas(64) std::atomic<Node<T>*> head;
+  alignas(64) Node<T>* tail;
+  char pad[64 - sizeof(Node<T>*)];
 };
 
 } // namespace process {

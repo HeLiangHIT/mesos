@@ -246,11 +246,6 @@ AC_ARG_ENABLE([gc-unused],
                              [enable garbage collection of unused program segments]),
                              [], [enable_gc_unused=no])
 
-AC_ARG_ENABLE([grpc],
-              AS_HELP_STRING([--enable-grpc],
-                             [enable grpc support]),
-              [], [enable_grpc=no])
-
 AC_ARG_ENABLE([hardening],
               AS_HELP_STRING([--disable-hardening],
                              [disables security measures such as stack
@@ -497,6 +492,13 @@ AC_ARG_WITH([picojson],
                            package in lieu of an installed version at a
                            location prefixed by the given path]),
             [without_bundled_picojson=yes], [])
+
+AC_ARG_WITH([rapidjson],
+            AS_HELP_STRING([--with-rapidjson@<:@=DIR@:>@],
+                           [excludes building and using the bundled rapidjson
+                           package in lieu of an installed version at a
+                           location prefixed by the given path]),
+            [without_bundled_rapidjson=yes], [])
 
 AC_ARG_WITH([protobuf],
             AS_HELP_STRING([--with-protobuf@<:@=DIR@:>@],
@@ -1834,6 +1836,39 @@ fi
 AM_CONDITIONAL([WITH_BUNDLED_PICOJSON], [test "x$with_bundled_picojson" = "xyes"])
 
 
+if test -n "`echo $with_rapidjson`"; then
+  CPPFLAGS="$CPPFLAGS -I${with_rapidjson}/include"
+fi
+
+# Check if user has asked us to use a preinstalled rapidjson, or if
+# they asked us to ignore all bundled libraries while compiling and
+# linking.
+if test "x$without_bundled_rapidjson" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Check if headers and library were located.
+  AC_CHECK_HEADERS([rapidjson/rapidjson.h], [found_rapidjson=yes])
+
+  if test "x$found_rapidjson" = "xyes"; then
+    with_bundled_rapidjson=no
+  else
+    AC_MSG_ERROR([cannot find rapidjson
+-------------------------------------------------------------------
+You have requested the use of a non-bundled rapidjson but no suitable
+rapidjson could be found.
+
+You may want specify the location of rapidjson by providing a prefix
+path via --with-rapidjson=DIR, or check that the path you provided is
+correct if you're already doing this.
+-------------------------------------------------------------------
+])
+  fi
+else
+  with_bundled_rapidjson=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_RAPIDJSON], [test "x$with_bundled_rapidjson" = "xyes"])
+
+
 # Check if Sasl2 prefix path was provided, and if so, add it to
 # the CPPFLAGS and LDFLAGS with respective /include and /lib path
 # suffixes.
@@ -2159,52 +2194,51 @@ location of protobuf used by grpc by providing a prefix path via
   LDFLAGS="$LDFLAGS -L${with_grpc}/lib"
 fi
 
-if test "x$enable_grpc" = "xyes"; then
-  # Check if user has asked us to use a preinstalled grpc, or if they
-  # asked us to ignore all bundled libraries while compiling and linking.
-  if test "x$without_bundled_grpc" = "xyes" || \
-     test "x$enable_bundled" != "xyes"; then
-    # Use the system default prefix if not specified.
-    if test -n "`echo $with_grpc`"; then
-      GRPCPREFIX="${with_grpc}"
-    elif test "x$enable_bundled" != "xyes"; then
-      GRPCPREFIX="/usr"
+# Check if user has asked us to use a preinstalled grpc, or if they
+# asked us to ignore all bundled libraries while compiling and linking.
+if test "x$without_bundled_grpc" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Use the system default prefix if not specified.
+  if test -n "`echo $with_grpc`"; then
+    GRPCPREFIX="${with_grpc}"
+  elif test "x$enable_bundled" != "xyes"; then
+    GRPCPREFIX="/usr"
+  fi
+
+  if test "x$enable_ssl" = "xno"; then
+    GRPC_VARIANT="_unsecure"
+  fi
+
+  # Check if headers and library were located.
+  saved_LIBS="$LIBS"
+  LIBS="-lgrpc++$GRPC_VARIANT -lgrpc$GRPC_VARIANT -lgpr $LIBS"
+  AC_LANG_PUSH([C++])
+  AC_CHECK_HEADERS([grpcpp/grpcpp.h],
+                   [AC_LINK_IFELSE(
+                       [AC_LANG_PROGRAM([#include <grpcpp/grpcpp.h>],
+                                        [grpc::Version();])],
+                       [found_grpc=yes],
+                       [found_grpc=no])],
+                   [found_grpc=no])
+  AC_LANG_POP()
+  LIBS="$saved_LIBS"
+
+  if test "x$found_grpc" = "xyes"; then
+    with_bundled_grpc=no
+
+    AC_CHECK_TOOL([GRPC_CXX_PLUGIN_TEST],
+                  [grpc_cpp_plugin],
+                  [],
+                  [$GRPCPREFIX/bin])
+
+    if test -z "`echo $GRPC_CXX_PLUGIN_TEST`"; then
+      AC_MSG_ERROR([grpc_cpp_plugin not found in PATH])
     fi
 
-    if test "x$enable_ssl" = "xno"; then
-      GRPC_VARIANT="_unsecure"
-    fi
+    GRPC_CXX_PLUGIN="$GRPCPREFIX/bin/grpc_cpp_plugin"
 
-    # Check if headers and library were located.
-    saved_LIBS="$LIBS"
-    LIBS="-lgrpc++$GRPC_VARIANT -lgrpc$GRPC_VARIANT -lgpr $LIBS"
-    AC_LANG_PUSH([C++])
-    AC_CHECK_HEADERS([grpcpp/grpcpp.h],
-                     [AC_LINK_IFELSE(
-                         [AC_LANG_PROGRAM([#include <grpcpp/grpcpp.h>],
-                                          [grpc::Version();])],
-                         [found_grpc=yes],
-                         [found_grpc=no])],
-                     [found_grpc=no])
-    AC_LANG_POP()
-    LIBS="$saved_LIBS"
-
-    if test "x$found_grpc" = "xyes"; then
-      with_bundled_grpc=no
-
-      AC_CHECK_TOOL([GRPC_CXX_PLUGIN_TEST],
-                    [grpc_cpp_plugin],
-                    [],
-                    [$GRPCPREFIX/bin])
-
-      if test -z "`echo $GRPC_CXX_PLUGIN_TEST`"; then
-        AC_MSG_ERROR([grpc_cpp_plugin not found in PATH])
-      fi
-
-      GRPC_CXX_PLUGIN="$GRPCPREFIX/bin/grpc_cpp_plugin"
-
-    else
-      AC_MSG_ERROR([cannot find grpc
+  else
+    AC_MSG_ERROR([cannot find grpc
 -------------------------------------------------------------------
 You have requested the use of a non-bundled grpc but no suitable
 grpc could be found.
@@ -2213,16 +2247,12 @@ You may want specify the location of grpc by providing a prefix
 path via --with-grpc=DIR, or check that the path you provided is
 correct if you are already doing this.
 -------------------------------------------------------------------
-      ])
-    fi
-  else
-    with_bundled_grpc=yes
+    ])
   fi
-
-  AC_DEFINE([ENABLE_GRPC])
+else
+  with_bundled_grpc=yes
 fi
 
-AM_CONDITIONAL([ENABLE_GRPC], [test "x$enable_grpc" = "xyes"])
 AM_CONDITIONAL([WITH_BUNDLED_GRPC],
                [test "x$with_bundled_grpc" = "xyes"])
 

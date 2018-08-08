@@ -23,13 +23,14 @@ target_link_libraries(
   stout INTERFACE
   apr
   boost
-  libcurl
   elfio
   glog
+  libarchive
+  libcurl
   picojson
   protobuf
+  rapidjson
   Threads::Threads
-  libarchive
   zlib
   $<$<PLATFORM_ID:Linux>:rt dl svn>
   $<$<PLATFORM_ID:Darwin>:svn>

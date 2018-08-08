@@ -109,7 +109,7 @@ add_library(
 
 target_link_libraries(mesos-protobufs PUBLIC
   protobuf
-  $<$<BOOL:${ENABLE_GRPC}>:grpc>)
+  grpc)
 
 target_include_directories(
   mesos-protobufs
@@ -237,14 +237,10 @@ set(COMMON_SRC
   common/values.cpp)
 
 set(CSI_SRC
+  csi/client.cpp
   csi/paths.cpp
+  csi/rpc.cpp
   csi/utils.cpp)
-
-if (ENABLE_GRPC)
-  list(APPEND CSI_SRC
-    csi/client.cpp
-    csi/rpc.cpp)
-endif ()
 
 set(DOCKER_SRC
   docker/docker.cpp
@@ -314,6 +310,38 @@ set(LINUX_SRC
   slave/containerizer/mesos/provisioner/backends/bind.cpp
   slave/containerizer/mesos/provisioner/backends/overlay.cpp)
 
+if (ENABLE_XFS_DISK_ISOLATOR)
+  list(APPEND LINUX_SRC
+    slave/containerizer/mesos/isolators/xfs/disk.cpp
+    slave/containerizer/mesos/isolators/xfs/utils.cpp)
+endif ()
+
+if (ENABLE_LINUX_ROUTING)
+  list(APPEND LINUX_SRC
+    linux/routing/handle.cpp
+    linux/routing/route.cpp
+    linux/routing/utils.cpp
+    linux/routing/diagnosis/diagnosis.cpp
+    linux/routing/filter/basic.cpp
+    linux/routing/filter/icmp.cpp
+    linux/routing/filter/ip.cpp
+    linux/routing/link/link.cpp
+    linux/routing/link/veth.cpp
+    linux/routing/queueing/fq_codel.cpp
+    linux/routing/queueing/htb.cpp
+    linux/routing/queueing/ingress.cpp)
+endif ()
+
+if (ENABLE_NETWORK_PORTS_ISOLATOR)
+  list(APPEND LINUX_SRC
+    slave/containerizer/mesos/isolators/network/ports.cpp)
+endif ()
+
+if (ENABLE_PORT_MAPPING_ISOLATOR)
+  list(APPEND LINUX_SRC
+    slave/containerizer/mesos/isolators/network/port_mapping.cpp)
+endif()
+
 set(LOCAL_SRC
   local/local.cpp)
 
@@ -339,6 +367,7 @@ set(LOGGING_SRC
 set(MASTER_SRC
   master/constants.cpp
   master/flags.cpp
+  master/framework.cpp
   master/http.cpp
   master/maintenance.cpp
   master/master.cpp
@@ -389,7 +418,7 @@ set(RESOURCE_PROVIDER_SRC
 
 # NOTE: The storage local resource provider uses Unix domain sockets to talk to
 # CSI plugins, thus it is currently not supported on Windows.
-if (ENABLE_GRPC AND NOT WIN32)
+if (NOT WIN32)
   list(APPEND RESOURCE_PROVIDER_SRC
     resource_provider/storage/provider.cpp)
 endif ()
@@ -491,6 +520,9 @@ if (NOT WIN32)
 endif ()
 
 # Include source for linux build.
+#
+# TODO(andschwa): Make this conditional happen sooner, instead of
+# here, and remove unnecessary variables.
 if (LINUX)
   list(APPEND MESOS_SRC ${LINUX_SRC})
 endif ()
@@ -524,7 +556,12 @@ set_target_properties(
   VERSION ${MESOS_PACKAGE_VERSION}
   SOVERSION ${MESOS_PACKAGE_SOVERSION})
 
-target_compile_definitions(mesos PUBLIC USE_CMAKE_BUILD_CONFIG)
+target_compile_definitions(
+  mesos PUBLIC
+  USE_CMAKE_BUILD_CONFIG
+  $<$<BOOL:${ENABLE_XFS_DISK_ISOLATOR}>:ENABLE_XFS_DISK_ISOLATOR>
+  $<$<BOOL:${ENABLE_PORT_MAPPING_ISOLATOR}>:ENABLE_PORT_MAPPING_ISOLATOR>
+  $<$<BOOL:${ENABLE_NETWORK_PORTS_ISOLATOR}>:ENABLE_NETWORK_PORTS_ISOLATOR>)
 
 target_include_directories(
   mesos PUBLIC
@@ -566,6 +603,8 @@ add_subdirectory(local)
 add_subdirectory(log)
 add_subdirectory(master)
 add_subdirectory(python/cli_new)
+add_subdirectory(python/executor)
+add_subdirectory(python/scheduler)
 add_subdirectory(resource_provider/storage)
 add_subdirectory(slave)
 add_subdirectory(slave/containerizer/mesos)

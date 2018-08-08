@@ -466,6 +466,115 @@ registered or that it is misbehaving.
 </tr>
 </table>
 
+The following metrics are added for each framework which registers with the
+master, in order to provide detailed information about the behavior of the
+framework. The framework name is percent-encoded before creating these metrics;
+the actual name can be recovered by percent-decoding.
+
+<table class="table table-striped">
+<thead>
+<tr><th>Metric</th><th>Description</th><th>Type</th>
+</thead>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/subscribed</code>
+  </td>
+  <td>Whether or not this framework is currently subscribed</td>
+  <td>Gauge</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/calls</code>
+  </td>
+  <td>Total number of calls sent by this framework</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/calls/&lt;CALL_TYPE&gt;</code>
+  </td>
+  <td>Number of each type of call sent by this framework</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/events</code>
+  </td>
+  <td>Total number of events sent to this framework</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/events/&lt;EVENT_TYPE&gt;</code>
+  </td>
+  <td>Number of each type of event sent to this framework</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/operations</code>
+  </td>
+  <td>Total number of offer operations performed by this framework</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/operations/&lt;OPERATION_TYPE&gt;</code>
+  </td>
+  <td>Number of each type of offer operation performed by this framework</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/tasks/active/&lt;TASK_STATE&gt;</code>
+  </td>
+  <td>Number of this framework's tasks currently in each active task state</td>
+  <td>Gauge</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/tasks/terminal/&lt;TASK_STATE&gt;</code>
+  </td>
+  <td>Number of this framework's tasks which have transitioned into each terminal task state</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/offers/sent</code>
+  </td>
+  <td>Number of offers sent to this framework</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/offers/accepted</code>
+  </td>
+  <td>Number of offers accepted by this framework</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/offers/declined</code>
+  </td>
+  <td>Number of offers explicitly declined by this framework</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/offers/rescinded</code>
+  </td>
+  <td>Number of offers sent to this framework which were subsequently rescinded</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>master/frameworks/&lt;ENCODED_FRAMEWORK_NAME&gt;/&lt;FRAMEWORK_ID&gt;/roles/&lt;ROLE_NAME&gt;/suppressed</code>
+  </td>
+  <td>For each of the framework's subscribed roles, whether or not offers for that role are currently suppressed</td>
+  <td>Gauge</td>
+</tr>
+</table>
+
 #### Tasks
 
 The following metrics provide information about active and terminated tasks. A
@@ -1846,6 +1955,20 @@ containerizers.
 </tr>
 <tr>
   <td>
+  <code>containerizer/mesos/disk/project_ids_free</code>
+  </td>
+  <td>Number of free project IDs available to the XFS Disk isolator</td>
+  <td>Gauge</td>
+</tr>
+<tr>
+  <td>
+  <code>containerizer/mesos/disk/project_ids_total</code>
+  </td>
+  <td>Number of project IDs configured for the XFS Disk isolator</td>
+  <td>Gauge</td>
+</tr>
+<tr>
+  <td>
   <code>containerizer/mesos/provisioner/docker_store/image_pull_ms</code>
   </td>
   <td>Mesos containerizer docker image pull latency in ms </td>
@@ -1991,23 +2114,13 @@ _operation_ placeholder in the above metrics.
   <td><code>org.apache.mesos.rp.local.storage</code></td>
 </tr>
 <tr>
-  <td><code><a href="csi.md#-create_volume-operation">CREATE_VOLUME</a></code></td>
-  <td><code>create_volume</code></td>
+  <td><code><a href="csi.md#-create_disk-operation">CREATE_DISK</a></code></td>
+  <td><code>create_disk</code></td>
   <td><code>org.apache.mesos.rp.local.storage</code></td>
 </tr>
 <tr>
-  <td><code><a href="csi.md#-destroy_volume-operation">DESTROY_VOLUME</a></code></td>
-  <td><code>destroy_volume</code></td>
-  <td><code>org.apache.mesos.rp.local.storage</code></td>
-</tr>
-<tr>
-  <td><code><a href="csi.md#-create_block-operation">CREATE_BLOCK</a></code></td>
-  <td><code>create_block</code></td>
-  <td><code>org.apache.mesos.rp.local.storage</code></td>
-</tr>
-<tr>
-  <td><code><a href="csi.md#-destroy_block-operation">DESTROY_BLOCK</a></code></td>
-  <td><code>destroy_block</code></td>
+  <td><code><a href="csi.md#-destroy_disk-operation">DESTROY_DISK</a></code></td>
+  <td><code>destroy_disk</code></td>
   <td><code>org.apache.mesos.rp.local.storage</code></td>
 </tr>
 </table>
@@ -2015,7 +2128,7 @@ _operation_ placeholder in the above metrics.
 For example, cluster operators can monitor the number of successful
 `CREATE_VOLUME` operations that are applied to the resource provider with type
 `org.apache.mesos.rp.local.storage` and name `lvm` through the
-`resource_providers/org.apache.mesos.rp.local.storage.lvm/operations/create_volume/finished`
+`resource_providers/org.apache.mesos.rp.local.storage.lvm/operations/create_disk/finished`
 metric.
 
 #### CSI Plugins

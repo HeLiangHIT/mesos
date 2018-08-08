@@ -53,8 +53,8 @@ CONCURRENTQUEUE = concurrentqueue-$(CONCURRENTQUEUE_VERSION)
 CSI = csi-$(CSI_VERSION)
 ELFIO = elfio-$(ELFIO_VERSION)
 GLOG = glog-$(GLOG_VERSION)
-GOOGLETEST = googletest-release-$(GOOGLETEST_VERSION)
 GMOCK = $(GOOGLETEST)/googlemock
+GOOGLETEST = googletest-release-$(GOOGLETEST_VERSION)
 GPERFTOOLS = gperftools-$(GPERFTOOLS_VERSION)
 GRPC = grpc-$(GRPC_VERSION)
 GTEST = $(GOOGLETEST)/googletest
@@ -65,8 +65,9 @@ LIBARCHIVE = libarchive-$(LIBARCHIVE_VERSION)
 LIBEV = libev-$(LIBEV_VERSION)
 NVML = nvml-$(NVML_VERSION)
 PIP = pip-$(PIP_VERSION)
-PROTOBUF = protobuf-$(PROTOBUF_VERSION)
 PICOJSON = picojson-$(PICOJSON_VERSION)
+PROTOBUF = protobuf-$(PROTOBUF_VERSION)
+RAPIDJSON = rapidjson-$(RAPIDJSON_VERSION)
 SETUPTOOLS = setuptools-$(SETUPTOOLS_VERSION)
 WHEEL = wheel-$(WHEEL_VERSION)
 ZOOKEEPER = zookeeper-$(ZOOKEEPER_VERSION)
@@ -89,6 +90,7 @@ EXTRA_DIST =			\
   $(PIP).tar.gz			\
   $(PROTOBUF).tar.gz		\
   $(PICOJSON).tar.gz		\
+  $(RAPIDJSON).tar.gz		\
   $(SETUPTOOLS).tar.gz		\
   $(WHEEL).tar.gz		\
   $(ZOOKEEPER).tar.gz
@@ -129,6 +131,7 @@ CLEAN_EXTRACTED =		\
   $(PIP)			\
   $(PICOJSON)			\
   $(PROTOBUF)			\
+  $(RAPIDJSON)			\
   $(SETUPTOOLS)			\
   $(WHEEL)			\
   $(ZOOKEEPER)
@@ -318,6 +321,68 @@ $(PICOJSON)/picojson.h: $(PICOJSON)-stamp
 ALL_LOCAL += $(PICOJSON)-stamp
 endif
 
+if WITH_BUNDLED_RAPIDJSON
+# Stout depends on rapidjson. Install rapidjson into $PREFIX/include
+# but don't add it to the source tarball.
+#
+# We need to use a variable per sub-directory in order to preserve
+# the subdirectory structure:
+#   https://www.gnu.org/software/automake/manual/html_node/Alternative.html
+rapidjsondir = $(includedir)/rapidjson
+rapidjsonerrordir = $(includedir)/rapidjson/error
+rapidjsoninternaldir = $(includedir)/rapidjson/internal
+rapidjsonmsinttypesdir = $(includedir)/rapidjson/msinttypes
+
+nodist_rapidjson_HEADERS =				\
+  $(RAPIDJSON)/include/rapidjson/allocators.h		\
+  $(RAPIDJSON)/include/rapidjson/document.h		\
+  $(RAPIDJSON)/include/rapidjson/encodedstream.h	\
+  $(RAPIDJSON)/include/rapidjson/encodings.h		\
+  $(RAPIDJSON)/include/rapidjson/filereadstream.h	\
+  $(RAPIDJSON)/include/rapidjson/filewritestream.h	\
+  $(RAPIDJSON)/include/rapidjson/fwd.h			\
+  $(RAPIDJSON)/include/rapidjson/istreamwrapper.h	\
+  $(RAPIDJSON)/include/rapidjson/memorybuffer.h		\
+  $(RAPIDJSON)/include/rapidjson/memorystream.h		\
+  $(RAPIDJSON)/include/rapidjson/ostreamwrapper.h	\
+  $(RAPIDJSON)/include/rapidjson/pointer.h		\
+  $(RAPIDJSON)/include/rapidjson/prettywriter.h		\
+  $(RAPIDJSON)/include/rapidjson/rapidjson.h		\
+  $(RAPIDJSON)/include/rapidjson/reader.h		\
+  $(RAPIDJSON)/include/rapidjson/schema.h		\
+  $(RAPIDJSON)/include/rapidjson/stream.h		\
+  $(RAPIDJSON)/include/rapidjson/stringbuffer.h		\
+  $(RAPIDJSON)/include/rapidjson/writer.h
+
+nodist_rapidjsonerror_HEADERS =				\
+  $(RAPIDJSON)/include/rapidjson/error/en.h		\
+  $(RAPIDJSON)/include/rapidjson/error/error.h
+
+nodist_rapidjsoninternal_HEADERS =			\
+  $(RAPIDJSON)/include/rapidjson/internal/biginteger.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/diyfp.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/dtoa.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/ieee754.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/itoa.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/meta.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/pow10.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/regex.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/stack.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/strfunc.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/strtod.h	\
+  $(RAPIDJSON)/include/rapidjson/internal/swap.h
+
+nodist_rapidjsonmsinttypes_HEADERS =			\
+  $(RAPIDJSON)/include/rapidjson/msinttypes/inttypes.h	\
+  $(RAPIDJSON)/include/rapidjson/msinttypes/stdint.h
+
+$(nodist_rapidjson_HEADERS): $(RAPIDJSON)-stamp
+$(nodist_rapidjsonerror_HEADERS): $(RAPIDJSON)-stamp
+$(nodist_rapidjsoninternal_HEADERS): $(RAPIDJSON)-stamp
+$(nodist_rapidjsonmsinttypes_HEADERS): $(RAPIDJSON)-stamp
+
+ALL_LOCAL += $(RAPIDJSON)-stamp
+endif
 
 if WITH_BUNDLED_PROTOBUF
 $(PROTOBUF)/src/protoc $(PROTOBUF)/src/libprotobuf.la: $(PROTOBUF)-build-stamp
@@ -348,7 +413,6 @@ PROTOBUF_LINKER_FLAGS = @PROTOBUF_LINKERFLAGS@
 PROTOC = @PROTOCOMPILER@
 endif
 
-if ENABLE_GRPC
 if !ENABLE_SSL
 GRPC_VARIANT = _unsecure
 endif
@@ -360,16 +424,23 @@ LIB_GRPC = $(GRPC)/libs/opt/libgrpc++$(GRPC_VARIANT).a	\
 
 $(LIB_GRPC): $(GRPC)-build-stamp
 
-# NOTE: We the include flags through the `CPPFLAGS` environment variable rather
-# than the command line because gRPC uses target-specific assignments to append
-# flags to `CPPFLAGS`, which will be overwritten by command line arguments. See:
+# NOTE: We pass compiler flags through environment variables rather than the
+# command line because gRPC uses target-specific assignments to append compiler
+# flags, which will be overwritten by the command line. See:
 # https://www.gnu.org/software/make/manual/html_node/Target_002dspecific.html
+#
+# NOTE: We ignore `array-bounds` errors generated by the GLIBC's `__strcmp_cg`
+# macro used in gRPC's c-ares library when compiled with Clang.
 $(GRPC)-build-stamp: $(GRPC)-stamp			\
                      $(PROTOBUF)-build-stamp
 	cd $(GRPC) &&					\
 	  CPPFLAGS="$(PROTOBUF_INCLUDE_FLAGS)		\
 	            $(SSL_INCLUDE_FLAGS)		\
-	            $(ZLIB_INCLUDE_FLAGS)"		\
+	            $(ZLIB_INCLUDE_FLAGS)		\
+	            -Wno-array-bounds			\
+	            $(CPPFLAGS)"			\
+	  CFLAGS="$(CFLAGS)"				\
+	  CXXFLAGS="$(CXXFLAGS)"			\
 	  $(MAKE) $(AM_MAKEFLAGS)			\
 	    $(LIB_GRPC:%=$(abs_builddir)/%)		\
 	    CC="$(CC)"					\
@@ -378,7 +449,9 @@ $(GRPC)-build-stamp: $(GRPC)-stamp			\
 	    LDXX="$(CXX)"				\
 	    LDFLAGS="$(PROTOBUF_LINKER_FLAGS)		\
 	             $(SSL_LINKER_FLAGS)		\
-	             $(ZLIB_LINKER_FLAGS)"		\
+	             $(ZLIB_LINKER_FLAGS)		\
+	             $(LDFLAGS)"			\
+	    LDLIBS="$(LDLIBS)"				\
 	    HAS_PKG_CONFIG=false			\
 	    NO_PROTOC=false				\
 	    PROTOC="$(PROTOC)"
@@ -388,7 +461,6 @@ ALL_LOCAL += $(LIB_GRPC)
 else
 $(GRPC)-build-stamp:
 	touch $@
-endif
 endif
 
 # NOTE: We extract `csi.proto` even if gRPC is disabled because it is
@@ -500,6 +572,13 @@ endif
 if WITH_BUNDLED_PROTOBUF
 	cd $(PROTOBUF) && \
 	  $(MAKE) $(AM_MAKEFLAGS) DESTDIR=$(INSTALLDIR) install
+endif
+if WITH_BUNDLED_RAPIDJSON
+# TODO(bmahler): Rapidjson has a cmake build, can we just cmake install
+# instead of copying?
+	@test -d $(INSTALLDIR)/include/rapidjson || \
+	  rm -rf $(INSTALLDIR)/include/rapidjson
+	cp -fpR $(RAPIDJSON)/include/rapidjson $(INSTALLDIR)/include/
 endif
 if WITH_BUNDLED_ZOOKEEPER
 	cd $(ZOOKEEPER)/src/c && \

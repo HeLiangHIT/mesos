@@ -64,6 +64,7 @@ HTTP_PARSER = $(BUNDLED_DIR)/http-parser-$(HTTP_PARSER_VERSION)
 LIBEV = $(BUNDLED_DIR)/libev-$(LIBEV_VERSION)
 PICOJSON = $(BUNDLED_DIR)/picojson-$(PICOJSON_VERSION)
 PROTOBUF = $(BUNDLED_DIR)/protobuf-$(PROTOBUF_VERSION)
+RAPIDJSON = $(BUNDLED_DIR)/rapidjson-$(RAPIDJSON_VERSION)
 
 # Dependencies for all-local.
 BUNDLED_DEPS = # Initialize BUNDLED_DEPENDENCIES so we can add to it.
@@ -112,7 +113,6 @@ $(LIB_GPERFTOOLS): $(GPERFTOOLS)-build-stamp
 BUNDLED_DEPS += $(GPERFTOOLS)-build-stamp
 endif
 
-if ENABLE_GRPC
 if !ENABLE_SSL
 GRPC_VARIANT = _unsecure
 endif
@@ -134,7 +134,6 @@ BUNDLED_DEPS += $(GRPC)-build-stamp
 else
 LIB_GRPC = -lgrpc++$(GRPC_VARIANT) -lgrpc$(GRPC_VARIANT) -lgpr
 GRPC_CPP_PLUGIN = @GRPC_CXX_PLUGIN@
-endif
 endif
 
 if WITH_BUNDLED_HTTP_PARSER
@@ -174,6 +173,11 @@ LIB_PROTOBUF = -lprotobuf
 PROTOC = @PROTOCOMPILER@
 endif
 
+if WITH_BUNDLED_RAPIDJSON
+RAPIDJSON_INCLUDE_FLAGS = -I$(RAPIDJSON)/include
+BUNDLED_DEPS += $(RAPIDJSON)-stamp
+endif
+
 if WITH_BUNDLED_STOUT
 STOUT_INCLUDE_FLAGS = -I$(srcdir)/$(STOUT)/include
 endif
@@ -198,6 +202,7 @@ libprocess_la_SOURCES =		\
   src/event_queue.hpp		\
   src/firewall.cpp		\
   src/gate.hpp			\
+  src/grpc.cpp			\
   src/gtest_constants.cpp	\
   src/help.cpp			\
   src/http.cpp			\
@@ -255,13 +260,9 @@ libprocess_la_CPPFLAGS =			\
   $(LIB_EV_INCLUDE_FLAGS)			\
   $(PICOJSON_INCLUDE_FLAGS)			\
   $(PROTOBUF_INCLUDE_FLAGS)			\
+  $(RAPIDJSON_INCLUDE_FLAGS)			\
   $(STOUT_INCLUDE_FLAGS)			\
   $(AM_CPPFLAGS)
-
-if ENABLE_GRPC
-libprocess_la_SOURCES +=	\
-  src/grpc.cpp
-endif
 
 if ENABLE_LIBEVENT
 libprocess_la_SOURCES +=			\
@@ -302,6 +303,8 @@ libprocess_tests_SOURCES =					\
   src/tests/decoder_tests.cpp					\
   src/tests/encoder_tests.cpp					\
   src/tests/future_tests.cpp					\
+  src/tests/grpc_tests.cpp					\
+  src/tests/grpc_tests.proto					\
   src/tests/http_tests.cpp					\
   src/tests/io_tests.cpp					\
   src/tests/limiter_tests.cpp					\
@@ -326,6 +329,12 @@ libprocess_tests_SOURCES =					\
   src/tests/timeseries_tests.cpp				\
   src/tests/time_tests.cpp
 
+GRPC_TESTS_PROTOS =			\
+  grpc_tests.grpc.pb.cc			\
+  grpc_tests.grpc.pb.h			\
+  grpc_tests.pb.cc			\
+  grpc_tests.pb.h
+
 libprocess_tests_CPPFLAGS =		\
   -I$(srcdir)/src			\
   $(GMOCK_INCLUDE_FLAGS)		\
@@ -337,18 +346,6 @@ libprocess_tests_LDADD =		\
   $(LIB_GMOCK)				\
   $(LIB_PROTOBUF)			\
   libprocess.la
-
-if ENABLE_GRPC
-libprocess_tests_SOURCES +=		\
-  src/tests/grpc_tests.cpp		\
-  src/tests/grpc_tests.proto
-
-GRPC_TESTS_PROTOS =			\
-  grpc_tests.grpc.pb.cc			\
-  grpc_tests.grpc.pb.h			\
-  grpc_tests.pb.cc			\
-  grpc_tests.pb.h
-endif
 
 if ENABLE_SSL
 check_PROGRAMS += ssl-client

@@ -48,6 +48,7 @@ set(MESOS_TESTS_UTILS_SRC
   http_server_test_helper.cpp
   main.cpp
   mesos.cpp
+  mock_csi_plugin.cpp
   mock_docker.cpp
   mock_fetcher.cpp
   mock_registrar.cpp
@@ -70,12 +71,6 @@ if (LINUX)
     containerizer/setns_test_helper.cpp)
 endif ()
 
-if (ENABLE_GRPC)
-  list(APPEND MESOS_TESTS_UTILS_SRC
-    csi_client_tests.cpp
-    mock_csi_plugin.cpp)
-endif ()
-
 
 # All the test sources.
 #######################
@@ -93,6 +88,7 @@ set(MESOS_TESTS_SRC
   container_daemon_tests.cpp
   cram_md5_authentication_tests.cpp
   credentials_tests.cpp
+  csi_client_tests.cpp
   default_executor_tests.cpp
   exception_tests.cpp
   executor_http_api_tests.cpp
@@ -219,8 +215,10 @@ endif ()
 
 if (LINUX)
   list(APPEND MESOS_TESTS_SRC
+    agent_resource_provider_config_api_tests.cpp
     ldcache_tests.cpp
     ldd_tests.cpp
+    storage_local_resource_provider_tests.cpp
     containerizer/capabilities_tests.cpp
     containerizer/cgroups_isolator_tests.cpp
     containerizer/cgroups_tests.cpp
@@ -242,11 +240,25 @@ if (LINUX)
     containerizer/volume_image_isolator_tests.cpp
     containerizer/volume_secret_isolator_tests.cpp)
 
-  if (ENABLE_GRPC)
+  if (ENABLE_XFS_DISK_ISOLATOR)
     list(APPEND MESOS_TESTS_SRC
-      agent_resource_provider_config_api_tests.cpp
-      storage_local_resource_provider_tests.cpp)
+      containerizer/xfs_quota_tests.cpp)
+  endif()
+
+  if (ENABLE_LINUX_ROUTING)
+    list(APPEND MESOS_TESTS_SRC
+      containerizer/routing_tests.cpp)
   endif ()
+
+  if (ENABLE_NETWORK_PORTS_ISOLATOR)
+    list(APPEND MESOS_TESTS_SRC
+      containerizer/ports_isolator_tests.cpp)
+  endif()
+
+  if (ENABLE_PORT_MAPPING_ISOLATOR)
+    list(APPEND MESOS_TESTS_SRC
+      containerizer/port_mapping_tests.cpp)
+  endif()
 endif ()
 
 
@@ -341,7 +353,7 @@ if (NOT WIN32)
     test-http-framework)
 
   # SLRP-related tests are Linux only and require the test CSI plugin binary.
-  if (ENABLE_GRPC AND LINUX)
+  if (LINUX)
     add_dependencies(
       mesos-tests
       test-csi-plugin)

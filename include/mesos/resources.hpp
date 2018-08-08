@@ -100,6 +100,22 @@ private:
       }
     }
 
+    /*implicit*/ Resource_(Resource&& _resource)
+      : resource(std::move(_resource)),
+        sharedCount(None())
+    {
+      // Setting the counter to 1 to denote "one copy" of the shared resource.
+      if (resource.has_shared()) {
+        sharedCount = 1;
+      }
+    }
+
+    Resource_(const Resource_& resource_) = default;
+    Resource_(Resource_&& resource_) = default;
+
+    Resource_& operator=(const Resource_&) = default;
+    Resource_& operator=(Resource_&&) = default;
+
     // By implicitly converting to Resource we are able to keep Resource_
     // logic internal and expose only the protobuf object.
     operator const Resource&() const { return resource; }
@@ -373,19 +389,31 @@ public:
 
   // TODO(jieyu): Consider using C++11 initializer list.
   /*implicit*/ Resources(const Resource& resource);
+  /*implicit*/ Resources(Resource&& resource);
 
   /*implicit*/
   Resources(const std::vector<Resource>& _resources);
+  Resources(std::vector<Resource>&& _resources);
 
   /*implicit*/
   Resources(const google::protobuf::RepeatedPtrField<Resource>& _resources);
+  Resources(google::protobuf::RepeatedPtrField<Resource>&& _resources);
 
-  Resources(const Resources& that) : resources(that.resources) {}
+  Resources(const Resources& that) = default;
+  Resources(Resources&& that) = default;
 
   Resources& operator=(const Resources& that)
   {
     if (this != &that) {
       resources = that.resources;
+    }
+    return *this;
+  }
+
+  Resources& operator=(Resources&& that)
+  {
+    if (this != &that) {
+      resources = std::move(that.resources);
     }
     return *this;
   }
@@ -590,10 +618,23 @@ public:
   // doing subtraction), the semantics is as though the second operand
   // was actually just an empty resource (as though you didn't do the
   // operation at all).
-  Resources operator+(const Resource& that) const;
-  Resources operator+(const Resources& that) const;
+  Resources operator+(const Resource& that) const &;
+  Resources operator+(const Resource& that) &&;
+
+  Resources operator+(Resource&& that) const &;
+  Resources operator+(Resource&& that) &&;
+
   Resources& operator+=(const Resource& that);
+  Resources& operator+=(Resource&& that);
+
+  Resources operator+(const Resources& that) const &;
+  Resources operator+(const Resources& that) &&;
+
+  Resources operator+(Resources&& that) const &;
+  Resources operator+(Resources&& that) &&;
+
   Resources& operator+=(const Resources& that);
+  Resources& operator+=(Resources&& that);
 
   Resources operator-(const Resource& that) const;
   Resources operator-(const Resources& that) const;
@@ -624,12 +665,12 @@ private:
   // NOTE: `Resource` objects are implicitly converted to `Resource_`
   // objects, so here the API can also accept a `Resource` object.
   void add(const Resource_& r);
+  void add(Resource_&& r);
   void subtract(const Resource_& r);
 
-  Resources operator+(const Resource_& that) const;
   Resources& operator+=(const Resource_& that);
+  Resources& operator+=(Resource_&& that);
 
-  Resources operator-(const Resource_& that) const;
   Resources& operator-=(const Resource_& that);
 
   std::vector<Resource_> resources;

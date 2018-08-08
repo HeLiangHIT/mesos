@@ -16,8 +16,13 @@
 
 #include <string>
 
+#include <mesos/scheduler/scheduler.hpp>
+
+#include <process/http.hpp>
+
 #include <process/metrics/counter.hpp>
 #include <process/metrics/pull_gauge.hpp>
+#include <process/metrics/push_gauge.hpp>
 #include <process/metrics/metrics.hpp>
 
 #include <stout/foreach.hpp>
@@ -27,6 +32,7 @@
 
 using process::metrics::Counter;
 using process::metrics::PullGauge;
+using process::metrics::PushGauge;
 
 using std::string;
 
@@ -545,6 +551,215 @@ void Metrics::incrementTasksStates(
   counter++;
 }
 
+
+FrameworkMetrics::FrameworkMetrics(const FrameworkInfo& _frameworkInfo)
+  : frameworkInfo(_frameworkInfo),
+    subscribed(
+        getFrameworkMetricPrefix(frameworkInfo) + "subscribed"),
+    calls(
+        getFrameworkMetricPrefix(frameworkInfo) + "calls"),
+    events(
+        getFrameworkMetricPrefix(frameworkInfo) + "events"),
+    offers_sent(
+        getFrameworkMetricPrefix(frameworkInfo) + "offers/sent"),
+    offers_accepted(
+        getFrameworkMetricPrefix(frameworkInfo) + "offers/accepted"),
+    offers_declined(
+        getFrameworkMetricPrefix(frameworkInfo) + "offers/declined"),
+    offers_rescinded(
+        getFrameworkMetricPrefix(frameworkInfo) + "offers/rescinded"),
+    operations(
+        getFrameworkMetricPrefix(frameworkInfo) + "operations")
+{
+  process::metrics::add(subscribed);
+
+  process::metrics::add(offers_sent);
+  process::metrics::add(offers_accepted);
+  process::metrics::add(offers_declined);
+  process::metrics::add(offers_rescinded);
+
+  // Add metrics for scheduler calls.
+  process::metrics::add(calls);
+  for (int index = 0;
+       index < scheduler::Call::Type_descriptor()->value_count();
+       index++) {
+    const google::protobuf::EnumValueDescriptor* descriptor =
+      scheduler::Call::Type_descriptor()->value(index);
+
+    const scheduler::Call::Type type =
+      static_cast<scheduler::Call::Type>(descriptor->number());
+
+    if (type == scheduler::Call::UNKNOWN) {
+      continue;
+    }
+
+    Counter counter = Counter(
+        getFrameworkMetricPrefix(frameworkInfo) + "calls/" +
+        strings::lower(descriptor->name()));
+
+    call_types.put(type, counter);
+    process::metrics::add(counter);
+  }
+
+  // Add metrics for scheduler events.
+  process::metrics::add(events);
+  for (int index = 0;
+       index < scheduler::Event::Type_descriptor()->value_count();
+       index++) {
+    const google::protobuf::EnumValueDescriptor* descriptor =
+      scheduler::Event::Type_descriptor()->value(index);
+
+    const scheduler::Event::Type type =
+      static_cast<scheduler::Event::Type>(descriptor->number());
+
+    if (type == scheduler::Event::UNKNOWN) {
+      continue;
+    }
+
+    Counter counter = Counter(
+        getFrameworkMetricPrefix(frameworkInfo) + "events/" +
+        strings::lower(descriptor->name()));
+
+    event_types.put(type, counter);
+    process::metrics::add(counter);
+  }
+
+  // Add metrics for both active and terminal task states.
+  for (int index = 0; index < TaskState_descriptor()->value_count(); index++) {
+    const google::protobuf::EnumValueDescriptor* descriptor =
+      TaskState_descriptor()->value(index);
+
+    const TaskState state = static_cast<TaskState>(descriptor->number());
+
+    if (protobuf::isTerminalState(state)) {
+      Counter counter = Counter(
+          getFrameworkMetricPrefix(frameworkInfo) + "tasks/terminal/" +
+          strings::lower(descriptor->name()));
+
+      terminal_task_states.put(state, counter);
+      process::metrics::add(counter);
+    } else {
+      PushGauge gauge = PushGauge(
+          getFrameworkMetricPrefix(frameworkInfo) + "tasks/active/" +
+          strings::lower(TaskState_Name(state)));
+
+      active_task_states.put(state, gauge);
+      process::metrics::add(gauge);
+    }
+  }
+
+  // Add metrics for offer operations.
+  process::metrics::add(operations);
+  for (int index = 0;
+       index < Offer::Operation::Type_descriptor()->value_count();
+       index++) {
+    const google::protobuf::EnumValueDescriptor* descriptor =
+      Offer::Operation::Type_descriptor()->value(index);
+
+    const Offer::Operation::Type type =
+      static_cast<Offer::Operation::Type>(descriptor->number());
+
+    if (type == Offer::Operation::UNKNOWN) {
+      continue;
+    }
+
+    Counter counter =
+      Counter(getFrameworkMetricPrefix(frameworkInfo) +
+      "operations/" + strings::lower(descriptor->name()));
+
+    operation_types.put(type, counter);
+    process::metrics::add(counter);
+  }
+}
+
+
+FrameworkMetrics::~FrameworkMetrics()
+{
+  process::metrics::remove(subscribed);
+
+  process::metrics::remove(calls);
+  foreachvalue (const Counter& counter, call_types) {
+    process::metrics::remove(counter);
+  }
+
+  process::metrics::remove(events);
+  foreachvalue (const Counter& counter, event_types) {
+    process::metrics::remove(counter);
+  }
+
+  process::metrics::remove(offers_sent);
+  process::metrics::remove(offers_accepted);
+  process::metrics::remove(offers_declined);
+  process::metrics::remove(offers_rescinded);
+
+  foreachvalue (const Counter& counter, terminal_task_states) {
+    process::metrics::remove(counter);
+  }
+
+  foreachvalue (const PushGauge& gauge, active_task_states) {
+    process::metrics::remove(gauge);
+  }
+
+  process::metrics::remove(operations);
+  foreachvalue (const Counter& counter, operation_types) {
+    process::metrics::remove(counter);
+  }
+}
+
+
+void FrameworkMetrics::incrementCall(const scheduler::Call::Type& callType)
+{
+  CHECK(call_types.contains(callType));
+
+  call_types.get(callType).get()++;
+  calls++;
+}
+
+
+void FrameworkMetrics::incrementTaskState(const TaskState& state)
+{
+  if (protobuf::isTerminalState(state)) {
+    CHECK(terminal_task_states.contains(state));
+    terminal_task_states.get(state).get()++;
+  } else {
+    CHECK(active_task_states.contains(state));
+    active_task_states.get(state).get() += 1;
+  }
+}
+
+
+void FrameworkMetrics::decrementActiveTaskState(const TaskState& state)
+{
+  CHECK(active_task_states.contains(state));
+
+  active_task_states.get(state).get() -= 1;
+}
+
+
+void FrameworkMetrics::incrementOperation(const Offer::Operation& operation)
+{
+  CHECK(operation_types.contains(operation.type()));
+
+  operation_types.get(operation.type()).get()++;
+  operations++;
+}
+
+
+string getFrameworkMetricPrefix(const FrameworkInfo& frameworkInfo)
+{
+  // Percent-encode the framework name to avoid characters like '/' and ' '.
+  return "master/frameworks/" + process::http::encode(frameworkInfo.name()) +
+    "/" + stringify(frameworkInfo.id()) + "/";
+}
+
+
+void FrameworkMetrics::incrementEvent(const scheduler::Event& event)
+{
+  CHECK(event_types.contains(event.type()));
+
+  event_types.get(event.type()).get()++;
+  events++;
+}
 
 } // namespace master {
 } // namespace internal {

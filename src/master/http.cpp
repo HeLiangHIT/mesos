@@ -145,7 +145,7 @@ static void json(
     JSON::StringWriter* writer,
     const FrameworkInfo::Capability& capability)
 {
-  writer->append(FrameworkInfo::Capability::Type_Name(capability.type()));
+  writer->set(FrameworkInfo::Capability::Type_Name(capability.type()));
 }
 
 
@@ -153,7 +153,7 @@ static void json(
     JSON::StringWriter* writer,
     const SlaveInfo::Capability& capability)
 {
-  writer->append(SlaveInfo::Capability::Type_Name(capability.type()));
+  writer->set(SlaveInfo::Capability::Type_Name(capability.type()));
 }
 
 
@@ -161,7 +161,7 @@ static void json(
     JSON::StringWriter* writer,
     const MasterInfo::Capability& capability)
 {
-  writer->append(MasterInfo::Capability::Type_Name(capability.type()));
+  writer->set(MasterInfo::Capability::Type_Name(capability.type()));
 }
 
 
@@ -171,7 +171,7 @@ static void json(JSON::ObjectWriter* writer, const Offer& offer)
   writer->field("framework_id", offer.framework_id().value());
   writer->field("allocation_info", JSON::Protobuf(offer.allocation_info()));
   writer->field("slave_id", offer.slave_id().value());
-  writer->field("resources", Resources(offer.resources()));
+  writer->field("resources", offer.resources());
 }
 
 
@@ -301,7 +301,7 @@ struct FullFrameworkWriter {
 
           writer->field("slave_id", taskInfo.slave_id().value());
           writer->field("state", TaskState_Name(TASK_STAGING));
-          writer->field("resources", Resources(taskInfo.resources()));
+          writer->field("resources", taskInfo.resources());
 
           // Tasks are not allowed to mix resources allocated to
           // different roles, see MESOS-6636.
@@ -1034,6 +1034,8 @@ Future<Response> Master::Http::scheduler(
   if (framework == nullptr) {
     return BadRequest("Framework cannot be found");
   }
+
+  framework->metrics.incrementCall(call.type());
 
   // TODO(greggomann): Move this implicit scheduler authorization
   // into the authorizer. See MESOS-7399.

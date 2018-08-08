@@ -783,9 +783,29 @@ protected:
     EXPECT_CALL(coordinator, consume_(_))
       .WillOnce(FutureArg<0>(&message));
 
+    // TODO(andschwa): Clean this up so that `BUILD_DIR` has the correct
+    // separator at compilation time.
+#ifdef __WINDOWS__
+    const std::string buildDir = strings::replace(BUILD_DIR, "/", "\\");
+#else
+    const std::string buildDir = BUILD_DIR;
+#endif // __WINDOWS__
+
+#ifdef __WINDOWS__
+    constexpr char LINKEENAME[] = "test-linkee.exe";
+#else
+    constexpr char LINKEENAME[] = "test-linkee";
+#endif // __WINDOWS__
+
+    const std::string linkeePath = path::join(buildDir, LINKEENAME);
+    ASSERT_TRUE(os::exists(linkeePath));
+
+    // NOTE: Because of the differences between Windows and POSIX
+    // shells when interpreting quotes, we use the second form of
+    // `subprocess` to call `test-linkee` directly with a set of
+    // arguments, rather than through the shell.
     Try<Subprocess> s = process::subprocess(
-        path::join(BUILD_DIR, "test-linkee") +
-          " '" + stringify(coordinator.self()) + "'");
+        linkeePath, {linkeePath, stringify(coordinator.self())});
     ASSERT_SOME(s);
     linkee = s.get();
 
@@ -823,7 +843,7 @@ protected:
   void TearDown() override
   {
     if (linkee.isSome()) {
-      os::killtree(linkee->pid(), SIGKILL);
+      os::kill(linkee->pid(), SIGKILL);
       reap_linkee();
       linkee = None();
     }
@@ -837,9 +857,7 @@ public:
 
 // Verifies that linking to a remote process will correctly detect
 // the associated `ExitedEvent`.
-// TODO(hausdorff): Test fails on Windows. Fix and enable. Linkee never sends a
-// message because "no such program exists". See MESOS-5941.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteLink)
+TEST_F(ProcessRemoteLinkTest, RemoteLink)
 {
   // Link to the remote subprocess.
   ExitedProcess process(pid);
@@ -851,7 +869,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteLink)
 
   spawn(process);
 
-  os::killtree(linkee->pid(), SIGKILL);
+  os::kill(linkee->pid(), SIGKILL);
   reap_linkee();
   linkee = None();
 
@@ -892,9 +910,7 @@ private:
 // Verifies that calling `link` with "relink" semantics will have the
 // same behavior as `link` with "normal" semantics, when there is no
 // existing persistent connection.
-// TODO(hausdorff): Test fails on Windows. Fix and enable. Linkee never sends a
-// message because "no such program exists". See MESOS-5941.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteRelink)
+TEST_F(ProcessRemoteLinkTest, RemoteRelink)
 {
   RemoteLinkTestProcess process(pid);
 
@@ -906,7 +922,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteRelink)
   spawn(process);
   process.relink();
 
-  os::killtree(linkee->pid(), SIGKILL);
+  os::kill(linkee->pid(), SIGKILL);
   reap_linkee();
   linkee = None();
 
@@ -919,9 +935,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteRelink)
 
 // Verifies that linking and relinking a process will retain monitoring
 // on the linkee.
-// TODO(hausdorff): Test fails on Windows. Fix and enable. Linkee never sends a
-// message because "no such program exists". See MESOS-5941.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteLinkRelink)
+TEST_F(ProcessRemoteLinkTest, RemoteLinkRelink)
 {
   RemoteLinkTestProcess process(pid);
 
@@ -934,7 +948,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteLinkRelink)
   process.linkup();
   process.relink();
 
-  os::killtree(linkee->pid(), SIGKILL);
+  os::kill(linkee->pid(), SIGKILL);
   reap_linkee();
   linkee = None();
 
@@ -947,9 +961,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteLinkRelink)
 
 // Verifies that relinking a remote process will not affect the
 // monitoring of the process by other linkers.
-// TODO(hausdorff): Test fails on Windows. Fix and enable. Linkee never sends a
-// message because "no such program exists". See MESOS-5941.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteDoubleLinkRelink)
+TEST_F(ProcessRemoteLinkTest, RemoteDoubleLinkRelink)
 {
   ExitedProcess linker(pid);
   RemoteLinkTestProcess relinker(pid);
@@ -968,7 +980,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteDoubleLinkRelink)
   relinker.linkup();
   relinker.relink();
 
-  os::killtree(linkee->pid(), SIGKILL);
+  os::kill(linkee->pid(), SIGKILL);
   reap_linkee();
   linkee = None();
 
@@ -986,6 +998,12 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteDoubleLinkRelink)
 // Verifies that remote links will trigger an `ExitedEvent` if the link
 // fails during socket creation. The test instigates a socket creation
 // failure by hogging all available file descriptors.
+//
+// TODO(andschwa): Enable this test. The current logic will not work on Windows
+// as " The Microsoft Winsock provider limits the maximum number of sockets
+// supported only by available memory on the local computer." See MESOS-9093.
+//
+// https://docs.microsoft.com/en-us/windows/desktop/WinSock/maximum-number-of-sockets-supported-2 // NOLINT(whitespace/line_length)
 TEST_F_TEMP_DISABLED_ON_WINDOWS(ProcessRemoteLinkTest, RemoteLinkLeak)
 {
   RemoteLinkTestProcess relinker(pid);
@@ -1450,9 +1468,7 @@ TEST(ProcessTest, Http1)
 
 // Like 'http1' but uses the 'Libprocess-From' header. We can
 // also use http::post here since we expect a 202 response.
-//
-// TODO(neilc): This test currently does not work on Windows (MESOS-7527).
-TEST_TEMP_DISABLED_ON_WINDOWS(ProcessTest, Http2)
+TEST(ProcessTest, Http2)
 {
   RemoteProcess process;
   spawn(process);
@@ -1595,10 +1611,7 @@ public:
 };
 
 
-// TODO(hausdorff): Enable test when `os::rmdir` is semantically equivalent to
-// the POSIX version. In this case, it behaves poorly when we try to use it to
-// delete a file instead of a directory. See MESOS-5942.
-TEST_TEMP_DISABLED_ON_WINDOWS(ProcessTest, Provide)
+TEST(ProcessTest, Provide)
 {
   const Try<string> mkdtemp = os::mkdtemp();
   ASSERT_SOME(mkdtemp);
@@ -1637,8 +1650,6 @@ static int baz(string s) { return 42; }
 static Future<int> bam(string s) { return 42; }
 
 
-// MSVC can't compile the call to std::invoke.
-#ifndef __WINDOWS__
 TEST(ProcessTest, Defers)
 {
   {
@@ -1776,7 +1787,6 @@ TEST(ProcessTest, Defers)
   Future<int> future13 = Future<string>().then(
       defer(functor));
 }
-#endif // __WINDOWS__
 
 
 class PercentEncodedIDProcess : public Process<PercentEncodedIDProcess>
@@ -1880,18 +1890,15 @@ public:
 
 // Sets firewall rules which disable endpoints on a process and then
 // attempts to connect to those endpoints.
-// TODO(hausdorff): Routing logic is broken on Windows. Fix and enable test. In
-// this case, we fail to set up the firewall routes. See MESOS-5904.
-TEST_TEMP_DISABLED_ON_WINDOWS(ProcessTest, FirewallDisablePaths)
+TEST(ProcessTest, FirewallDisablePaths)
 {
   const string id = "testprocess";
 
   hashset<string> endpoints = {
-    path::join("", id, "handler1"),
-    path::join("", id, "handler2/nested"),
+    strings::join("/", "", id, "handler1"),
+    strings::join("/", "", id, "handler2", "nested"),
     // Patterns are not supported, so this should do nothing.
-    path::join("", id, "handler3/*")
-  };
+    strings::join("/", "", id, "handler3", "*")};
 
   process::firewall::install(
       {Owned<FirewallRule>(new DisabledEndpointsFirewallRule(endpoints))});
@@ -1967,16 +1974,12 @@ TEST_TEMP_DISABLED_ON_WINDOWS(ProcessTest, FirewallDisablePaths)
 
 // Test that firewall rules can be changed by changing the vector.
 // An empty vector should allow all paths.
-// TODO(hausdorff): Routing logic is broken on Windows. Fix and enable test. In
-// this case, we fail to set up the firewall routes. See MESOS-5904.
-TEST_TEMP_DISABLED_ON_WINDOWS(ProcessTest, FirewallUninstall)
+TEST(ProcessTest, FirewallUninstall)
 {
   const string id = "testprocess";
 
-  hashset<string> endpoints = {
-    path::join("", id, "handler1"),
-    path::join("", id, "handler2")
-  };
+  hashset<string> endpoints = {strings::join("/", "", id, "handler1"),
+                               strings::join("/", "", id, "handler2")};
 
   process::firewall::install(
       {Owned<FirewallRule>(new DisabledEndpointsFirewallRule(endpoints))});

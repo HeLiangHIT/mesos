@@ -20,8 +20,11 @@
 #include <string>
 #include <vector>
 
+#include <mesos/scheduler/scheduler.hpp>
+
 #include <process/metrics/counter.hpp>
 #include <process/metrics/pull_gauge.hpp>
+#include <process/metrics/push_gauge.hpp>
 #include <process/metrics/metrics.hpp>
 
 #include <stout/hashmap.hpp>
@@ -213,6 +216,48 @@ struct Metrics
       const TaskStatus::Source& source,
       const TaskStatus::Reason& reason);
 };
+
+
+struct FrameworkMetrics
+{
+  explicit FrameworkMetrics(const FrameworkInfo& _frameworkInfo);
+
+  ~FrameworkMetrics();
+
+  void incrementCall(const scheduler::Call::Type& callType);
+
+  void incrementEvent(const scheduler::Event& event);
+
+  void incrementTaskState(const TaskState& state);
+  void decrementActiveTaskState(const TaskState& state);
+
+  void incrementOperation(const Offer::Operation& operation);
+
+  const FrameworkInfo frameworkInfo;
+
+  process::metrics::PushGauge subscribed;
+
+  process::metrics::Counter calls;
+  hashmap<scheduler::Call::Type, process::metrics::Counter> call_types;
+
+  process::metrics::Counter events;
+  hashmap<scheduler::Event::Type, process::metrics::Counter> event_types;
+
+  process::metrics::Counter offers_sent;
+  process::metrics::Counter offers_accepted;
+  process::metrics::Counter offers_declined;
+  process::metrics::Counter offers_rescinded;
+
+  hashmap<TaskState, process::metrics::Counter> terminal_task_states;
+
+  hashmap<TaskState, process::metrics::PushGauge> active_task_states;
+
+  process::metrics::Counter operations;
+  hashmap<Offer::Operation::Type, process::metrics::Counter> operation_types;
+};
+
+
+std::string getFrameworkMetricPrefix(const FrameworkInfo& frameworkInfo);
 
 } // namespace master {
 } // namespace internal {
