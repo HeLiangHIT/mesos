@@ -552,8 +552,11 @@ void Metrics::incrementTasksStates(
 }
 
 
-FrameworkMetrics::FrameworkMetrics(const FrameworkInfo& _frameworkInfo)
+FrameworkMetrics::FrameworkMetrics(
+    const FrameworkInfo& _frameworkInfo,
+    bool _publishPerFrameworkMetrics)
   : frameworkInfo(_frameworkInfo),
+    publishPerFrameworkMetrics(_publishPerFrameworkMetrics),
     subscribed(
         getFrameworkMetricPrefix(frameworkInfo) + "subscribed"),
     calls(
@@ -571,15 +574,14 @@ FrameworkMetrics::FrameworkMetrics(const FrameworkInfo& _frameworkInfo)
     operations(
         getFrameworkMetricPrefix(frameworkInfo) + "operations")
 {
-  process::metrics::add(subscribed);
-
-  process::metrics::add(offers_sent);
-  process::metrics::add(offers_accepted);
-  process::metrics::add(offers_declined);
-  process::metrics::add(offers_rescinded);
+  addMetric(subscribed);
+  addMetric(offers_sent);
+  addMetric(offers_accepted);
+  addMetric(offers_declined);
+  addMetric(offers_rescinded);
 
   // Add metrics for scheduler calls.
-  process::metrics::add(calls);
+  addMetric(calls);
   for (int index = 0;
        index < scheduler::Call::Type_descriptor()->value_count();
        index++) {
@@ -598,11 +600,11 @@ FrameworkMetrics::FrameworkMetrics(const FrameworkInfo& _frameworkInfo)
         strings::lower(descriptor->name()));
 
     call_types.put(type, counter);
-    process::metrics::add(counter);
+    addMetric(counter);
   }
 
   // Add metrics for scheduler events.
-  process::metrics::add(events);
+  addMetric(events);
   for (int index = 0;
        index < scheduler::Event::Type_descriptor()->value_count();
        index++) {
@@ -621,7 +623,7 @@ FrameworkMetrics::FrameworkMetrics(const FrameworkInfo& _frameworkInfo)
         strings::lower(descriptor->name()));
 
     event_types.put(type, counter);
-    process::metrics::add(counter);
+    addMetric(counter);
   }
 
   // Add metrics for both active and terminal task states.
@@ -637,19 +639,19 @@ FrameworkMetrics::FrameworkMetrics(const FrameworkInfo& _frameworkInfo)
           strings::lower(descriptor->name()));
 
       terminal_task_states.put(state, counter);
-      process::metrics::add(counter);
+      addMetric(counter);
     } else {
       PushGauge gauge = PushGauge(
           getFrameworkMetricPrefix(frameworkInfo) + "tasks/active/" +
           strings::lower(TaskState_Name(state)));
 
       active_task_states.put(state, gauge);
-      process::metrics::add(gauge);
+      addMetric(gauge);
     }
   }
 
   // Add metrics for offer operations.
-  process::metrics::add(operations);
+  addMetric(operations);
   for (int index = 0;
        index < Offer::Operation::Type_descriptor()->value_count();
        index++) {
@@ -668,41 +670,41 @@ FrameworkMetrics::FrameworkMetrics(const FrameworkInfo& _frameworkInfo)
       "operations/" + strings::lower(descriptor->name()));
 
     operation_types.put(type, counter);
-    process::metrics::add(counter);
+    addMetric(counter);
   }
 }
 
 
 FrameworkMetrics::~FrameworkMetrics()
 {
-  process::metrics::remove(subscribed);
+  removeMetric(subscribed);
 
-  process::metrics::remove(calls);
+  removeMetric(calls);
   foreachvalue (const Counter& counter, call_types) {
-    process::metrics::remove(counter);
+    removeMetric(counter);
   }
 
   process::metrics::remove(events);
   foreachvalue (const Counter& counter, event_types) {
-    process::metrics::remove(counter);
+    removeMetric(counter);
   }
 
-  process::metrics::remove(offers_sent);
-  process::metrics::remove(offers_accepted);
-  process::metrics::remove(offers_declined);
-  process::metrics::remove(offers_rescinded);
+  removeMetric(offers_sent);
+  removeMetric(offers_accepted);
+  removeMetric(offers_declined);
+  removeMetric(offers_rescinded);
 
   foreachvalue (const Counter& counter, terminal_task_states) {
-    process::metrics::remove(counter);
+    removeMetric(counter);
   }
 
   foreachvalue (const PushGauge& gauge, active_task_states) {
-    process::metrics::remove(gauge);
+    removeMetric(gauge);
   }
 
   process::metrics::remove(operations);
   foreachvalue (const Counter& counter, operation_types) {
-    process::metrics::remove(counter);
+    removeMetric(counter);
   }
 }
 
@@ -753,12 +755,122 @@ string getFrameworkMetricPrefix(const FrameworkInfo& frameworkInfo)
 }
 
 
+template <typename T>
+void FrameworkMetrics::addMetric(const T& metric)  {
+  if (publishPerFrameworkMetrics) {
+    process::metrics::add(metric);
+  }
+}
+
+
+template <typename T>
+void FrameworkMetrics::removeMetric(const T& metric)  {
+  if (publishPerFrameworkMetrics) {
+    process::metrics::remove(metric);
+  }
+}
+
+
 void FrameworkMetrics::incrementEvent(const scheduler::Event& event)
 {
-  CHECK(event_types.contains(event.type()));
+  ++CHECK_NOTNONE(event_types.get(event.type()));
+  ++events;
+}
 
-  event_types.get(event.type()).get()++;
-  events++;
+
+void FrameworkMetrics::incrementEvent(
+    const FrameworkErrorMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::ERROR));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const ExitedExecutorMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::FAILURE));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const LostSlaveMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::FAILURE));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const InverseOffersMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::INVERSE_OFFERS));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const ExecutorToFrameworkMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::MESSAGE));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const ResourceOffersMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::OFFERS));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const RescindResourceOfferMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::RESCIND));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const RescindInverseOfferMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::RESCIND_INVERSE_OFFER));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const FrameworkRegisteredMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::SUBSCRIBED));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const FrameworkReregisteredMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::SUBSCRIBED));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const StatusUpdateMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::UPDATE));
+  ++events;
+}
+
+
+void FrameworkMetrics::incrementEvent(
+    const UpdateOperationStatusMessage& message)
+{
+  ++CHECK_NOTNONE(event_types.get(scheduler::Event::UPDATE_OPERATION_STATUS));
+  ++events;
 }
 
 } // namespace master {

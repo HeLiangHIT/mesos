@@ -754,16 +754,23 @@ void Master::initialize()
     }
   }
 
+  // Initialize the allocator options.
+  mesos::allocator::Options options;
+
+  options.allocationInterval = flags.allocation_interval;
+  options.fairnessExcludeResourceNames =
+    flags.fair_sharing_excluded_resource_names;
+  options.filterGpuResources = flags.filter_gpu_resources;
+  options.domain = flags.domain;
+  options.minAllocatableResources = CHECK_NOTERROR(minAllocatableResources);
+  options.maxCompletedFrameworks = flags.max_completed_frameworks;
+  options.publishPerFrameworkMetrics = flags.publish_per_framework_metrics;
+
   // Initialize the allocator.
   allocator->initialize(
-      flags.allocation_interval,
+      options,
       defer(self(), &Master::offer, lambda::_1, lambda::_2),
-      defer(self(), &Master::inverseOffer, lambda::_1, lambda::_2),
-      flags.fair_sharing_excluded_resource_names,
-      flags.filter_gpu_resources,
-      flags.domain,
-      CHECK_NOTERROR(minAllocatableResources),
-      flags.max_completed_frameworks);
+      defer(self(), &Master::inverseOffer, lambda::_1, lambda::_2));
 
   // Parse the whitelist. Passing Allocator::updateWhitelist()
   // callback is safe because we shut down the whitelistWatcher in
@@ -909,7 +916,10 @@ void Master::initialize()
         [this](const process::http::Request& request,
                const Option<Principal>& principal) {
           logRequest(request);
-          return http.frameworks(request, principal);
+          return http.frameworks(request, principal)
+            .onReady([request](const process::http::Response& response) {
+              logResponse(request, response);
+            });
         });
   route("/flags",
         READONLY_HTTP_AUTHENTICATION_REALM,
@@ -937,16 +947,6 @@ void Master::initialize()
           logRequest(request);
           return http.reserve(request, principal);
         });
-  // TODO(ijimenez): Remove this endpoint at the end of the
-  // deprecation cycle on 0.26.
-  route("/roles.json",
-        READONLY_HTTP_AUTHENTICATION_REALM,
-        Http::ROLES_HELP(),
-        [this](const process::http::Request& request,
-               const Option<Principal>& principal) {
-          logRequest(request);
-          return http.roles(request, principal);
-        });
   route("/roles",
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::ROLES_HELP(),
@@ -969,17 +969,10 @@ void Master::initialize()
         [this](const process::http::Request& request,
                const Option<Principal>& principal) {
           logRequest(request);
-          return http.slaves(request, principal);
-        });
-  // TODO(ijimenez): Remove this endpoint at the end of the
-  // deprecation cycle on 0.26.
-  route("/state.json",
-        READONLY_HTTP_AUTHENTICATION_REALM,
-        Http::STATE_HELP(),
-        [this](const process::http::Request& request,
-               const Option<Principal>& principal) {
-          logRequest(request);
-          return http.state(request, principal);
+          return http.slaves(request, principal)
+            .onReady([request](const process::http::Response& response) {
+              logResponse(request, response);
+            });
         });
   route("/state",
         READONLY_HTTP_AUTHENTICATION_REALM,
@@ -987,7 +980,10 @@ void Master::initialize()
         [this](const process::http::Request& request,
                const Option<Principal>& principal) {
           logRequest(request);
-          return http.state(request, principal);
+          return http.state(request, principal)
+            .onReady([request](const process::http::Response& response) {
+              logResponse(request, response);
+            });
         });
   route("/state-summary",
         READONLY_HTTP_AUTHENTICATION_REALM,
@@ -995,17 +991,10 @@ void Master::initialize()
         [this](const process::http::Request& request,
                const Option<Principal>& principal) {
           logRequest(request);
-          return http.stateSummary(request, principal);
-        });
-  // TODO(ijimenez): Remove this endpoint at the end of the
-  // deprecation cycle.
-  route("/tasks.json",
-        READONLY_HTTP_AUTHENTICATION_REALM,
-        Http::TASKS_HELP(),
-        [this](const process::http::Request& request,
-               const Option<Principal>& principal) {
-          logRequest(request);
-          return http.tasks(request, principal);
+          return http.stateSummary(request, principal)
+            .onReady([request](const process::http::Response& response) {
+              logResponse(request, response);
+            });
         });
   route("/tasks",
         READONLY_HTTP_AUTHENTICATION_REALM,
@@ -1013,7 +1002,10 @@ void Master::initialize()
         [this](const process::http::Request& request,
                const Option<Principal>& principal) {
           logRequest(request);
-          return http.tasks(request, principal);
+          return http.tasks(request, principal)
+            .onReady([request](const process::http::Response& response) {
+              logResponse(request, response);
+            });
         });
   route("/maintenance/schedule",
         READWRITE_HTTP_AUTHENTICATION_REALM,
@@ -3433,6 +3425,49 @@ void Master::suppress(
 }
 
 
+vector<string> Master::filterRoles(
+    const Owned<ObjectApprovers>& approvers) const
+{
+  JSON::Object object;
+
+  // Compute the role names to return results for. When an explicit
+  // role whitelist has been configured, we use that list of names.
+  // When using implicit roles, the right behavior is a bit more
+  // subtle. There are no constraints on possible role names, so we
+  // instead list all the "interesting" roles: all roles with one or
+  // more registered frameworks, and all roles with a non-default
+  // weight or quota.
+  //
+  // NOTE: we use a `std::set` to store the role names to ensure a
+  // deterministic output order.
+  set<string> roleList;
+  if (roleWhitelist.isSome()) {
+    const hashset<string>& whitelist = roleWhitelist.get();
+    roleList.insert(whitelist.begin(), whitelist.end());
+  } else {
+    hashset<string> roles = this->roles.keys();
+    roleList.insert(roles.begin(), roles.end());
+
+    hashset<string> weights = this->weights.keys();
+    roleList.insert(weights.begin(), weights.end());
+
+    hashset<string> quotas = this->quotas.keys();
+    roleList.insert(quotas.begin(), quotas.end());
+  }
+
+  vector<string> filteredRoleList;
+  filteredRoleList.reserve(roleList.size());
+
+  foreach (const string& role, roleList) {
+    if (approvers->approved<VIEW_ROLE>(role)) {
+      filteredRoleList.push_back(role);
+    }
+  }
+
+  return filteredRoleList;
+}
+
+
 bool Master::isWhitelistedRole(const string& name) const
 {
   if (roleWhitelist.isNone()) {
@@ -5407,11 +5442,11 @@ void Master::_accept(
 
             if (HookManager::hooksAvailable()) {
               // Set labels retrieved from label-decorator hooks.
-              message.mutable_task()->mutable_labels()->CopyFrom(
+              *message.mutable_task()->mutable_labels() =
                   HookManager::masterLaunchTaskLabelDecorator(
                       task,
                       framework->info,
-                      slave->info));
+                      slave->info);
             }
 
             // If the agent does not support reservation refinement, downgrade
@@ -5625,11 +5660,11 @@ void Master::_accept(
 
           if (HookManager::hooksAvailable()) {
             // Set labels retrieved from label-decorator hooks.
-            task.mutable_labels()->CopyFrom(
+            *task.mutable_labels() =
                 HookManager::masterLaunchTaskLabelDecorator(
                     task,
                     framework->info,
-                    slave->info));
+                    slave->info);
           }
         }
 
@@ -5835,7 +5870,8 @@ void Master::decline(
   CHECK_NOTNULL(framework);
 
   LOG(INFO) << "Processing DECLINE call for offers: " << decline.offer_ids()
-            << " for framework " << *framework;
+            << " for framework " << *framework << " with "
+            << decline.filters().refuse_seconds() << " seconds filter";
 
   ++metrics->messages_decline_offers;
 
@@ -9258,8 +9294,9 @@ void Master::offer(
     const FrameworkID& frameworkId,
     const hashmap<string, hashmap<SlaveID, Resources>>& resources)
 {
-  if (!frameworks.registered.contains(frameworkId) ||
-      !frameworks.registered[frameworkId]->active()) {
+  Framework* framework = getFramework(frameworkId);
+
+  if (framework == nullptr || !framework->active()) {
     LOG(WARNING) << "Master returning resources offered to framework "
                  << frameworkId << " because the framework"
                  << " has terminated or is inactive";
@@ -9274,14 +9311,20 @@ void Master::offer(
     return;
   }
 
-  Framework* framework = CHECK_NOTNULL(frameworks.registered.at(frameworkId));
+  size_t offersEstimate = 0u;
+  foreachvalue (const auto& agents, resources) {
+    offersEstimate += agents.size();
+  }
 
   // Each offer we create is tied to a single agent
   // and a single allocation role.
   ResourceOffersMessage message;
+  message.mutable_offers()->Reserve(offersEstimate);
+  message.mutable_pids()->Reserve(offersEstimate);
 
   // We keep track of the offer IDs so that we can log them.
   vector<OfferID> offerIds;
+  offerIds.reserve(offersEstimate);
 
   foreachkey (const string& role, resources) {
     foreachpair (const SlaveID& slaveId,
@@ -9395,11 +9438,14 @@ void Master::offer(
       // offers so that frameworks do not see this resource. This is a
       // short term workaround. Revisit this once we resolve MESOS-1654.
       Offer offer_ = *offer;
-      offer_.clear_resources();
 
-      foreach (const Resource& resource, offered) {
-        if (resource.name() != "ephemeral_ports") {
-          offer_.add_resources()->CopyFrom(resource);
+      for (int i = 0; i < offer_.resources_size();) {
+        if (offer_.resources(i).name() == "ephemeral_ports") {
+          offer_.mutable_resources()->SwapElements(
+              i, offer_.resources_size() - 1);
+          offer_.mutable_resources()->RemoveLast();
+        } else {
+          ++i;
         }
       }
 
@@ -9425,16 +9471,16 @@ void Master::offer(
             offer_.mutable_resources(), PRE_RESERVATION_REFINEMENT);
       }
 
-      // Add the offer *AND* the corresponding slave's PID.
-      message.add_offers()->MergeFrom(offer_);
-      message.add_pids(slave->pid);
-
-      offerIds.push_back(offer_.id());
-
       VLOG(2) << "Sending offer " << offer_.id()
               << " containing resources " << offered
               << " on agent " << *slave
               << " to framework " << *framework;
+
+      offerIds.push_back(offer_.id());
+
+      // Add the offer *AND* the corresponding slave's PID.
+      *message.add_offers() = std::move(offer_);
+      message.add_pids(slave->pid);
     }
   }
 
@@ -9593,7 +9639,7 @@ void Master::authenticate(const UPID& from, const UPID& pid)
   //       about this discrepancy via ping messages so that it can
   //       reregister.
 
-  authenticated.erase(pid);
+  bool erased = authenticated.erase(pid) > 0;
 
   if (authenticator.isNone()) {
     // The default authenticator is CRAM-MD5 rather than none.
@@ -9616,22 +9662,20 @@ void Master::authenticate(const UPID& from, const UPID& pid)
     return;
   }
 
+  // If a new authentication is occurring for a client that already
+  // has an authentication in progress, we discard the old one
+  // (since the client is no longer interested in it) and
+  // immediately proceed with the new authentication.
   if (authenticating.contains(pid)) {
-    LOG(INFO) << "Queuing up authentication request from " << pid
-              << " because authentication is still in progress";
+    authenticating.at(pid).discard();
+    authenticating.erase(pid);
 
-    // Try to cancel the in progress authentication by discarding the
-    // future.
-    authenticating[pid].discard();
-
-    // Retry after the current authenticator session finishes.
-    authenticating[pid]
-      .onAny(defer(self(), &Self::authenticate, from, pid));
-
-    return;
+    LOG(INFO) << "Re-authenticating " << pid << ";"
+              << " discarding outstanding authentication";
+  } else {
+    LOG(INFO) << "Authenticating " << pid
+              << (erased ? "; clearing previous authentication" : "");
   }
-
-  LOG(INFO) << "Authenticating " << pid;
 
   // Start authentication.
   const Future<Option<string>> future = authenticator.get()->authenticate(from);
@@ -9639,10 +9683,10 @@ void Master::authenticate(const UPID& from, const UPID& pid)
   // Save our state.
   authenticating[pid] = future;
 
-  future.onAny(defer(self(), &Self::_authenticate, pid, lambda::_1));
+  future.onAny(defer(self(), &Self::_authenticate, pid, future));
 
   // Don't wait for authentication to complete forever.
-  delay(Seconds(5),
+  delay(flags.authentication_v0_timeout,
         self(),
         &Self::authenticationTimeout,
         future);
@@ -9653,6 +9697,13 @@ void Master::_authenticate(
     const UPID& pid,
     const Future<Option<string>>& future)
 {
+  // Ignore stale authentication results (if the authentication
+  // future has been overwritten).
+  if (authenticating.get(pid) != future) {
+    LOG(INFO) << "Ignoring stale authentication result of " << pid;
+    return;
+  }
+
   if (future.isReady() && future->isSome()) {
     LOG(INFO) << "Successfully authenticated principal '" << future->get()
               << "' at " << pid;
@@ -9668,7 +9719,6 @@ void Master::_authenticate(
     LOG(INFO) << "Authentication of " << pid << " was discarded";
   }
 
-  CHECK(authenticating.contains(pid));
   authenticating.erase(pid);
 }
 
@@ -10852,10 +10902,6 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
   // TODO(bmahler): Check that we're not transitioning from
   // TASK_UNREACHABLE to another state.
   if (!protobuf::isTerminalState(task->state())) {
-    if (status.state() != task->state()) {
-      sendSubscribersUpdate = true;
-    }
-
     if (task->state() != updateState && framework != nullptr) {
       // When we observe a transition away from a non-terminal state,
       // decrement the relevant metric.
@@ -10878,6 +10924,9 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
   if (task->statuses_size() > 0 &&
       task->statuses(task->statuses_size() - 1).state() == status.state()) {
     task->mutable_statuses()->RemoveLast();
+  } else {
+    // Send a `TASK_UPDATED` event for every new task state.
+    sendSubscribersUpdate = true;
   }
   task->add_statuses()->CopyFrom(status);
 
@@ -11503,9 +11552,7 @@ bool Master::isCompletedFramework(const FrameworkID& frameworkId)
 // TODO(bmahler): Consider killing this.
 Framework* Master::getFramework(const FrameworkID& frameworkId) const
 {
-  return frameworks.registered.contains(frameworkId)
-           ? frameworks.registered.at(frameworkId)
-           : nullptr;
+  return frameworks.registered.get(frameworkId).getOrElse(nullptr);
 }
 
 
@@ -11558,7 +11605,7 @@ SlaveID Master::newSlaveId()
 }
 
 
-double Master::_slaves_connected()
+double Master::_const_slaves_connected() const
 {
   double count = 0.0;
   foreachvalue (Slave* slave, slaves.registered) {
@@ -11569,8 +11616,13 @@ double Master::_slaves_connected()
   return count;
 }
 
+double Master::_slaves_connected()
+{
+  return _const_slaves_connected();
+}
 
-double Master::_slaves_disconnected()
+
+double Master::_const_slaves_disconnected() const
 {
   double count = 0.0;
   foreachvalue (Slave* slave, slaves.registered) {
@@ -11582,7 +11634,13 @@ double Master::_slaves_disconnected()
 }
 
 
-double Master::_slaves_active()
+double Master::_slaves_disconnected()
+{
+  return _const_slaves_disconnected();
+}
+
+
+double Master::_const_slaves_active() const
 {
   double count = 0.0;
   foreachvalue (Slave* slave, slaves.registered) {
@@ -11594,7 +11652,13 @@ double Master::_slaves_active()
 }
 
 
-double Master::_slaves_inactive()
+double Master::_slaves_active()
+{
+  return _const_slaves_active();
+}
+
+
+double Master::_const_slaves_inactive() const
 {
   double count = 0.0;
   foreachvalue (Slave* slave, slaves.registered) {
@@ -11606,9 +11670,21 @@ double Master::_slaves_inactive()
 }
 
 
-double Master::_slaves_unreachable()
+double Master::_slaves_inactive()
+{
+  return _const_slaves_inactive();
+}
+
+
+double Master::_const_slaves_unreachable() const
 {
   return static_cast<double>(slaves.unreachable.size());
+}
+
+
+double Master::_slaves_unreachable()
+{
+  return _const_slaves_unreachable();
 }
 
 

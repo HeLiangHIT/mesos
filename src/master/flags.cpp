@@ -231,6 +231,16 @@ mesos::internal::master::Flags::Flags()
       "If `false`, unauthenticated agents are also allowed to register.",
       false);
 
+  // TODO(bmahler): Ideally, we remove this v0-style authentication
+  // in favor of just using HTTP authentication at the libprocess
+  // layer.
+  add(&Flags::authentication_v0_timeout,
+      "authentication_v0_timeout",
+      "The timeout within which an authentication is expected\n"
+      "to complete against a v0 framework or agent. This does not\n"
+      "apply to the v0 or v1 HTTP APIs.",
+      DEFAULT_AUTHENTICATION_V0_TIMEOUT);
+
   // TODO(zhitao): Remove deprecated `--authenticate_http` flag name after
   // the deprecation cycle which started with Mesos 1.0.
   add(&Flags::authenticate_http_readwrite,
@@ -672,6 +682,14 @@ mesos::internal::master::Flags::Flags()
       "require_agent_domain",
       "If true, only agents with a configured domain can register.\n",
       false);
+
+  add(&Flags::publish_per_framework_metrics,
+      "publish_per_framework_metrics",
+      "If true, an extensive set of metrics for each active framework will\n"
+      "be published. These metrics are useful for understanding cluster\n"
+      "behavior, but can be overwhelming for very large numbers of\n"
+      "frameworks.",
+      true);
 
   add(&Flags::domain,
       "domain",

@@ -116,7 +116,7 @@ private:
   // Returns the weight associated with the node. If no weight has
   // been configured for the node's path, the default weight (1.0) is
   // returned.
-  double findWeight(const Node* node) const;
+  double getWeight(const Node* node) const;
 
   // Returns the client associated with the given path. Returns
   // nullptr if the path is not found or if the path identifies an
@@ -169,14 +169,13 @@ private:
     // identities of resources and not quantities.
     Resources scalarQuantities;
 
-    // We also store a map version of `scalarQuantities`, mapping
-    // the `Resource::name` to aggregated scalar. This improves the
-    // performance of calculating shares. See MESOS-4694.
+    // To improve the performance of calculating shares, we store
+    // a redundant but more efficient version of `scalarQuantities`.
+    // See MESOS-4694.
     //
-    // TODO(bmahler): Ideally we do not store `scalarQuantities`
-    // redundantly here, investigate performance improvements to
-    // `Resources` to make this unnecessary.
-    hashmap<std::string, Value::Scalar> totals;
+    // TODO(bmahler): Can we remove `scalarQuantities` in favor of
+    // using this type whenever scalar quantities are needed?
+    ScalarResourceQuantities totals;
   } total_;
 
   // Metrics are optionally exposed by the sorter.
@@ -243,6 +242,12 @@ struct DRFSorter::Node
   std::string path;
 
   double share;
+
+  // Cached weight of the node, access this through `getWeight()`.
+  // The value is cached by `getWeight()` and updated by
+  // `updateWeight()`. Marked mutable since the caching writes
+  // to this are logically const.
+  mutable Option<double> weight;
 
   Kind kind;
 
@@ -430,14 +435,13 @@ struct DRFSorter::Node
     // the corresponding resource. See notes above.
     Resources scalarQuantities;
 
-    // We also store a map version of `scalarQuantities`, mapping
-    // the `Resource::name` to aggregated scalar. This improves the
-    // performance of calculating shares. See MESOS-4694.
+    // To improve the performance of calculating shares, we store
+    // a redundant but more efficient version of `scalarQuantities`.
+    // See MESOS-4694.
     //
-    // TODO(bmahler): Ideally we do not store `scalarQuantities`
-    // redundantly here, investigate performance improvements to
-    // `Resources` to make this unnecessary.
-    hashmap<std::string, Value::Scalar> totals;
+    // TODO(bmahler): Can we remove `scalarQuantities` in favor of
+    // using this type whenever scalar quantities are needed?
+    ScalarResourceQuantities totals;
   } allocation;
 
   // Compares two nodes according to DRF share.

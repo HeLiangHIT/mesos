@@ -60,9 +60,7 @@ namespace validation {
 namespace master {
 namespace call {
 
-Option<Error> validate(
-    const mesos::master::Call& call,
-    const Option<Principal>& principal)
+Option<Error> validate(const mesos::master::Call& call)
 {
   if (!call.IsInitialized()) {
     return Error("Not initialized: " + call.InitializationErrorString());
@@ -243,12 +241,22 @@ Option<Error> validate(
     case mesos::master::Call::GET_QUOTA:
       return None();
 
+    case mesos::master::Call::UPDATE_QUOTA:
+      if (!call.has_update_quota()) {
+        return Error("Expecting 'update_quota' to be present");
+      }
+      return None();
+
+    // TODO(bmahler): Add this to a deprecated call section
+    // at the bottom once deprecated by `UPDATE_QUOTA`.
     case mesos::master::Call::SET_QUOTA:
       if (!call.has_set_quota()) {
         return Error("Expecting 'set_quota' to be present");
       }
       return None();
 
+    // TODO(bmahler): Add this to a deprecated call section
+    // at the bottom once deprecated by `UPDATE_QUOTA`.
     case mesos::master::Call::REMOVE_QUOTA:
       if (!call.has_remove_quota()) {
         return Error("Expecting 'remove_quota' to be present");

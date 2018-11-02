@@ -114,7 +114,23 @@ def _create_module(module_name):
             EXTRA_OBJECTS.append(libev)
         else:
             EXTRA_OBJECTS.append('-lev')
+    else:
+        libevent_dir = os.path.join('3rdparty', 'libevent-2.0.22-stable')
+        libevent_dir = os.path.join(abs_top_builddir, libevent_dir, '.libs')
 
+        libevent_core = os.path.join(libevent_dir, 'libevent_core.a')
+
+        # Check if a bundled version of libevent was built.
+        if os.path.exists(libevent_core):
+            EXTRA_OBJECTS.append(libevent_core)
+            EXTRA_OBJECTS.append(os.path.join(libevent_dir, 'libevent_pthreads.a'))
+            if '@ENABLE_SSL_TRUE@' == '':
+                EXTRA_OBJECTS.append(os.path.join(libevent_dir, 'libevent_openssl.a'))
+        else:
+            EXTRA_OBJECTS.append('-levent_core')
+            EXTRA_OBJECTS.append('-levent_pthreads')
+            if '@ENABLE_SSL_TRUE@' == '':
+                EXTRA_OBJECTS.append(-levent_openssl)
 
     # For gperftools, we need to check for the presence of libprofiler.a, since
     # it is possible to disable perftools inside libprocess.

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -32,7 +32,9 @@ import re
 import ssl
 import subprocess
 import sys
-import urllib2
+import urllib.request
+import urllib.error
+import urllib.parse
 
 
 REVIEWBOARD_REVIEW_URL = 'https://reviews.apache.org/r'
@@ -83,7 +85,7 @@ def patch_url(options):
         return '{base}/{review}/diff/raw/'.format(
             base=REVIEWBOARD_REVIEW_URL,
             review=options['review_id'])
-    elif options['github']:
+    if options['github']:
         return '{base}/{patch}.patch'.format(
             base=GITHUB_PATCH_URL,
             patch=options['github'])
@@ -92,16 +94,15 @@ def patch_url(options):
 
 def url_to_json(url):
     """Performs HTTP request and returns JSON-ified response."""
-    json_str = urllib2.urlopen(url)
-    return json.loads(json_str.read())
-
+    json_str = urllib.request.urlopen(url).read().decode('utf-8')
+    return json.loads(json_str)
 
 def extract_review_id(url):
     """Extracts review ID from Review Board URL."""
     review_id = re.search(REVIEWBOARD_API_URL + r'/(\d+)/', url)
     if review_id:
         return review_id.group(1)
-
+    return ''
 
 def review_chain(review_id):
     """Returns a parent review chain for a given review ID."""
@@ -121,7 +122,7 @@ def review_chain(review_id):
         sys.stderr.write('Error: Review {review} has more than'
                          ' one parent'.format(review=review_id))
         sys.exit(1)
-    elif len(parent) == 0:
+    elif not parent:
         return [(review_id, json_obj.get('review_request').get('summary'))]
     else:
         # The review has exactly one parent.
@@ -130,10 +131,9 @@ def review_chain(review_id):
         review = (review_id, json_obj.get('review_request').get('summary'))
         if review not in review_list:
             return review_list + [review]
-        else:
-            sys.stderr.write('Found a circular dependency in the chain starting'
-                             ' at {review}\n'.format(review=review_id))
-            sys.exit(1)
+        sys.stderr.write('Found a circular dependency in the chain starting'
+                         ' at {review}\n'.format(review=review_id))
+        sys.exit(1)
 
 
 def shell(command, dry_run):
@@ -142,7 +142,7 @@ def shell(command, dry_run):
     is set (in which case it just prints the command).
     """
     if dry_run:
-        print command
+        print(command)
         return
 
     error_code = subprocess.call(command, stderr=subprocess.STDOUT, shell=True)
@@ -195,7 +195,7 @@ def fetch_patch(options):
     # pylint: disable=unexpected-keyword-arg
     if platform.system() == 'Windows':
         # This call requires Python >= 2.7.9.
-        response = urllib2.urlopen(
+        response = urllib.request.urlopen(
             patch_url(options),
             context=ssl_create_default_context())
 
@@ -282,10 +282,10 @@ def commit_patch(options):
                 True)
         message.write(data['message'])
 
-    cmd = u'git commit' \
-          u' --author \"{author}\"' \
-          u' {amend} -aF \"{message}\"' \
-          u' {verify}'.format(
+    cmd = 'git commit' \
+          ' --author \"{author}\"' \
+          ' {amend} -aF \"{message}\"' \
+          ' {verify}'.format(
               author=quote(data['author']),
               amend=amend,
               message=message_file,
@@ -301,10 +301,9 @@ def patch_data(options):
     """
     if options['review_id']:
         return reviewboard_data(options)
-    elif options['github']:
+    if options['github']:
         return github_data(options)
-    else:
-        return None
+    return None
 
 
 def get_author(patch):
@@ -357,7 +356,7 @@ def reviewboard_data(options):
         message_data.append(review.get('description'))
     message_data.append('Review: {review_url}'.format(review_url=url))
 
-    author = u'{author} <{email}>'.format(
+    author = '{author} <{email}>'.format(
         author=user.get('fullname'),
         email=user.get('email'))
     message = '\n\n'.join(message_data)
@@ -443,11 +442,6 @@ def main():
     Main function to apply reviews.
     """
     options = parse_options()
-
-    # TODO(ArmandGrillet): Remove this when we'll have switched to Python 3.
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    script_path = os.path.join(dir_path, 'check-python3.py')
-    subprocess.call('python ' + script_path, shell=True, cwd=dir_path)
 
     if options['review_id']:
         reviewboard(options)

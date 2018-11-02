@@ -24,8 +24,6 @@
 #include <string>
 #include <vector>
 
-#include <boost/circular_buffer.hpp>
-
 #include <mesos/attributes.hpp>
 #include <mesos/resources.hpp>
 #include <mesos/type_utils.hpp>
@@ -57,6 +55,7 @@
 
 #include <stout/boundedhashmap.hpp>
 #include <stout/bytes.hpp>
+#include <stout/circular_buffer.hpp>
 #include <stout/linkedhashmap.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
@@ -492,7 +491,8 @@ public:
   // not receive a ping.
   void pingTimeout(process::Future<Option<MasterInfo>> future);
 
-  void authenticate();
+  // Made virtual for testing purpose.
+  virtual void authenticate(Duration minTimeout, Duration maxTimeout);
 
   // Helper routines to lookup a framework/executor.
   Framework* getFramework(const FrameworkID& frameworkId) const;
@@ -595,8 +595,7 @@ private:
   Slave(const Slave&) = delete;
   Slave& operator=(const Slave&) = delete;
 
-  void _authenticate();
-  void authenticationTimeout(process::Future<bool> future);
+  void _authenticate(Duration currentMinTimeout, Duration currentMaxTimeout);
 
   // Process creation of persistent volumes (for CREATE) and/or deletion
   // of persistent volumes (for DESTROY) as a part of handling
@@ -799,9 +798,6 @@ private:
 
   // Indicates if a new authentication attempt should be enforced.
   bool reauthenticate;
-
-  // Indicates the number of failed authentication attempts.
-  uint64_t failedAuthentications;
 
   // Maximum age of executor directories. Will be recomputed
   // periodically every flags.disk_watch_interval.
@@ -1044,9 +1040,9 @@ public:
 
   // Terminated and updates acked.
   // NOTE: We use a shared pointer for Task because clang doesn't like
-  // Boost's implementation of circular_buffer with Task (Boost
-  // attempts to do some memset's which are unsafe).
-  boost::circular_buffer<std::shared_ptr<Task>> completedTasks;
+  // stout's implementation of circular_buffer with Task (the Boost code
+  // used internally by stout attempts to do some memset's which are unsafe).
+  circular_buffer<std::shared_ptr<Task>> completedTasks;
 
   // When the slave initiates a destroy of the container, we expect a
   // termination to occur. The 'pendingTermation' indicates why the
@@ -1174,7 +1170,7 @@ public:
   // Current running executors.
   hashmap<ExecutorID, Executor*> executors;
 
-  boost::circular_buffer<process::Owned<Executor>> completedExecutors;
+  circular_buffer<process::Owned<Executor>> completedExecutors;
 
 private:
   Framework(const Framework&) = delete;
@@ -1187,7 +1183,7 @@ struct ResourceProvider
   ResourceProvider(
       const ResourceProviderInfo& _info,
       const Resources& _totalResources,
-      const UUID& _resourceVersion)
+      const Option<UUID>& _resourceVersion)
     : info(_info),
       totalResources(_totalResources),
       resourceVersion(_resourceVersion) {}
@@ -1209,7 +1205,7 @@ struct ResourceProvider
   // different resource version UUID than that it maintains, because
   // this means the operation is operating on resources that might
   // have already been invalidated.
-  UUID resourceVersion;
+  Option<UUID> resourceVersion;
 
   // Pending operations or terminal operations that have
   // unacknowledged status updates.

@@ -261,22 +261,7 @@ Future<Nothing> NvidiaGpuIsolatorProcess::recover(
 
     const string cgroup = path::join(flags.cgroups_root, containerId.value());
 
-    Try<bool> exists = cgroups::exists(hierarchy, cgroup);
-    if (exists.isError()) {
-      foreachvalue (Info* info, infos) {
-        delete info;
-      }
-
-      infos.clear();
-
-      return Failure(
-          "Failed to check the existence of the cgroup "
-          "'" + cgroup + "' in hierarchy '" + hierarchy + "' "
-          "for container " + stringify(containerId) +
-          ": " + exists.error());
-    }
-
-    if (!exists.get()) {
+    if (!cgroups::exists(hierarchy, cgroup)) {
       // This may occur if the executor has exited and the isolator
       // has destroyed the cgroup but the slave dies before noticing
       // this. This will be detected when the containerizer tries to
@@ -421,11 +406,6 @@ Future<Option<ContainerLaunchInfo>> NvidiaGpuIsolatorProcess::_prepare(
     mount->set_source(volume.HOST_PATH());
     mount->set_target(target);
     mount->set_flags(MS_RDONLY | MS_BIND | MS_REC);
-
-    // NOTE: MS_REMOUNT is needed to make a bind mount read only.
-    mount = launchInfo.add_mounts();
-    mount->set_target(target);
-    mount->set_flags(MS_RDONLY | MS_REMOUNT | MS_BIND | MS_REC);
   }
 
   return launchInfo;

@@ -68,6 +68,7 @@ public:
   Option<std::string> weights;
   bool authenticate_frameworks;
   bool authenticate_agents;
+  Duration authentication_v0_timeout;
   bool authenticate_http_readonly;
   bool authenticate_http_readwrite;
   bool authenticate_http_frameworks;
@@ -98,6 +99,7 @@ public:
   Duration registry_max_agent_age;
   size_t registry_max_agent_count;
   bool require_agent_domain;
+  bool publish_per_framework_metrics;
   Option<DomainInfo> domain;
 
   // The following flags are executable specific (e.g., since we only

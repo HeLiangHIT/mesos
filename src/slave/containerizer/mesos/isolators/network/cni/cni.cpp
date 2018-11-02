@@ -44,6 +44,16 @@
 #include "linux/fs.hpp"
 #include "linux/ns.hpp"
 
+#include "slave/state.hpp"
+
+// NOTE: The namespace wrapper prevents symbol collisions.
+// <linux/if_link.h> exports `struct net` that conflicts with
+// `namespace net` from stout library. This section must be
+// the last `#include` in the file.
+namespace netlink {
+#include <linux/if_link.h>
+} // namespace netlink {
+
 namespace io = process::io;
 namespace paths = mesos::internal::slave::cni::paths;
 namespace spec = mesos::internal::slave::cni::spec;
@@ -279,8 +289,7 @@ Try<Isolator*> NetworkCniIsolatorProcess::create(const Flags& flags)
           networkConfigs.get(),
           cniDNSMap,
           defaultCniDNS,
-          rootDir.get(),
-          flags.network_cni_plugins_dir.get())));
+          rootDir.get())));
 }
 
 
@@ -850,12 +859,11 @@ Future<Nothing> NetworkCniIsolatorProcess::isolate(
   // level or nested) wants to join non-host networks.
 
   // If the `network/cni` isolator is providing network isolation to a
-  // container its `rootDir` and `pluginDir` should always be set.
-  // These properties of the isolator will not be set only if the
-  // operator does not specify the '--network_cni_plugins_dir' and
-  // '--network_cni_config_dir' flags at agent startup.
+  // container its `rootDir` should always be set.  It will not be set
+  // only if the operator does not specify the
+  // '--network_cni_plugins_dir' and '--network_cni_config_dir' flags
+  // at agent startup.
   CHECK_SOME(rootDir);
-  CHECK_SOME(pluginDir);
 
   // NOTE: DEBUG container should not have Info struct. Thus if the
   // control reaches here, the container is not a DEBUG container.
@@ -1206,10 +1214,12 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
   }
 
   // Prepare environment variables for CNI plugin.
+  CHECK_SOME(flags.network_cni_plugins_dir);
+
   map<string, string> environment;
   environment["CNI_COMMAND"] = "ADD";
   environment["CNI_CONTAINERID"] = stringify(containerId);
-  environment["CNI_PATH"] = pluginDir.get();
+  environment["CNI_PATH"] = flags.network_cni_plugins_dir.get();
   environment["CNI_IFNAME"] = containerNetwork.ifName;
   environment["CNI_NETNS"] = netNsHandle;
 
@@ -1254,8 +1264,8 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
 
   // Invoke the CNI plugin.
   //
-  // NOTE: We want to execute only the plugin found in the `pluginDir`
-  // path specified by the operator.
+  // NOTE: We want to execute only the plugin found in the
+  // `flags.network_cni_plugins_dir` path specified by the operator.
   Result<JSON::String> _plugin = networkConfigJSON->at<JSON::String>("type");
   if (!_plugin.isSome()) {
     return Failure(
@@ -1267,7 +1277,7 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
 
   Option<string> plugin = os::which(
       _plugin->value,
-      pluginDir.get());
+      flags.network_cni_plugins_dir.get());
 
   if (plugin.isNone()) {
     return Failure(
@@ -1283,13 +1293,14 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
       containerId,
       networkName);
 
-  Try<Nothing> write =
-    os::write(networkConfigPath, stringify(networkConfigJSON.get()));
+  Try<Nothing> checkpoint = slave::state::checkpoint(
+      networkConfigPath,
+      stringify(networkConfigJSON.get()));
 
-  if (write.isError()) {
+  if (checkpoint.isError()) {
     return Failure(
         "Failed to checkpoint the CNI network configuration '" +
-        stringify(networkConfigJSON.get()) + "': " + write.error());
+        stringify(networkConfigJSON.get()) + "': " + checkpoint.error());
   }
 
   VLOG(1) << "Invoking CNI plugin '" << plugin.get()
@@ -1404,11 +1415,13 @@ Future<Nothing> NetworkCniIsolatorProcess::_attach(
       networkName,
       containerNetwork.ifName);
 
-  Try<Nothing> write = os::write(networkInfoPath, output.get());
-  if (write.isError()) {
+  Try<Nothing> checkpoint =
+    slave::state::checkpoint(networkInfoPath, output.get());
+
+  if (checkpoint.isError()) {
     return Failure(
         "Failed to checkpoint the output of CNI plugin '" +
-        output.get() + "': " + write.error());
+        output.get() + "': " + checkpoint.error());
   }
 
   containerNetwork.cniNetworkInfo = parse.get();
@@ -1480,6 +1493,99 @@ Future<ContainerStatus> NetworkCniIsolatorProcess::status(
   }
 
   return status;
+}
+
+
+Future<ResourceStatistics> NetworkCniIsolatorProcess::usage(
+    const ContainerID& containerId)
+{
+  // Don't expose networking metrics if this feature is disabled.
+  if (!flags.network_cni_metrics) {
+    return ResourceStatistics();
+  }
+
+  // NOTE: We don't keep an Info struct if the container is on the
+  // host network and has no image, or if during recovery, we found
+  // that the cleanup for this container is not required anymore
+  // (e.g., cleanup is done already, but the slave crashed and didn't
+  // realize that it's done).
+  if (!infos.contains(containerId)) {
+    return ResourceStatistics();
+  }
+
+  // Skip the container if there's no container network, e.g.
+  // container joins host network.
+  if (infos[containerId]->containerNetworks.empty()) {
+    return ResourceStatistics();
+  }
+
+  // If the `network/cni` isolator is providing network isolation to
+  // the container its `rootDir` should always be set.
+  CHECK_SOME(rootDir);
+
+  const string netns = paths::getNamespacePath(rootDir.get(), containerId);
+
+  // We collect networking statistics only for known interfaces.
+  hashmap<string, ContainerNetwork> containerNetworks =
+    infos[containerId]->containerNetworks;
+
+  hashset<string> ifNames;
+  foreachvalue (const ContainerNetwork& containerNetwork,
+                containerNetworks) {
+    ifNames.insert(containerNetwork.ifName);
+  }
+
+  // Call usageFunc with a custom network namespace in the separate thread.
+  lambda::function<Try<ResourceStatistics>()> usageFunc =
+    lambda::bind(&NetworkCniIsolatorProcess::_usage, ifNames);
+  return namespaceRunner.run(netns, "net", usageFunc);
+}
+
+
+Try<ResourceStatistics> NetworkCniIsolatorProcess::_usage(
+    const hashset<string> ifNames)
+{
+  ResourceStatistics result;
+
+  // TODO(urbanserj): To provide more stats insead of getifaddrs(3) we can add
+  // Netlink Protocol Library (libnl) as an optional external dependency.
+  struct ifaddrs* ifaddr = nullptr;
+  if (getifaddrs(&ifaddr) == -1) {
+    return ErrnoError();
+  }
+
+  for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+    // Skip unknown network interfaces.
+    if (ifa->ifa_name == nullptr || !ifNames.contains(ifa->ifa_name)) {
+      continue;
+    }
+    // Only interfaces with `AF_PACKET` family have link statistics.
+    if (ifa->ifa_addr->sa_family != AF_PACKET) {
+      continue;
+    }
+
+    struct netlink::rtnl_link_stats *stats =
+      (struct netlink::rtnl_link_stats *)ifa->ifa_data;
+
+    // TODO(urbanserj): Add support for multiple networking interfaces to
+    // ResourceStatistics and collect statistics per `ifa_name`.
+
+    // RX: Receive statistics.
+    result.set_net_rx_packets(result.net_rx_packets() + stats->rx_packets);
+    result.set_net_rx_bytes(result.net_rx_bytes() + stats->rx_bytes);
+    result.set_net_rx_errors(result.net_rx_errors() + stats->rx_errors);
+    result.set_net_rx_dropped(result.net_rx_dropped() + stats->rx_dropped);
+
+    // TX: Transmit statistics.
+    result.set_net_tx_packets(result.net_tx_packets() + stats->tx_packets);
+    result.set_net_tx_bytes(result.net_tx_bytes() + stats->tx_bytes);
+    result.set_net_tx_errors(result.net_tx_errors() + stats->tx_errors);
+    result.set_net_tx_dropped(result.net_tx_dropped() + stats->tx_dropped);
+  }
+
+  freeifaddrs(ifaddr);
+
+  return result;
 }
 
 
@@ -1565,14 +1671,16 @@ Future<Nothing> NetworkCniIsolatorProcess::_cleanup(
               << target << "' for container " << containerId;
   }
 
-  Try<Nothing> rmdir = os::rmdir(containerDir);
-  if (rmdir.isError()) {
-    return Failure(
-        "Failed to remove the container directory '" +
-        containerDir + "': " + rmdir.error());
-  }
+  if (os::exists(containerDir)) {
+    Try<Nothing> rmdir = os::rmdir(containerDir);
+    if (rmdir.isError()) {
+      return Failure(
+          "Failed to remove the container directory '" +
+          containerDir + "': " + rmdir.error());
+    }
 
-  LOG(INFO) << "Removed the container directory '" << containerDir << "'";
+    LOG(INFO) << "Removed the container directory '" << containerDir << "'";
+  }
 
   infos.erase(containerId);
 
@@ -1591,10 +1699,12 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
     infos[containerId]->containerNetworks[networkName];
 
   // Prepare environment variables for CNI plugin.
+  CHECK_SOME(flags.network_cni_plugins_dir);
+
   map<string, string> environment;
   environment["CNI_COMMAND"] = "DEL";
   environment["CNI_CONTAINERID"] = stringify(containerId);
-  environment["CNI_PATH"] = pluginDir.get();
+  environment["CNI_PATH"] = flags.network_cni_plugins_dir.get();
   environment["CNI_IFNAME"] = containerNetwork.ifName;
   environment["CNI_NETNS"] =
       paths::getNamespacePath(rootDir.get(), containerId);
@@ -1616,6 +1726,22 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
       containerId,
       networkName);
 
+  // There are two cases that the network config file might not exist
+  // when `detach` happens:
+  // (1) The container is destroyed when preparing. In that case, we
+  //     know that `attach` hasn't been called. Therefore, no need to
+  //     call `detach`.
+  // (2) The agent crashes when isolating, but before the network
+  //     config file is checkpointed. In that case, we also know that
+  //     CNI ADD command hasn't been called. Therefore, no need to
+  //     call `detach`.
+  if (!os::exists(networkConfigPath)) {
+    LOG(WARNING) << "Skip detach since network config file for container "
+                 << containerId << " and network name '" << networkName << "' "
+                 << "does not exist";
+    return Nothing();
+  }
+
   Try<JSON::Object> networkConfigJSON = getNetworkConfigJSON(
       networkName,
       networkConfigPath);
@@ -1636,11 +1762,11 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
 
   // Invoke the CNI plugin.
   //
-  // NOTE: We want to execute only the plugin found in the `pluginDir`
-  // path specified by the operator.
+  // NOTE: We want to execute only the plugin found in the
+  // `flags.network_cni_plugins_dir` path specified by the operator.
   Option<string> plugin = os::which(
       _plugin->value,
-      pluginDir.get());
+      flags.network_cni_plugins_dir.get());
 
   if (plugin.isNone()) {
     return Failure(
@@ -1805,27 +1931,32 @@ Try<JSON::Object> NetworkCniIsolatorProcess::getNetworkConfigJSON(
   }
 
   // Cache-miss.
-  Try<hashmap<string, string>> _networkConfigs = loadNetworkConfigs(
-      flags.network_cni_config_dir.get(),
-      flags.network_cni_plugins_dir.get());
+  if (rootDir.isSome()) {
+    CHECK_SOME(flags.network_cni_config_dir);
+    CHECK_SOME(flags.network_cni_plugins_dir);
 
-  if (_networkConfigs.isError()) {
-      return Error(
-          "Encountered error while loading CNI config during "
-          "a cache-miss for CNI network '" + network + "': " +
-          _networkConfigs.error());
-  }
+    Try<hashmap<string, string>> _networkConfigs = loadNetworkConfigs(
+        flags.network_cni_config_dir.get(),
+        flags.network_cni_plugins_dir.get());
 
-  networkConfigs = _networkConfigs.get();
+    if (_networkConfigs.isError()) {
+        return Error(
+            "Encountered error while loading CNI config during "
+            "a cache-miss for CNI network '" + network + "': " +
+            _networkConfigs.error());
+    }
 
-  // Do another search.
-  if (networkConfigs.contains(network)) {
-    // This is a best-effort retrieval of the CNI network config. So
-    // if it fails in this attempt just return the `Error` instead of
-    // trying to erase the network from cache. Deletion of the
-    // network, in case of an error, will happen on its own in the
-    // next attempt.
-    return getNetworkConfigJSON(network, networkConfigs[network]);
+    networkConfigs = _networkConfigs.get();
+
+    // Do another search.
+    if (networkConfigs.contains(network)) {
+      // This is a best-effort retrieval of the CNI network config. So
+      // if it fails in this attempt just return the `Error` instead of
+      // trying to erase the network from cache. Deletion of the
+      // network, in case of an error, will happen on its own in the
+      // next attempt.
+      return getNetworkConfigJSON(network, networkConfigs[network]);
+    }
   }
 
   return Error("Unknown CNI network '" + network + "'");
@@ -1958,7 +2089,8 @@ int NetworkCniIsolatorSetup::execute()
   // when we do the MS_RDONLY remount. To save the bother of reading
   // the mount table to find the flags to propagate, we just always
   // use the most restrictive flags here.
-  const int bindflags = MS_BIND | MS_NOEXEC | MS_NODEV | MS_NOSUID;
+  const unsigned bindflags = MS_BIND | MS_NOEXEC | MS_NODEV | MS_NOSUID |
+    (flags.bind_readonly ? MS_RDONLY : 0);
 
   foreachpair (const string& file, const string& source, files) {
     // Do the bind mount for network files in the host filesystem if
@@ -2013,20 +2145,6 @@ int NetworkCniIsolatorSetup::execute()
              << file << "': " << mount.error() << endl;
         return EXIT_FAILURE;
       }
-
-      if (flags.bind_readonly) {
-        mount = fs::mount(
-          source,
-          file,
-          None(),
-          MS_RDONLY | MS_REMOUNT | bindflags,
-          nullptr);
-        if (mount.isError()) {
-          cerr << "Failed to remount bind mount as readonly from '" << source
-               << "' to '" << file << "': " << mount.error() << endl;
-          return EXIT_FAILURE;
-        }
-      }
     }
 
     // Do the bind mount in the container filesystem.
@@ -2077,20 +2195,6 @@ int NetworkCniIsolatorSetup::execute()
              << target << "': " << mount.error() << endl;
         return EXIT_FAILURE;
       }
-
-      if (flags.bind_readonly) {
-        mount = fs::mount(
-          source,
-          target,
-          None(),
-          MS_RDONLY | MS_REMOUNT | bindflags,
-          nullptr);
-        if (mount.isError()) {
-          cerr << "Failed to remount bind mount as readonly from '" << source
-               << "' to '" << target << "': " << mount.error() << endl;
-          return EXIT_FAILURE;
-        }
-      }
     }
   }
 
@@ -2121,21 +2225,31 @@ int NetworkCniIsolatorSetup::execute()
       return EXIT_FAILURE;
     }
 
-    const Option<int> status = os::spawn("ifconfig", {"ifconfig", "lo", "up"});
+    // TODO(urbanserj): To get rid of all external dependencies such as
+    // `iproute2` and `net-tools`, use Netlink Protocol Library (libnl).
+    Option<int> status = os::spawn(
+        "ip", {"ip", "link", "set", "dev", "lo", "up"});
 
     const string message =
       "Failed to bring up the loopback interface in the new "
       "network namespace of pid " + stringify(flags.pid.get());
 
     if (status.isNone()) {
-      cerr << message << ": " << "os::spawn failed: "
+      cerr << message << ": os::spawn 'ip link set dev lo up' failed: "
+           << os::strerror(errno) << endl;
+
+      // Fall back on `ifconfig` if `ip` command fails to start.
+      status = os::spawn("ifconfig", {"ifconfig", "lo", "up"});
+    }
+
+    if (status.isNone()) {
+      cerr << message << ": os::spawn 'ifconfig lo up' failed: "
            << os::strerror(errno) << endl;
       return EXIT_FAILURE;
     }
 
     if (!WSUCCEEDED(status.get())) {
-      cerr << message << ": 'ifconfig lo up' "
-           << WSTRINGIFY(status.get()) << endl;
+      cerr << message << ": " << WSTRINGIFY(status.get()) << endl;
       return EXIT_FAILURE;
     }
   }

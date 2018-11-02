@@ -226,7 +226,6 @@ Slave::Slave(const string& id,
     authenticating(None()),
     authenticated(false),
     reauthenticate(false),
-    failedAuthentications(0),
     executorDirectoryMaxAllowedAge(age(0)),
     resourceEstimator(_resourceEstimator),
     qosController(_qosController),
@@ -793,24 +792,16 @@ void Slave::initialize()
 
         return resourceProviderManager->api(request, principal);
       });
-
-  // TODO(ijimenez): Remove this endpoint at the end of the
-  // deprecation cycle on 0.26.
-  route("/state.json",
-        READONLY_HTTP_AUTHENTICATION_REALM,
-        Http::STATE_HELP(),
-        [this](const http::Request& request,
-               const Option<Principal>& principal) {
-          logRequest(request);
-          return http.state(request, principal);
-        });
   route("/state",
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
         [this](const http::Request& request,
                const Option<Principal>& principal) {
           logRequest(request);
-          return http.state(request, principal);
+          return http.state(request, principal)
+            .onReady([request](const process::http::Response& response) {
+              logResponse(request, response);
+            });
         });
   route("/flags",
         READONLY_HTTP_AUTHENTICATION_REALM,
@@ -833,23 +824,16 @@ void Slave::initialize()
           logRequest(request);
           return http.statistics(request, principal);
         });
-  // TODO(ijimenez): Remove this endpoint at the end of the
-  // deprecation cycle on 0.26.
-  route("/monitor/statistics.json",
-        READONLY_HTTP_AUTHENTICATION_REALM,
-        Http::STATISTICS_HELP(),
-        [this](const http::Request& request,
-               const Option<Principal>& principal) {
-          logRequest(request);
-          return http.statistics(request, principal);
-        });
   route("/containers",
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::CONTAINERS_HELP(),
         [this](const http::Request& request,
                const Option<Principal>& principal) {
           logRequest(request);
-          return http.containers(request, principal);
+          return http.containers(request, principal)
+            .onReady([request](const process::http::Response& response) {
+              logResponse(request, response);
+            });
         });
 
   const PID<Slave> slavePid = self();
@@ -1307,6 +1291,8 @@ void Slave::detected(const Future<Option<MasterInfo>>& _master)
 
     // Wait for a random amount of time before authentication or
     // registration.
+    //
+    // TODO(mzhu): Specialize this for authentication.
     Duration duration =
       flags.registration_backoff_factor * ((double) os::random() / RAND_MAX);
 
@@ -1314,7 +1300,15 @@ void Slave::detected(const Future<Option<MasterInfo>>& _master)
       // Authenticate with the master.
       // TODO(vinod): Consider adding an "AUTHENTICATED" state to the
       // slave instead of "authenticate" variable.
-      delay(duration, self(), &Slave::authenticate);
+      Duration maxTimeout = flags.authentication_timeout_min +
+                            flags.authentication_backoff_factor * 2;
+
+      delay(
+          duration,
+          self(),
+          &Slave::authenticate,
+          flags.authentication_timeout_min,
+          std::min(maxTimeout, flags.authentication_timeout_max));
     } else {
       // Proceed with registration without authentication.
       LOG(INFO) << "No credentials provided."
@@ -1334,7 +1328,7 @@ void Slave::detected(const Future<Option<MasterInfo>>& _master)
 }
 
 
-void Slave::authenticate()
+void Slave::authenticate(Duration minTimeout, Duration maxTimeout)
 {
   authenticated = false;
 
@@ -1382,15 +1376,27 @@ void Slave::authenticate()
 
   CHECK_SOME(credential);
 
+  // We pick a random duration between `minTimeout` and `maxTimeout`.
+  Duration timeout =
+    minTimeout + (maxTimeout - minTimeout) * ((double)os::random() / RAND_MAX);
+
   authenticating =
     authenticatee->authenticate(master.get(), self(), credential.get())
-      .onAny(defer(self(), &Self::_authenticate));
+      .onAny(defer(self(), &Self::_authenticate, minTimeout, maxTimeout))
+      .after(timeout, [](Future<bool> future) {
+        // NOTE: Discarded future results in a retry in '_authenticate()'.
+        // This is a no-op if the future is already ready.
+        if (future.discard()) {
+          LOG(WARNING) << "Authentication timed out";
+        }
 
-  delay(Seconds(5), self(), &Self::authenticationTimeout, authenticating.get());
+        return future;
+      });
 }
 
 
-void Slave::_authenticate()
+void Slave::_authenticate(
+    Duration currentMinTimeout, Duration currentMaxTimeout)
 {
   delete CHECK_NOTNULL(authenticatee);
   authenticatee = nullptr;
@@ -1419,24 +1425,20 @@ void Slave::_authenticate()
     authenticating = None();
     reauthenticate = false;
 
-    ++failedAuthentications;
+    // Grow the timeout range using exponential backoff:
+    //
+    //   [min, min + factor * 2^0]
+    //   [min, min + factor * 2^1]
+    //   ...
+    //   [min, min + factor * 2^N]
+    //   ...
+    //   [min, max] // Stop at max.
+    Duration maxTimeout =
+      currentMinTimeout + (currentMaxTimeout - currentMinTimeout) * 2;
 
-    // Backoff.
-    // The backoff is a random duration in the interval [0, b * 2^N)
-    // where `b = authentication_backoff_factor` and `N` the number
-    // of failed authentication attempts. It is capped by
-    // `REGISTER_RETRY_INTERVAL_MAX`.
-    Duration backoff =
-      flags.authentication_backoff_factor * std::pow(2, failedAuthentications);
-    backoff = std::min(backoff, AUTHENTICATION_RETRY_INTERVAL_MAX);
-
-    // Determine the delay for next attempt by picking a random
-    // duration between 0 and 'maxBackoff'.
-    // TODO(vinod): Use random numbers from <random> header.
-    backoff *= double(os::random()) / RAND_MAX;
-
-    // TODO(vinod): Add a limit on number of retries.
-    delay(backoff, self(), &Self::authenticate); // Retry.
+    authenticate(
+        currentMinTimeout,
+        std::min(maxTimeout, flags.authentication_timeout_max));
     return;
   }
 
@@ -1452,22 +1454,8 @@ void Slave::_authenticate()
   authenticated = true;
   authenticating = None();
 
-  failedAuthentications = 0;
-
   // Proceed with registration.
   doReliableRegistration(flags.registration_backoff_factor * 2);
-}
-
-
-void Slave::authenticationTimeout(Future<bool> future)
-{
-  // NOTE: Discarded future results in a retry in '_authenticate()'.
-  // Also note that a 'discard' here is safe even if another
-  // authenticator is in progress because this copy of the future
-  // corresponds to the original authenticator that started the timer.
-  if (future.discard()) { // This is a no-op if the future is already ready.
-    LOG(WARNING) << "Authentication timed out";
-  }
 }
 
 
@@ -7597,6 +7585,13 @@ UpdateSlaveMessage Slave::generateResourceProviderUpdate() const
   }
 
   foreachvalue (ResourceProvider* resourceProvider, resourceProviders) {
+    // If the resource provider has not updated its state we do not
+    // need to and cannot include its information in an
+    // `UpdateSlaveMessage` since it requires a resource version.
+    if (resourceProvider->resourceVersion.isNone()) {
+      continue;
+    }
+
     UpdateSlaveMessage::ResourceProvider* provider =
       message.mutable_resource_providers()->add_providers();
 
@@ -7605,7 +7600,7 @@ UpdateSlaveMessage Slave::generateResourceProviderUpdate() const
     provider->mutable_total_resources()->CopyFrom(
         resourceProvider->totalResources);
     provider->mutable_resource_version_uuid()->CopyFrom(
-        resourceProvider->resourceVersion);
+        resourceProvider->resourceVersion.get());
 
     provider->mutable_operations();
 
@@ -7654,110 +7649,110 @@ void Slave::handleResourceProviderMessage(
   LOG(INFO) << "Handling resource provider message '" << message.get() << "'";
 
   switch(message->type) {
+    case ResourceProviderMessage::Type::SUBSCRIBE: {
+      CHECK_SOME(message->subscribe);
+
+      const ResourceProviderMessage::Subscribe& subscribe =
+        message->subscribe.get();
+
+      CHECK(subscribe.info.has_id());
+
+      ResourceProvider* resourceProvider =
+        getResourceProvider(subscribe.info.id());
+
+      if (resourceProvider == nullptr) {
+        resourceProvider = new ResourceProvider(subscribe.info, {}, None());
+
+        addResourceProvider(resourceProvider);
+      } else {
+        // Always update the resource provider info.
+        resourceProvider->info = subscribe.info;
+      }
+      break;
+    }
     case ResourceProviderMessage::Type::UPDATE_STATE: {
       CHECK_SOME(message->updateState);
 
       const ResourceProviderMessage::UpdateState& updateState =
         message->updateState.get();
 
-      CHECK(updateState.info.has_id());
-      const ResourceProviderID& resourceProviderId = updateState.info.id();
-
       ResourceProvider* resourceProvider =
-        getResourceProvider(resourceProviderId);
+        getResourceProvider(updateState.resourceProviderId);
 
-      if (resourceProvider == nullptr) {
-        resourceProvider = new ResourceProvider(
-            updateState.info,
-            updateState.totalResources,
-            updateState.resourceVersion);
+      CHECK(resourceProvider);
 
-        addResourceProvider(resourceProvider);
-
-        foreachvalue (const Operation& operation,
-                      updateState.operations) {
-          addOperation(new Operation(operation));
-        }
-
+      if (resourceProvider->totalResources != updateState.totalResources) {
         // Update the 'total' in the Slave.
+        CHECK(totalResources.contains(resourceProvider->totalResources));
+        totalResources -= resourceProvider->totalResources;
         totalResources += updateState.totalResources;
-      } else {
-        // Always update the resource provider info.
-        resourceProvider->info = updateState.info;
 
-        if (resourceProvider->totalResources != updateState.totalResources) {
-          // Update the 'total' in the Slave.
-          CHECK(totalResources.contains(resourceProvider->totalResources));
-          totalResources -= resourceProvider->totalResources;
-          totalResources += updateState.totalResources;
-
-          // Update the 'total' in the resource provider.
-          resourceProvider->totalResources = updateState.totalResources;
-        }
-
-        // Update operation state.
-        //
-        // We only update operations which are not contained in both
-        // the known and just received sets. All other operations will
-        // be updated via relayed operation status updates.
-        const hashset<UUID> knownUuids = resourceProvider->operations.keys();
-        const hashset<UUID> receivedUuids = updateState.operations.keys();
-
-        // Handle operations known to the agent but not reported by
-        // the resource provider. These could be operations where the
-        // agent has started tracking an operation, but the resource
-        // provider failed over before it could bookkeep the
-        // operation.
-        //
-        // NOTE: We do not mutate operations statuses here; this would
-        // be the responsibility of an operation status update handler.
-        hashset<UUID> disappearedUuids = knownUuids - receivedUuids;
-        foreach (const UUID& uuid, disappearedUuids) {
-          // TODO(bbannier): Instead of simply dropping an operation
-          // with `removeOperation` here we should instead send a
-          // `Reconcile` message with a failed state to the resource
-          // provider so its status update manager can reliably
-          // deliver the operation status to the framework.
-          removeOperation(resourceProvider->operations.at(uuid));
-        }
-
-        // Handle operations known to the resource provider but not
-        // the agent. This can happen if the agent failed over and the
-        // resource provider reregistered.
-        hashset<UUID> reappearedUuids = receivedUuids - knownUuids;
-        foreach (const UUID& uuid, reappearedUuids) {
-          // Start tracking this operation.
-          //
-          // NOTE: We do not need to update total resources here as its
-          // state was sync explicitly with the received total above.
-          addOperation(new Operation(updateState.operations.at(uuid)));
-        }
-
-        // Handle operations known to both the agent and the resource provider.
-        //
-        // If an operation became terminal, its result is already reflected in
-        // the total resources reported by the resource provider, and thus it
-        // should not be applied again in an operation status update handler
-        // when its terminal status update arrives. So we set the terminal
-        // `latest_status` here to prevent resource convervions elsewhere.
-        //
-        // NOTE: We only update the `latest_status` of a known operation if it
-        // is not terminal yet here; its `statuses` would be updated by an
-        // operation status update handler.
-        hashset<UUID> matchedUuids = knownUuids - disappearedUuids;
-        foreach (const UUID& uuid, matchedUuids) {
-          const Operation& operation = updateState.operations.at(uuid);
-          if (operation.has_latest_status() &&
-              protobuf::isTerminalState(operation.latest_status().state())) {
-            updateOperationLatestStatus(
-                getOperation(uuid),
-                operation.latest_status());
-          }
-        }
-
-        // Update resource version of this resource provider.
-        resourceProvider->resourceVersion = updateState.resourceVersion;
+        // Update the 'total' in the resource provider.
+        resourceProvider->totalResources = updateState.totalResources;
       }
+
+      // Update operation state.
+      //
+      // We only update operations which are not contained in both
+      // the known and just received sets. All other operations will
+      // be updated via relayed operation status updates.
+      const hashset<UUID> knownUuids = resourceProvider->operations.keys();
+      const hashset<UUID> receivedUuids = updateState.operations.keys();
+
+      // Handle operations known to the agent but not reported by
+      // the resource provider. These could be operations where the
+      // agent has started tracking an operation, but the resource
+      // provider failed over before it could bookkeep the
+      // operation.
+      //
+      // NOTE: We do not mutate operations statuses here; this would
+      // be the responsibility of an operation status update handler.
+      hashset<UUID> disappearedUuids = knownUuids - receivedUuids;
+      foreach (const UUID& uuid, disappearedUuids) {
+        // TODO(bbannier): Instead of simply dropping an operation
+        // with `removeOperation` here we should instead send a
+        // `Reconcile` message with a failed state to the resource
+        // provider so its status update manager can reliably
+        // deliver the operation status to the framework.
+        removeOperation(resourceProvider->operations.at(uuid));
+      }
+
+      // Handle operations known to the resource provider but not
+      // the agent. This can happen if the agent failed over and the
+      // resource provider reregistered.
+      hashset<UUID> reappearedUuids = receivedUuids - knownUuids;
+      foreach (const UUID& uuid, reappearedUuids) {
+        // Start tracking this operation.
+        //
+        // NOTE: We do not need to update total resources here as its
+        // state was sync explicitly with the received total above.
+        addOperation(new Operation(updateState.operations.at(uuid)));
+      }
+
+      // Handle operations known to both the agent and the resource provider.
+      //
+      // If an operation became terminal, its result is already reflected in
+      // the total resources reported by the resource provider, and thus it
+      // should not be applied again in an operation status update handler
+      // when its terminal status update arrives. So we set the terminal
+      // `latest_status` here to prevent resource convervions elsewhere.
+      //
+      // NOTE: We only update the `latest_status` of a known operation if it
+      // is not terminal yet here; its `statuses` would be updated by an
+      // operation status update handler.
+      hashset<UUID> matchedUuids = knownUuids - disappearedUuids;
+      foreach (const UUID& uuid, matchedUuids) {
+        const Operation& operation = updateState.operations.at(uuid);
+        if (operation.has_latest_status() &&
+            protobuf::isTerminalState(operation.latest_status().state())) {
+          updateOperationLatestStatus(
+              getOperation(uuid),
+              operation.latest_status());
+        }
+      }
+
+      // Update resource version of this resource provider.
+      resourceProvider->resourceVersion = updateState.resourceVersion;
 
       // Send the updated resources to the master if the agent is running. Note
       // that since we have already updated our copy of the latest resource
@@ -7907,6 +7902,17 @@ void Slave::handleResourceProviderMessage(
           break;
         }
       }
+      break;
+    }
+    case ResourceProviderMessage::Type::REMOVE: {
+      CHECK_SOME(message->remove);
+
+      const ResourceProviderID& resourceProviderId =
+        message->remove->resourceProviderId;
+
+      resourceProviders.erase(resourceProviderId);
+
+      LOG(INFO) << "Removed resource provider '" << resourceProviderId << "'";
       break;
     }
   }
@@ -9534,7 +9540,7 @@ Executor::Executor(
       "Max completed tasks per executor should be greater than zero");
 
   completedTasks =
-    boost::circular_buffer<shared_ptr<Task>>(MAX_COMPLETED_TASKS_PER_EXECUTOR);
+    circular_buffer<shared_ptr<Task>>(MAX_COMPLETED_TASKS_PER_EXECUTOR);
 
   // TODO(jieyu): The way we determine if an executor is generated for
   // a command task (either command or docker executor) is really
@@ -9662,6 +9668,19 @@ void Executor::completeTask(const TaskID& taskId)
       completedTasks.full()) {
     const shared_ptr<Task>& firstTask = completedTasks.front();
     slave->detachTaskVolumeDirectories(info, containerId, {*firstTask});
+  }
+
+  // Mark the task metadata (TaskInfo and status updates) for garbage
+  // collection. This is important for keeping the metadata of long-lived,
+  // multi-task executors within reasonable levels.
+  if (checkpoint) {
+    slave->garbageCollect(paths::getTaskPath(
+        slave->metaDir,
+        slave->info.id(),
+        frameworkId,
+        id,
+        containerId,
+        taskId));
   }
 
   Task* task = terminatedTasks[taskId];

@@ -15,10 +15,14 @@
 // limitations under the License.
 
 #include <mesos/executor.hpp>
+#include <mesos/http.hpp>
 #include <mesos/scheduler.hpp>
+
+#include <mesos/v1/master/master.hpp>
 
 #include <process/collect.hpp>
 #include <process/future.hpp>
+#include <process/http.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
 
@@ -65,6 +69,7 @@ using mesos::master::detector::MasterDetector;
 using mesos::slave::ContainerLogger;
 using mesos::slave::ContainerTermination;
 
+using process::Failure;
 using process::Future;
 using process::Owned;
 using process::PID;
@@ -334,8 +339,15 @@ TEST_F(HealthCheckTest, HealthyTask)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  vector<TaskInfo> tasks =
-    populateTasks(SLEEP_COMMAND(120), "exit 0", offers.get()[0]);
+  vector<TaskInfo> tasks = populateTasks(
+      SLEEP_COMMAND(120),
+      "exit 0",
+      offers.get()[0],
+      1,
+      1,
+      None(),
+      None(),
+      1);
 
   Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
@@ -398,7 +410,8 @@ TEST_F(HealthCheckTest, HealthyTask)
   EXPECT_TRUE(implicitReconciliation->has_healthy());
   EXPECT_TRUE(implicitReconciliation->healthy());
 
-  // Verify that task health is exposed in the master's state endpoint.
+  // Verify that task's health check definition and current health status
+  // are exposed in the master's state endpoint.
   {
     Future<http::Response> response = http::get(
         master.get()->pid,
@@ -414,9 +427,38 @@ TEST_F(HealthCheckTest, HealthyTask)
     Result<JSON::Value> find = parse->find<JSON::Value>(
         "frameworks[0].tasks[0].statuses[1].healthy");
     EXPECT_SOME_TRUE(find);
+
+    find = parse->find<JSON::Value>(
+        "frameworks[0].tasks[0].health_check.type");
+    EXPECT_SOME_EQ("COMMAND", find);
+
+    find = parse->find<JSON::Value>(
+        "frameworks[0].tasks[0].health_check.command.value");
+    EXPECT_SOME_EQ("exit 0", find);
+
+    find = parse->find<JSON::Value>(
+        "frameworks[0].tasks[0].health_check.delay_seconds");
+    EXPECT_SOME_EQ(0, find);
+
+    find = parse->find<JSON::Value>(
+        "frameworks[0].tasks[0].health_check.interval_seconds");
+    EXPECT_SOME_EQ(0, find);
+
+    find = parse->find<JSON::Value>(
+        "frameworks[0].tasks[0].health_check.timeout_seconds");
+    EXPECT_SOME_EQ(1, find);
+
+    find = parse->find<JSON::Value>(
+        "frameworks[0].tasks[0].health_check.consecutive_failures");
+    EXPECT_SOME_EQ(1u, find);
+
+    find = parse->find<JSON::Value>(
+        "frameworks[0].tasks[0].health_check.grace_period_seconds");
+    EXPECT_SOME_EQ(1, find);
   }
 
-  // Verify that task health is exposed in the agent's state endpoint.
+  // Verify that the task's health definition and current health status
+  // are exposed in the agent's state endpoint.
   {
     Future<http::Response> response = http::get(
         agent.get()->pid,
@@ -432,6 +474,14 @@ TEST_F(HealthCheckTest, HealthyTask)
     Result<JSON::Value> find = parse->find<JSON::Value>(
         "frameworks[0].executors[0].tasks[0].statuses[1].healthy");
     EXPECT_SOME_TRUE(find);
+
+    find = parse->find<JSON::Value>(
+        "frameworks[0].executors[0].tasks[0].health_check.type");
+    EXPECT_SOME_EQ("COMMAND", find);
+
+    find = parse->find<JSON::Value>(
+        "frameworks[0].executors[0].tasks[0].health_check.command.value");
+    EXPECT_SOME_EQ("exit 0", find);
   }
 
   driver.stop();
@@ -620,7 +670,7 @@ TEST_F(HealthCheckTest, HealthyTaskNonShell)
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   AWAIT_READY(statusStarting);
-  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
@@ -1358,7 +1408,8 @@ TEST_F(HealthCheckTest, HealthyTaskViaTCP)
 // Tests a healthy task via HTTP with a container image using mesos
 // containerizer. To emulate a task responsive to HTTP health checks,
 // starts Netcat in the docker "alpine" image.
-TEST_F(HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaHTTPWithContainerImage)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaHTTPWithContainerImage)
 {
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -1451,8 +1502,8 @@ TEST_F(HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaHTTPWithContainerImage)
 // Tests a healthy task via HTTPS with a container image using mesos
 // containerizer. To emulate a task responsive to HTTPS health checks,
 // starts an HTTPS server in the docker "haosdent/https-server" image.
-TEST_F(HealthCheckTest,
-       ROOT_INTERNET_CURL_HealthyTaskViaHTTPSWithContainerImage)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaHTTPSWithContainerImage)
 {
   master::Flags masterFlags = CreateMasterFlags();
   Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
@@ -1551,7 +1602,8 @@ TEST_F(HealthCheckTest,
 // NOTE: This test is almost identical to
 // ROOT_INTERNET_CURL_HealthyTaskViaHTTPWithContainerImage
 // with the difference being TCP health check.
-TEST_F(HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaTCPWithContainerImage)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaTCPWithContainerImage)
 {
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -2352,15 +2404,6 @@ TEST_F(DockerContainerizerHealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
   Shared<Docker> docker(
       new MockDocker(tests::flags.docker, tests::flags.docker_socket));
 
-  Try<Nothing> validateResult = docker->validateVersion(Version(1, 3, 0));
-  ASSERT_SOME(validateResult)
-    << "-------------------------------------------------------------\n"
-    << "We cannot run this test because of 'docker exec' command \n"
-    << "require docker version greater than '1.3.0'. You won't be \n"
-    << "able to use the docker exec method, but feel free to disable\n"
-    << "this test.\n"
-    << "-------------------------------------------------------------";
-
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -2481,15 +2524,6 @@ TEST_F(DockerContainerizerHealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
 {
   Shared<Docker> docker(
       new MockDocker(tests::flags.docker, tests::flags.docker_socket));
-
-  Try<Nothing> validateResult = docker->validateVersion(Version(1, 3, 0));
-  ASSERT_SOME(validateResult)
-    << "-------------------------------------------------------------\n"
-    << "We cannot run this test because of 'docker exec' command \n"
-    << "require docker version greater than '1.3.0'. You won't be \n"
-    << "able to use the docker exec method, but feel free to disable\n"
-    << "this test.\n"
-    << "-------------------------------------------------------------";
 
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -2665,15 +2699,6 @@ TEST_F(
 {
   Shared<Docker> docker(
       new MockDocker(tests::flags.docker, tests::flags.docker_socket));
-
-  Try<Nothing> validateResult = docker->validateVersion(Version(1, 3, 0));
-  ASSERT_SOME(validateResult)
-    << "-------------------------------------------------------------\n"
-    << "We cannot run this test because of 'docker exec' command \n"
-    << "require docker version greater than '1.3.0'. You won't be \n"
-    << "able to use the docker exec method, but feel free to disable\n"
-    << "this test.\n"
-    << "-------------------------------------------------------------";
 
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);

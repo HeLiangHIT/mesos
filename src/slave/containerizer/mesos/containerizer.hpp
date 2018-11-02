@@ -34,6 +34,7 @@
 #include <stout/multihashmap.hpp>
 #include <stout/os/int_fd.hpp>
 
+#include "slave/gc.hpp"
 #include "slave/state.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
@@ -68,6 +69,7 @@ public:
       const Flags& flags,
       bool local,
       Fetcher* fetcher,
+      GarbageCollector* gc = nullptr,
       SecretResolver* secretResolver = nullptr,
       const Option<NvidiaComponents>& nvidia = None());
 
@@ -75,6 +77,7 @@ public:
       const Flags& flags,
       bool local,
       Fetcher* fetcher,
+      GarbageCollector* gc,
       const process::Owned<Launcher>& launcher,
       const process::Shared<Provisioner>& provisioner,
       const std::vector<process::Owned<mesos::slave::Isolator>>& isolators);
@@ -135,6 +138,7 @@ public:
   MesosContainerizerProcess(
       const Flags& _flags,
       Fetcher* _fetcher,
+      GarbageCollector* _gc,
       IOSwitchboard* _ioSwitchboard,
       const process::Owned<Launcher>& _launcher,
       const process::Shared<Provisioner>& _provisioner,
@@ -142,6 +146,7 @@ public:
     : ProcessBase(process::ID::generate("mesos-containerizer")),
       flags(_flags),
       fetcher(_fetcher),
+      gc(_gc),
       ioSwitchboard(_ioSwitchboard),
       launcher(_launcher),
       provisioner(_provisioner),
@@ -277,6 +282,10 @@ private:
       const Option<mesos::slave::ContainerTermination>& termination,
       const process::Future<bool>& destroy);
 
+  // Schedules a path for garbage collection based on its modification time.
+  // Equivalent to the `Slave::garbageCollect` method.
+  process::Future<Nothing> garbageCollect(const std::string& path);
+
   // Call back for when an isolator limits a container and impacts the
   // processes. This will trigger container destruction.
   void limited(
@@ -299,6 +308,11 @@ private:
 
   const Flags flags;
   Fetcher* fetcher;
+
+  // NOTE: This actor may be nullptr in tests, as not all tests need to
+  // share this actor with the agent.
+  GarbageCollector* gc;
+
   IOSwitchboard* ioSwitchboard;
   const process::Owned<Launcher> launcher;
   const process::Shared<Provisioner> provisioner;

@@ -119,6 +119,17 @@ Try<pid_t> SubprocessLauncher::fork(
   parentHooks.emplace_back(Subprocess::ParentHook::CREATE_JOB());
 #endif // __linux__
 
+  vector<Subprocess::ChildHook> childHooks;
+
+#ifndef __WINDOWS__
+  childHooks.push_back(Subprocess::ChildHook::SETSID());
+
+  // TODO(jpeach) libprocess should take care of this, see MESOS-9164.
+  foreach (int_fd fd, whitelistFds) {
+    childHooks.push_back(Subprocess::ChildHook::UNSET_CLOEXEC(fd));
+  }
+#endif // __WINDOWS__
+
   Try<Subprocess> child = subprocess(
       path,
       argv,
@@ -129,7 +140,7 @@ Try<pid_t> SubprocessLauncher::fork(
       environment,
       None(),
       parentHooks,
-      {Subprocess::ChildHook::SETSID()},
+      childHooks,
       whitelistFds);
 
   if (child.isError()) {

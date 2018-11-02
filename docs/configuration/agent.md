@@ -229,13 +229,36 @@ load an alternate authenticatee module using <code>--modules</code>. (default: c
     --authentication_backoff_factor=VALUE
   </td>
   <td>
-After a failed authentication the agent picks a random amount of time between
-<code>[0, b]</code>, where <code>b = authentication_backoff_factor</code>, to
-authenticate with a new master. Subsequent retries are exponentially backed
-off based on this interval (e.g., 1st retry uses a random value between
-<code>[0, b * 2^1]</code>, 2nd retry between <code>[0, b * 2^2]</code>, 3rd
-retry between <code>[0, b * 2^3]</code>, etc up to a maximum of 1mins
-(default: 1secs)
+The agent will time out its authentication with the master based on
+exponential backoff. The timeout will be randomly chosen within the
+range <code>[min, min + factor*2^n]</code> where <code>n</code> is the number
+of failed attempts. To tune these parameters, set the
+<code>--authentication_timeout_[min|max|factor]</code> flags. (default: 1secs)
+  </td>
+</tr>
+
+<tr id="authentication_timeout_min">
+  <td>
+    --authentication_timeout_min=VALUE
+  </td>
+  <td>
+The minimum amount of time the agent waits before retrying authenticating
+with the master. See <code>--authentication_backoff_factor</code> for more
+details. (default: 5secs)
+<p/>NOTE that since authentication retry cancels the previous authentication
+request, one should consider what is the normal authentication delay when
+setting this flag to prevent premature retry.</p>
+  </td>
+</tr>
+
+<tr id="authentication_timeout_max">
+  <td>
+    --authentication_timeout_max=VALUE
+  </td>
+  <td>
+The maximum amount of time the agent waits before retrying authenticating
+with the master. See <code>--authentication_backoff_factor</code> for more
+details. (default: 1mins)
   </td>
 </tr>
 
@@ -262,6 +285,17 @@ passed through the <code>--acls</code> flag will be ignored.
   <td>
 Cgroups feature flag to enable counting of processes and threads
 inside a container. (default: false)
+  </td>
+</tr>
+
+<tr id="cgroups_destroy_timeout">
+  <td>
+    --cgroups_destroy_timeout=VALUE
+  </td>
+  <td>
+Amount of time allowed to destroy a cgroup hierarchy. If the cgroup
+hierarchy is not destroyed within the timeout, the corresponding
+container destroy is considered failed. (default: 1mins)
   </td>
 </tr>
 
@@ -372,11 +406,12 @@ Name of the root cgroup. (default: mesos)
     --[no-]check_agent_port_range_only
   </td>
   <td>
-When this is true, the `network/ports` isolator allows tasks to
+When this is true, the <code>network/ports</code> isolator allows tasks to
 listen on additional ports provided they fall outside the range
 published by the agent's resources. Otherwise tasks are restricted
 to only listen on ports for which they have been assigned resources.
-(default: false)
+(default: false); This flag can't be used in conjunction with
+<code>--container_ports_isolated_range</code>.
   </td>
 </tr>
 
@@ -402,14 +437,26 @@ in the sandbox directory.
   </td>
 </tr>
 
+<tr id="container_ports_isolated_range">
+  <td>
+    --container_ports_isolated_range=VALUE
+  </td>
+  <td>
+When this flag is set, <code>network/ports</code> isolator will only enforce
+the port isolation for the given range of ports range. This flag can't
+be used in conjunction with <code>--check_agent_port_range_only</code>.
+Example: <code>[0-35000]</code>
+  </td>
+</tr>
+
 <tr id="container_ports_watch_interval">
   <td>
     --container_ports_watch_interval=VALUE
   </td>
-Interval at which the `network/ports` isolator should check for
+  <td>
+Interval at which the <code>network/ports</code> isolator should check for
 containers listening on ports they don't have resources for.
 (default: 30secs)
-  <td>
   </td>
 </tr>
 
@@ -620,11 +667,11 @@ recovers.
   </td>
   <td>
 The default url for Mesos containerizer to pull Docker images. It could
-either be a Docker registry server url (i.e: <code>https://registry.docker.io</code>),
+either be a Docker registry server url (e.g., <code>https://registry.docker.io</code>),
 or a source that Docker image archives (result of <code>docker save</code>) are
 stored. The Docker archive source could be specified either as a local
-path (i.e: <code>/tmp/docker/images</code>), or as an HDFS URI
-(i.e: <code>hdfs://localhost:8020/archives/</code>). Note that this option won't
+path (e.g., <code>/tmp/docker/images</code>), or as an HDFS URI (*experimental*)
+(e.g., <code>hdfs://localhost:8020/archives/</code>). Note that this option won't
 change the default registry server for Docker containerizer.
 (default: https://registry-1.docker.io)
   </td>
@@ -884,6 +931,19 @@ be a value between 0.0 and 1.0 (default: 0.1)
   </td>
 </tr>
 
+<tr id="gc_non_executor_container_sandboxes">
+  <td>
+    --[no-]gc_non_executor_container_sandboxes
+  </td>
+  <td>
+Determines whether nested container sandboxes created via the
+<code>LAUNCH_CONTAINER</code> and <code>LAUNCH_NESTED_CONTAINER</code> APIs will be
+automatically garbage collected by the agent upon termination.
+The <code>REMOVE_(NESTED_)CONTAINER</code> API is unaffected by this flag
+and can still be used. (default: false).
+  </td>
+</tr>
+
 <tr id="hadoop_home">
   <td>
     --hadoop_home=VALUE
@@ -982,11 +1042,13 @@ Containerizer for now.
 See the ImageGcConfig message in `flags.proto` for the expected
 format.
 <p/>
-Example:
+In the following example, image garbage collection is configured to
+sample disk usage every hour, and will attempt to maintain at least
+10% of free space on the container image filesystem:
 <pre><code>{
   "image_disk_headroom": 0.1,
   "image_disk_watch_interval": {
-    "nanoseconds": 3600
+    "nanoseconds": 3600000000000
   },
   "excluded_images": []
 }</code></pre>
@@ -1111,6 +1173,16 @@ responsibility to install the CNI plugin binaries in the specified directory.
 Directory path of the CNI network configuration files. For each network that
 containers launched in Mesos agent can connect to, the operator should install
 a network configuration file in JSON format in the specified directory.
+  </td>
+</tr>
+
+<tr id="network_cni_metrics">
+  <td>
+    --[no-]network_cni_metrics
+  </td>
+  <td>
+This setting controls whether the networking metrics of the CNI isolator should
+be exposed.
   </td>
 </tr>
 

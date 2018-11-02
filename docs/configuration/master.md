@@ -265,6 +265,15 @@ load an alternate authenticator module using <code>--modules</code>. (default: c
   </td>
 </tr>
 
+<tr id="authentication_v0_timeout">
+  <td>
+    --authentication_v0_timeout=VALUE
+  </td>
+  <td>
+The timeout within which an authentication is expected to complete against a v0 framework or agent. This does not apply to the v0 or v1 HTTP APIs. (default: <code>15secs</code>)
+  </td>
+</tr>
+
 <tr id="authorizers">
   <td>
     --authorizers=VALUE
@@ -453,6 +462,17 @@ Duration of time before an offer is rescinded from a framework.
 This helps fairness when running frameworks that hold on to offers,
 or frameworks that accidentally drop offers.
 If not set, offers do not timeout.
+  </td>
+</tr>
+
+<tr id="publish_per_framework_metrics">
+  <td>
+    --[no-]publish_per_framework_metrics
+  </td>
+  <td>
+If <code>true</code>, an extensive set of metrics for each active framework will
+be published. These metrics are useful for understanding cluster behavior,
+but can be overwhelming for very large numbers of frameworks. (default: true)
   </td>
 </tr>
 

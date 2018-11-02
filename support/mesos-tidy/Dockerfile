@@ -20,8 +20,8 @@ MAINTAINER The Apache Mesos Developers <dev@mesos.apache.org>
 WORKDIR /tmp/build
 
 # Build Mesos-flavored `clang-tidy`.
-RUN apt-get update
-RUN apt-get install -qy --no-install-recommends \
+RUN apt-get update && \
+  apt-get install -qy --no-install-recommends \
   build-essential \
   ca-certificates \
   curl \
@@ -38,9 +38,9 @@ RUN curl -sSL https://cmake.org/files/v3.8/cmake-3.8.2-Linux-x86_64.sh \
     sh /tmp/install-cmake.sh --skip-license --prefix=/usr/local
 
 RUN \
-  git clone --depth 1 -b release_60 http://llvm.org/git/llvm /tmp/llvm && \
-  git clone --depth 1 -b mesos_60 http://github.com/mesos/clang.git /tmp/llvm/tools/clang && \
-  git clone --depth 1 -b mesos_60 http://github.com/mesos/clang-tools-extra.git /tmp/llvm/tools/clang/tools/extra && \
+  git clone --depth 1 -b release_70 http://llvm.org/git/llvm /tmp/llvm && \
+  git clone --depth 1 -b mesos_70 http://github.com/mesos/clang.git /tmp/llvm/tools/clang && \
+  git clone --depth 1 -b mesos_70 http://github.com/mesos/clang-tools-extra.git /tmp/llvm/tools/clang/tools/extra && \
   \
   cmake /tmp/llvm -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt && \
   cmake --build tools/clang/lib/Headers --target install -- -j $(nproc) && \
@@ -54,7 +54,8 @@ ENV PATH /opt/bin:$PATH
 
 # Install Mesos dependencies
 # TODO(mpark): Remove `libssl-dev` from this list once `MESOS-6942` is resolved.
-RUN apt-get install -qy \
+RUN apt-get update && \
+  apt-get install -qy \
   autoconf \
   libacl1-dev \
   libapr1-dev \
@@ -68,7 +69,8 @@ RUN apt-get install -qy \
   apt-get clean
 
 # Install `jq` and `parallel` for `clang-tidy` invocation.
-RUN apt-get install -qy \
+RUN apt-get update && \
+  apt-get install -qy \
   jq \
   parallel && \
   apt-get clean

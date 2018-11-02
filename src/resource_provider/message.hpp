@@ -40,27 +40,38 @@ struct ResourceProviderMessage
 {
   enum class Type
   {
+    SUBSCRIBE,
     UPDATE_STATE,
     UPDATE_OPERATION_STATUS,
-    DISCONNECT
+    DISCONNECT,
+    REMOVE
   };
 
   friend std::ostream& operator<<(std::ostream& stream, const Type& type) {
     switch (type) {
+      case Type::SUBSCRIBE:
+        return stream << "SUBSCRIBE";
       case Type::UPDATE_STATE:
         return stream << "UPDATE_STATE";
       case Type::UPDATE_OPERATION_STATUS:
         return stream << "UPDATE_OPERATION_STATUS";
       case Type::DISCONNECT:
         return stream << "DISCONNECT";
+      case Type::REMOVE:
+        return stream << "REMOVE";
     }
 
     UNREACHABLE();
   }
 
-  struct UpdateState
+  struct Subscribe
   {
     ResourceProviderInfo info;
+  };
+
+  struct UpdateState
+  {
+    ResourceProviderID resourceProviderId;
     UUID resourceVersion;
     Resources totalResources;
     hashmap<UUID, Operation> operations;
@@ -76,11 +87,18 @@ struct ResourceProviderMessage
     ResourceProviderID resourceProviderId;
   };
 
+  struct Remove
+  {
+    ResourceProviderID resourceProviderId;
+  };
+
   Type type;
 
+  Option<Subscribe> subscribe;
   Option<UpdateState> updateState;
   Option<UpdateOperationStatus> updateOperationStatus;
   Option<Disconnect> disconnect;
+  Option<Remove> remove;
 };
 
 
@@ -91,6 +109,14 @@ inline std::ostream& operator<<(
   stream << stringify(resourceProviderMessage.type) << ": ";
 
   switch (resourceProviderMessage.type) {
+    case ResourceProviderMessage::Type::SUBSCRIBE: {
+      const Option<ResourceProviderMessage::Subscribe>& subscribe =
+        resourceProviderMessage.subscribe;
+
+      CHECK_SOME(subscribe);
+
+      return stream << subscribe->info;
+    }
     case ResourceProviderMessage::Type::UPDATE_STATE: {
       const Option<ResourceProviderMessage::UpdateState>&
         updateState = resourceProviderMessage.updateState;
@@ -98,7 +124,7 @@ inline std::ostream& operator<<(
       CHECK_SOME(updateState);
 
       return stream
-          << updateState->info.id() << " "
+          << updateState->resourceProviderId << " "
           << updateState->totalResources;
     }
 
@@ -129,6 +155,17 @@ inline std::ostream& operator<<(
       return stream
           << "resource provider "
           << disconnect->resourceProviderId;
+    }
+
+    case ResourceProviderMessage::Type::REMOVE: {
+      const Option<ResourceProviderMessage::Remove>& remove =
+        resourceProviderMessage.remove;
+
+      CHECK_SOME(remove);
+
+      return stream
+          << "resource provider "
+          << remove->resourceProviderId;
     }
   }
 

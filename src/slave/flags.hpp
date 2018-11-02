@@ -79,6 +79,8 @@ public:
   std::string frameworks_home;  // TODO(benh): Make an Option.
   Duration registration_backoff_factor;
   Duration authentication_backoff_factor;
+  Duration authentication_timeout_min;
+  Duration authentication_timeout_max;
   Option<JSON::Object> executor_environment_variables;
   Duration executor_registration_timeout;
   Duration executor_reregistration_timeout;
@@ -89,6 +91,7 @@ public:
 #endif // USE_SSL_SOCKET
   Duration gc_delay;
   double gc_disk_headroom;
+  bool gc_non_executor_container_sandboxes;
   Duration disk_watch_interval;
 
   Option<std::string> container_logger;
@@ -99,6 +102,7 @@ public:
   bool strict;
   Duration register_retry_interval_min;
 #ifdef __linux__
+  Duration cgroups_destroy_timeout;
   std::string cgroups_hierarchy;
   std::string cgroups_root;
   bool cgroups_enable_cfs;
@@ -153,10 +157,12 @@ public:
   Duration container_ports_watch_interval;
   bool check_agent_port_range_only;
   bool enforce_container_ports;
+  Option<std::string> container_ports_isolated_range;
 #endif // ENABLE_NETWORK_PORTS_ISOLATOR
 
   Option<std::string> network_cni_plugins_dir;
   Option<std::string> network_cni_config_dir;
+  bool network_cni_metrics;
   Duration container_disk_watch_interval;
   bool enforce_container_disk_quota;
   Option<Modules> modules;

@@ -44,6 +44,7 @@ using mesos::master::detector::StandaloneMasterDetector;
 using testing::_;
 using testing::Eq;
 using testing::Return;
+using testing::SaveArg;
 
 namespace mesos {
 namespace internal {
@@ -57,6 +58,8 @@ class AuthenticationTest : public MesosTest {};
 // denied registration by the master.
 TEST_F(AuthenticationTest, UnauthenticatedFramework)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -82,6 +85,8 @@ TEST_F(AuthenticationTest, UnauthenticatedFramework)
 // denied registration by the master, but not shut down.
 TEST_F(AuthenticationTest, UnauthenticatedSlave)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -103,23 +108,21 @@ TEST_F(AuthenticationTest, UnauthenticatedSlave)
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), flags);
   ASSERT_SOME(slave);
 
+  // Advance the clock to trigger the first registration attempt.
+  // The initial registration delay is between [0, registration_backoff_factor].
+  Clock::advance(flags.registration_backoff_factor);
+  Clock::settle();
+
   AWAIT_READY(registerSlaveMessage1);
 
   Future<RegisterSlaveMessage> registerSlaveMessage2 =
     FUTURE_PROTOBUF(RegisterSlaveMessage(), _, _);
 
   // Advance the clock to trigger another registration attempt.
-  Clock::pause();
   Clock::advance(slave::REGISTER_RETRY_INTERVAL_MAX);
   Clock::settle();
-  Clock::resume();
 
   AWAIT_READY(registerSlaveMessage2);
-
-  // Settle to make sure neither `SlaveRegisteredMessage` nor
-  // `ShutdownMessage` are sent.
-  Clock::pause();
-  Clock::settle();
 }
 
 
@@ -127,6 +130,8 @@ TEST_F(AuthenticationTest, UnauthenticatedSlave)
 // authentication disabled, it registers unauthenticated frameworks.
 TEST_F(AuthenticationTest, DisableFrameworkAuthentication)
 {
+  Clock::pause();
+
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false; // Disable authentication.
 
@@ -156,6 +161,8 @@ TEST_F(AuthenticationTest, DisableFrameworkAuthentication)
 // authentication disabled, it registers unauthenticated slaves.
 TEST_F(AuthenticationTest, DisableSlaveAuthentication)
 {
+  Clock::pause();
+
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_agents = false; // Disable authentication.
 
@@ -173,6 +180,11 @@ TEST_F(AuthenticationTest, DisableSlaveAuthentication)
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
+  // Advance the clock to trigger registration attempt.
+  // The initial registration delay is between [0, registration_backoff_factor].
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  Clock::settle();
+
   // Slave should be able to get registered.
   AWAIT_READY(slaveRegisteredMessage);
   ASSERT_NE("", slaveRegisteredMessage->slave_id().value());
@@ -184,6 +196,8 @@ TEST_F(AuthenticationTest, DisableSlaveAuthentication)
 // FrameworkInfo.principal than Credential.principal.
 TEST_F(AuthenticationTest, MismatchedFrameworkInfoPrincipal)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -214,6 +228,8 @@ TEST_F(AuthenticationTest, MismatchedFrameworkInfoPrincipal)
 // when authentication is not required.
 TEST_F(AuthenticationTest, DisabledFrameworkAuthenticationPrincipalMismatch)
 {
+  Clock::pause();
+
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false; // Authentication not required.
 
@@ -246,6 +262,8 @@ TEST_F(AuthenticationTest, DisabledFrameworkAuthenticationPrincipalMismatch)
 // register.
 TEST_F(AuthenticationTest, UnspecifiedFrameworkInfoPrincipal)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -274,6 +292,8 @@ TEST_F(AuthenticationTest, UnspecifiedFrameworkInfoPrincipal)
 // authentication disabled, it registers authenticated frameworks.
 TEST_F(AuthenticationTest, AuthenticatedFramework)
 {
+  Clock::pause();
+
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false; // Disable authentication.
 
@@ -303,6 +323,8 @@ TEST_F(AuthenticationTest, AuthenticatedFramework)
 // authentication disabled, it registers authenticated slaves.
 TEST_F(AuthenticationTest, AuthenticatedSlave)
 {
+  Clock::pause();
+
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_agents = false; // Disable authentication.
 
@@ -318,6 +340,12 @@ TEST_F(AuthenticationTest, AuthenticatedSlave)
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
+  // Advance the clock to trigger authentication and registration attempt.
+  // The initial authentication/registration delay is between
+  // [0, registration_backoff_factor].
+  Clock::advance(slave::DEFAULT_REGISTRATION_BACKOFF_FACTOR);
+  Clock::settle();
+
   // Slave should be able to get registered.
   AWAIT_READY(slaveRegisteredMessage);
   ASSERT_NE("", slaveRegisteredMessage->slave_id().value());
@@ -328,6 +356,8 @@ TEST_F(AuthenticationTest, AuthenticatedSlave)
 // authentication when authenticate message is lost.
 TEST_F(AuthenticationTest, RetryFrameworkAuthentication)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -348,10 +378,9 @@ TEST_F(AuthenticationTest, RetryFrameworkAuthentication)
     .WillOnce(FutureSatisfy(&registered));
 
   // Advance the clock for the scheduler to retry.
-  Clock::pause();
-  Clock::advance(Seconds(5));
+  Clock::advance(
+      mesos::internal::scheduler::DEFAULT_AUTHENTICATION_TIMEOUT_MAX);
   Clock::settle();
-  Clock::resume();
 
   // Scheduler should be able to get registered.
   AWAIT_READY(registered);
@@ -365,6 +394,8 @@ TEST_F(AuthenticationTest, RetryFrameworkAuthentication)
 // authentication when authenticate message is lost.
 TEST_F(AuthenticationTest, RetrySlaveAuthentication)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -376,20 +407,202 @@ TEST_F(AuthenticationTest, RetrySlaveAuthentication)
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
+  // Advance the clock to trigger authentication attempt.
+  // Currently the initial backoff is [0, registration_backoff_factor]
+  // for agents both with or without authentication. See MESOS-9173.
+  Clock::advance(slave::DEFAULT_REGISTRATION_BACKOFF_FACTOR);
+  Clock::settle();
+
   AWAIT_READY(authenticateMessage);
 
   Future<SlaveRegisteredMessage> slaveRegisteredMessage =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
   // Advance the clock for the slave to retry.
-  Clock::pause();
-  Clock::advance(Seconds(5));
+  Clock::advance(slave::DEFAULT_AUTHENTICATION_TIMEOUT_MAX);
   Clock::settle();
-  Clock::resume();
 
   // Slave should be able to get registered.
   AWAIT_READY(slaveRegisteredMessage);
   ASSERT_NE("", slaveRegisteredMessage->slave_id().value());
+}
+
+// Verify that the agent backs off properly when retrying authentication
+// according to the configured parameters.
+TEST_F(AuthenticationTest, SlaveAuthenticationRetryBackoff)
+{
+  Clock::pause();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.authentication_timeout_min = Seconds(5);
+  slaveFlags.authentication_timeout_max = Minutes(1);
+  slaveFlags.authentication_backoff_factor = Seconds(1);
+
+  // Expected retry timeout range:
+  //
+  //   [min, min + factor * 2^1]
+  //   [min, min + factor * 2^2]
+  //   ...
+  //   [min, min + factor * 2^N]
+  //   ...
+  //   [min, max] // Stop at max.
+  Duration expected[7][2] = {
+    {Seconds(5), Seconds(7)},
+    {Seconds(5), Seconds(9)},
+    {Seconds(5), Seconds(13)},
+    {Seconds(5), Seconds(21)},
+    {Seconds(5), Seconds(37)},
+    {Seconds(5), Minutes(1)},
+    {Seconds(5), Minutes(1)}
+  };
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), slaveFlags, true);
+  ASSERT_SOME(slave);
+
+  // Drop the first authentication attempt.
+  Future<Nothing> authenticate;
+  Duration minTimeout, maxTimeout;
+  EXPECT_CALL(*slave.get()->mock(), authenticate(_, _))
+    .WillOnce(DoAll(
+        SaveArg<0>(&minTimeout),
+        SaveArg<1>(&maxTimeout),
+        FutureSatisfy(&authenticate)))
+    .RetiresOnSaturation();
+
+  slave.get()->start();
+
+  // Trigger the first authentication request.
+  Clock::advance(slaveFlags.authentication_backoff_factor);
+  AWAIT_READY(authenticate);
+
+  for (int i = 0; i < 7; i++) {
+    EXPECT_EQ(minTimeout, expected[i][0]);
+    EXPECT_EQ(maxTimeout, expected[i][1]);
+
+    // Drop the authenticate message from the slave to incur retry.
+    Future<AuthenticateMessage> authenticateMessage =
+      DROP_PROTOBUF(AuthenticateMessage(), _, _);
+
+    // Drop the retry call and manually issue the retry call (instead
+    // of invoking the unmocked call directly in the expectation. We do this
+    // so that, even though clock is advanced for `authentication_timeout_max`
+    // in each iteration, we can still guarantee:
+    //
+    // (1) Retry only happens once in each iteration;
+    //
+    // (2) At the end of each iteration, the authentication timeout timer is
+    // not started. The timer will start only when we manually issue the
+    // retry call in the next iteration.
+    EXPECT_CALL(*slave.get()->mock(), authenticate(_, _))
+      .WillOnce(DoAll(
+          SaveArg<0>(&minTimeout),
+          SaveArg<1>(&maxTimeout),
+          FutureSatisfy(&authenticate)))
+      .RetiresOnSaturation();
+
+    process::dispatch(slave.get()->pid, [=] {
+      slave.get()->mock()->unmocked_authenticate(minTimeout, maxTimeout);
+    });
+
+    // Slave should not retry until `slaveFlags.authentication_timeout_min`.
+    Clock::advance(slaveFlags.authentication_timeout_min - Milliseconds(1));
+    Clock::settle();
+    EXPECT_TRUE(authenticate.isPending());
+
+    // Slave will retry at least once in
+    // `slaveFlags.authentication_timeout_max`.
+    Clock::advance(
+        slaveFlags.authentication_timeout_max -
+        slaveFlags.authentication_timeout_min + Milliseconds(1));
+    Clock::settle();
+
+    AWAIT_READY(authenticateMessage);
+    AWAIT_READY(authenticate);
+  }
+
+  Future<AuthenticationCompletedMessage> authenticationCompletedMessage =
+    FUTURE_PROTOBUF(AuthenticationCompletedMessage(), _, _);
+
+  process::dispatch(slave.get()->pid, [=] {
+    slave.get()->mock()->unmocked_authenticate(minTimeout, maxTimeout);
+  });
+
+  Clock::advance(slaveFlags.authentication_timeout_max);
+
+  // Slave should be able to get authenticated.
+  AWAIT_READY(authenticationCompletedMessage);
+}
+
+
+// This test ensures that when the master sees a new authentication
+// request for a particular agent or scheduler (we just test the
+// scheduler case here since the master does not distinguish),
+// the master will discard the old one and proceed with the new one.
+//
+// TODO(bmahler): Use a mock authenticator for this test instead
+// of using the default one and dropping the exited message.
+TEST_F(AuthenticationTest, MasterRetriedAuthenticationHandling)
+{
+  Clock::pause();
+
+  // Set the master authentication timeout to a very large value
+  // so that we can exercise the case of a new authentication
+  // request arriving before the previous one times out.
+  master::Flags flags = CreateMasterFlags();
+  flags.authentication_v0_timeout = Days(30);
+
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
+  ASSERT_SOME(master);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  // Drop the first step message from the authenticator.
+  Future<Message> authenticationStepMessage =
+    DROP_MESSAGE(Eq(AuthenticationStepMessage().GetTypeName()), _, _);
+
+  driver.start();
+
+  AWAIT_READY(authenticationStepMessage);
+
+  Future<Nothing> registered;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureSatisfy(&registered));
+
+  // Now the master will have a pending authentication and we have
+  // the scheduler driver retry. Since the master's authentication
+  // timeout is larger than the scheduler's, the scheduler will
+  // retry and the master should discard the stale one and let
+  // the new one proceed. First, we drop the exited event that
+  // the master's authenticator will listen for to ensure the
+  // authentication remains outstanding from the master's
+  // perspective.
+  const UPID& authenticatee = authenticationStepMessage->to;
+  const UPID& authenticator = authenticationStepMessage->from;
+
+  Future<Nothing> exited = DROP_EXITED(authenticatee, authenticator);
+
+  Clock::advance(
+      mesos::internal::scheduler::DEFAULT_AUTHENTICATION_TIMEOUT_MIN);
+  Clock::settle();
+  Clock::advance(
+      mesos::internal::scheduler::DEFAULT_AUTHENTICATION_BACKOFF_FACTOR * 2);
+
+  // Make sure the exited was dropped.
+  AWAIT_READY(exited);
+
+  // Scheduler should be able to get registered.
+  AWAIT_READY(registered);
+
+  driver.stop();
+  driver.join();
 }
 
 
@@ -398,6 +611,8 @@ TEST_F(AuthenticationTest, RetrySlaveAuthentication)
 // is lost.
 TEST_F(AuthenticationTest, DropIntermediateSASLMessage)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -421,10 +636,9 @@ TEST_F(AuthenticationTest, DropIntermediateSASLMessage)
     .WillOnce(FutureSatisfy(&registered));
 
   // Advance the clock for the scheduler to retry.
-  Clock::pause();
-  Clock::advance(Seconds(5));
+  Clock::advance(
+      mesos::internal::scheduler::DEFAULT_AUTHENTICATION_TIMEOUT_MAX);
   Clock::settle();
-  Clock::resume();
 
   // Ensure another authentication attempt was made.
   AWAIT_READY(authenticationCompletedMessage);
@@ -442,6 +656,8 @@ TEST_F(AuthenticationTest, DropIntermediateSASLMessage)
 // is lost.
 TEST_F(AuthenticationTest, DropIntermediateSASLMessageForSlave)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -453,6 +669,12 @@ TEST_F(AuthenticationTest, DropIntermediateSASLMessageForSlave)
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
+  // Advance the clock to trigger authentication attempt.
+  // Currently the initial backoff is [0, registration_backoff_factor]
+  // for agents both with or without authentication. See MESOS-9173.
+  Clock::advance(slave::DEFAULT_REGISTRATION_BACKOFF_FACTOR);
+  Clock::settle();
+
   AWAIT_READY(authenticationStepMessage);
 
   Future<AuthenticationCompletedMessage> authenticationCompletedMessage =
@@ -462,10 +684,8 @@ TEST_F(AuthenticationTest, DropIntermediateSASLMessageForSlave)
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
   // Advance the clock for the slave to retry.
-  Clock::pause();
-  Clock::advance(Seconds(5));
+  Clock::advance(slave::DEFAULT_AUTHENTICATION_TIMEOUT_MAX);
   Clock::settle();
-  Clock::resume();
 
   // Ensure another authentication attempt was made.
   AWAIT_READY(authenticationCompletedMessage);
@@ -484,6 +704,8 @@ TEST_F(AuthenticationTest, DropIntermediateSASLMessageForSlave)
 // eventually register.
 TEST_F(AuthenticationTest, DropFinalSASLMessage)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -507,10 +729,9 @@ TEST_F(AuthenticationTest, DropFinalSASLMessage)
     .WillOnce(FutureSatisfy(&registered));
 
   // Advance the clock for the scheduler to retry.
-  Clock::pause();
-  Clock::advance(Seconds(5));
+  Clock::advance(
+      mesos::internal::scheduler::DEFAULT_AUTHENTICATION_TIMEOUT_MAX);
   Clock::settle();
-  Clock::resume();
 
   // Ensure another authentication attempt was made.
   AWAIT_READY(authenticationCompletedMessage);
@@ -531,6 +752,8 @@ TEST_F(AuthenticationTest, DropFinalSASLMessage)
 // eventually register.
 TEST_F(AuthenticationTest, DropFinalSASLMessageForSlave)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -542,6 +765,12 @@ TEST_F(AuthenticationTest, DropFinalSASLMessageForSlave)
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
+  // Advance the clock to trigger authentication attempt.
+  // Currently the initial backoff is [0, registration_backoff_factor]
+  // for agents both with or without authentication. See MESOS-9173.
+  Clock::advance(slave::DEFAULT_REGISTRATION_BACKOFF_FACTOR);
+  Clock::settle();
+
   AWAIT_READY(authenticationCompletedMessage);
 
   authenticationCompletedMessage =
@@ -551,10 +780,8 @@ TEST_F(AuthenticationTest, DropFinalSASLMessageForSlave)
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
   // Advance the clock for the scheduler to retry.
-  Clock::pause();
-  Clock::advance(Seconds(5));
+  Clock::advance(slave::DEFAULT_AUTHENTICATION_TIMEOUT_MAX);
   Clock::settle();
-  Clock::resume();
 
   // Ensure another authentication attempt was made.
   AWAIT_READY(authenticationCompletedMessage);
@@ -570,6 +797,8 @@ TEST_F(AuthenticationTest, DropFinalSASLMessageForSlave)
 // authenticates.
 TEST_F(AuthenticationTest, MasterFailover)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -612,6 +841,8 @@ TEST_F(AuthenticationTest, MasterFailover)
 // authenticates.
 TEST_F(AuthenticationTest, MasterFailoverDuringSlaveAuthentication)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -623,6 +854,12 @@ TEST_F(AuthenticationTest, MasterFailoverDuringSlaveAuthentication)
   slave::Flags slaveFlags = CreateSlaveFlags();
   Try<Owned<cluster::Slave>> slave = StartSlave(&detector, slaveFlags);
   ASSERT_SOME(slave);
+
+  // Advance the clock to trigger authentication attempt.
+  // Currently the initial backoff is [0, registration_backoff_factor]
+  // for agents both with or without authentication. See MESOS-9173.
+  Clock::advance(slave::DEFAULT_REGISTRATION_BACKOFF_FACTOR);
+  Clock::settle();
 
   AWAIT_READY(authenticateMessage);
 
@@ -638,6 +875,11 @@ TEST_F(AuthenticationTest, MasterFailoverDuringSlaveAuthentication)
   // Appoint a new master and inform the slave about it.
   detector.appoint(master.get()->pid);
 
+  // Advance the clock to trigger authentication and registration attempt.
+  // The initial registration delay is between [0, registration_backoff_factor].
+  Clock::advance(slave::DEFAULT_REGISTRATION_BACKOFF_FACTOR);
+  Clock::settle();
+
   // Slave should be able to get registered.
   AWAIT_READY(slaveRegisteredMessage);
   ASSERT_NE("", slaveRegisteredMessage->slave_id().value());
@@ -649,6 +891,8 @@ TEST_F(AuthenticationTest, MasterFailoverDuringSlaveAuthentication)
 // detected due to leader election), it is handled properly.
 TEST_F(AuthenticationTest, LeaderElection)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -686,6 +930,8 @@ TEST_F(AuthenticationTest, LeaderElection)
 // detected due to leader election), it is handled properly.
 TEST_F(AuthenticationTest, LeaderElectionDuringSlaveAuthentication)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -698,6 +944,12 @@ TEST_F(AuthenticationTest, LeaderElectionDuringSlaveAuthentication)
   Try<Owned<cluster::Slave>> slave = StartSlave(&detector, slaveFlags);
   ASSERT_SOME(slave);
 
+  // Advance the clock to trigger authentication attempt.
+  // Currently the initial backoff is [0, registration_backoff_factor]
+  // for agents both with or without authentication. See MESOS-9173.
+  Clock::advance(slave::DEFAULT_REGISTRATION_BACKOFF_FACTOR);
+  Clock::settle();
+
   // Drop the intermediate SASL message so that authentication fails.
   AWAIT_READY(authenticationStepMessage);
 
@@ -706,6 +958,11 @@ TEST_F(AuthenticationTest, LeaderElectionDuringSlaveAuthentication)
 
   // Appoint a new master and inform the slave about it.
   detector.appoint(master.get()->pid);
+
+  // Advance the clock to trigger authentication and registration attempt.
+  // The initial registration delay is between [0, registration_backoff_factor].
+  Clock::advance(slave::DEFAULT_REGISTRATION_BACKOFF_FACTOR);
+  Clock::settle();
 
   // Slave should be able to get registered.
   AWAIT_READY(slaveRegisteredMessage);
@@ -718,6 +975,8 @@ TEST_F(AuthenticationTest, LeaderElectionDuringSlaveAuthentication)
 // with the master when it comes back up.
 TEST_F(AuthenticationTest, SchedulerFailover)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
@@ -785,6 +1044,8 @@ TEST_F(AuthenticationTest, SchedulerFailover)
 // authentication.
 TEST_F(AuthenticationTest, RejectedSchedulerFailover)
 {
+  Clock::pause();
+
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 

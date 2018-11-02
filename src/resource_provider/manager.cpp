@@ -63,6 +63,7 @@ using mesos::resource_provider::AdmitResourceProvider;
 using mesos::resource_provider::Call;
 using mesos::resource_provider::Event;
 using mesos::resource_provider::Registrar;
+using mesos::resource_provider::RemoveResourceProvider;
 
 using mesos::resource_provider::registry::Registry;
 
@@ -190,6 +191,9 @@ public:
       const AcknowledgeOperationStatusMessage& message);
 
   void reconcileOperations(const ReconcileOperationsMessage& message);
+
+  Future<Nothing> removeResourceProvider(
+      const ResourceProviderID& resourceProviderId);
 
   Future<Nothing> publishResources(const Resources& resources);
 
@@ -601,6 +605,66 @@ void ResourceProviderManagerProcess::reconcileOperations(
 }
 
 
+Future<Nothing> ResourceProviderManagerProcess::removeResourceProvider(
+    const ResourceProviderID& resourceProviderId)
+{
+  LOG(INFO) << "Removing resource provider " << resourceProviderId;
+
+  Future<bool> removeResourceProvider = registrar
+    ->apply(Owned<mesos::resource_provider::Registrar::Operation>(
+        new RemoveResourceProvider(resourceProviderId)));
+
+  removeResourceProvider.onAny(
+      [resourceProviderId](const Future<bool>& removeResourceProvider) {
+        if (!removeResourceProvider.isReady()) {
+          LOG(ERROR) << "Not removing resource provider " << resourceProviderId
+                     << " as registry update did not succeed: "
+                     << removeResourceProvider;
+        }
+      });
+
+  return removeResourceProvider
+    .then(defer(
+        self(),
+        [this, resourceProviderId](const Future<bool>& removeResourceProvider) {
+          // TODO(bbannier): We should also on a best effort basis send a
+          // `TEARDOWN` event when a removed resource provider attempts to
+          // resubscribe. This can happen e.g., if the event gets lost on its
+          // way to the resource provider, or if the resource provider is not
+          // connected.
+          if (resourceProviders.subscribed.contains(resourceProviderId)) {
+            const Owned<ResourceProvider>& resourceProvider =
+              resourceProviders.subscribed.at(resourceProviderId);
+            Event event;
+            event.set_type(Event::TEARDOWN);
+
+            if (!resourceProvider->http.send(event)) {
+              LOG(WARNING)
+                << "Failed to send TEARDOWN event to resource provider "
+                << resourceProviderId << ": connection closed";
+            }
+          } else {
+            LOG(WARNING)
+              << "Failed to send TEARDOWN event to resource provider "
+              << resourceProviderId << ": resource provider not subscribed";
+          }
+
+          resourceProviders.known.erase(resourceProviderId);
+          resourceProviders.subscribed.erase(resourceProviderId);
+
+          ResourceProviderMessage::Remove remove{resourceProviderId};
+
+          ResourceProviderMessage message;
+          message.type = ResourceProviderMessage::Type::REMOVE;
+          message.remove = std::move(remove);
+
+          messages.put(std::move(message));
+
+          return Nothing();
+        }));
+}
+
+
 Future<Nothing> ResourceProviderManagerProcess::publishResources(
     const Resources& resources)
 {
@@ -798,10 +862,18 @@ void ResourceProviderManagerProcess::_subscribe(
         std::move(resourceProvider_));
   }
 
+  ResourceProviderMessage::Subscribe subscribe{resourceProvider->info};
+
+  ResourceProviderMessage message;
+  message.type = ResourceProviderMessage::Type::SUBSCRIBE;
+  message.subscribe = std::move(subscribe);
+
   // TODO(jieyu): Start heartbeat for the resource provider.
   resourceProviders.subscribed.put(
       resourceProviderId,
       std::move(resourceProvider));
+
+  messages.put(std::move(message));
 }
 
 
@@ -848,7 +920,7 @@ void ResourceProviderManagerProcess::updateState(
     << resourceProvider->info.id();
 
   ResourceProviderMessage::UpdateState updateState{
-      resourceProvider->info,
+      resourceProvider->info.id(),
       update.resource_version_uuid(),
       update.resources(),
       std::move(operations)};
@@ -979,6 +1051,15 @@ void ResourceProviderManager::reconcileOperations(
       message);
 }
 
+
+Future<Nothing> ResourceProviderManager::removeResourceProvider(
+    const ResourceProviderID& resourceProviderId) const
+{
+  return dispatch(
+      process.get(),
+      &ResourceProviderManagerProcess::removeResourceProvider,
+      resourceProviderId);
+}
 
 Future<Nothing> ResourceProviderManager::publishResources(
     const Resources& resources)

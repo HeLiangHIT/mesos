@@ -21,6 +21,7 @@
 #include <memory>
 #include <numeric>
 #include <utility>
+#include <vector>
 
 #include <glog/logging.h>
 
@@ -28,6 +29,7 @@
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/delay.hpp>
+#include <process/dispatch.hpp>
 #include <process/id.hpp>
 #include <process/loop.hpp>
 #include <process/process.hpp>
@@ -48,9 +50,11 @@
 
 #include <stout/foreach.hpp>
 #include <stout/hashmap.hpp>
+#include <stout/hashset.hpp>
 #include <stout/linkedhashmap.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
+#include <stout/strings.hpp>
 
 #include <stout/os/realpath.hpp>
 
@@ -86,23 +90,24 @@ using std::shared_ptr;
 using std::string;
 using std::vector;
 
+using process::after;
+using process::await;
 using process::Break;
+using process::collect;
 using process::Continue;
 using process::ControlFlow;
+using process::defer;
+using process::delay;
+using process::dispatch;
 using process::Failure;
 using process::Future;
+using process::loop;
 using process::Owned;
 using process::Process;
 using process::Promise;
 using process::Sequence;
-using process::Timeout;
-
-using process::after;
-using process::await;
-using process::collect;
-using process::defer;
-using process::loop;
 using process::spawn;
+using process::Timeout;
 
 using process::http::authentication::Principal;
 
@@ -164,36 +169,21 @@ static bool isValidType(const string& s)
 static const Duration CSI_ENDPOINT_CREATION_TIMEOUT = Minutes(1);
 
 
-// Returns a prefix for naming standalone containers to run CSI plugins
-// for the resource provider. The prefix is of the following format:
-//     <rp_type>-<rp_name>--
-// where <rp_type> and <rp_name> are the type and name of the resource
-// provider, with dots replaced by dashes. We use a double-dash at the
-// end to explicitly mark the end of the prefix.
-static inline string getContainerIdPrefix(const ResourceProviderInfo& info)
-{
-  return strings::join(
-      "-",
-      strings::replace(info.type(), ".", "-"),
-      info.name(),
-      "-");
-}
-
-
-// Returns the container ID of the standalone container to run a CSI
-// plugin component. The container ID is of the following format:
-//     <rp_type>-<rp_name>--<csi_type>-<csi_name>--<list_of_services>
-// where <rp_type> and <rp_name> are the type and name of the resource
-// provider, and <csi_type> and <csi_name> are the type and name of the
-// CSI plugin, with dots replaced by dashes. <list_of_services> lists
-// the CSI services provided by the component, concatenated with dashes.
+// Returns the container ID of the standalone container to run a CSI plugin
+// component. The container ID is of the following format:
+//     <cid_prefix><csi_type>-<csi_name>--<list_of_services>
+// where <cid_prefix> comes from the principal of the resource provider,
+// <csi_type> and <csi_name> are the type and name of the CSI plugin, with dots
+// replaced by dashes. <list_of_services> lists the CSI services provided by the
+// component, concatenated with dashes.
 static inline ContainerID getContainerId(
     const ResourceProviderInfo& info,
     const CSIPluginContainerInfo& container)
 {
-  string value = getContainerIdPrefix(info);
+  const Principal principal = LocalResourceProvider::principal(info);
+  CHECK(principal.claims.contains("cid_prefix"));
 
-  value += strings::join(
+  string value = principal.claims.at("cid_prefix") + strings::join(
       "-",
       strings::replace(info.storage().plugin().type(), ".", "-"),
       info.storage().plugin().name(),
@@ -395,7 +385,9 @@ private:
 
   Future<csi::v0::Client> connect(const string& endpoint);
   Future<csi::v0::Client> getService(const ContainerID& containerId);
-  Future<Nothing> killService(const ContainerID& containerId);
+  Future<hashmap<ContainerID, Option<ContainerStatus>>> getContainers();
+  Future<Nothing> waitContainer(const ContainerID& containerId);
+  Future<Nothing> killContainer(const ContainerID& containerId);
 
   Future<Nothing> prepareIdentityService();
   Future<Nothing> prepareControllerService();
@@ -435,6 +427,8 @@ private:
   Try<Nothing> updateOperationStatus(
       const id::UUID& operationUuid,
       const Try<vector<ResourceConversion>>& conversions);
+
+  void garbageCollectOperationPath(const id::UUID& operationUuid);
 
   void checkpointResourceProviderState();
   void checkpointVolumeState(const string& volumeId);
@@ -582,6 +576,10 @@ void StorageLocalResourceProviderProcess::received(const Event& event)
       reconcileOperations(event.reconcile_operations());
       break;
     }
+    case Event::TEARDOWN: {
+      // TODO(bbannier): Clean up state after teardown.
+      break;
+    }
     case Event::UNKNOWN: {
       LOG(WARNING) << "Received an UNKNOWN event and ignored";
       break;
@@ -667,7 +665,7 @@ Future<Nothing> StorageLocalResourceProviderProcess::recover()
     .then(defer(self(), [=]() -> Future<Nothing> {
       LOG(INFO)
         << "Finished recovery for resource provider with type '" << info.type()
-        << "' and name '" << info.name();
+        << "' and name '" << info.name() << "'";
 
       state = DISCONNECTED;
 
@@ -696,103 +694,127 @@ Future<Nothing> StorageLocalResourceProviderProcess::recover()
 
 Future<Nothing> StorageLocalResourceProviderProcess::recoverServices()
 {
-  Try<list<string>> containerPaths = csi::paths::getContainerPaths(
-      slave::paths::getCsiRootDir(workDir),
-      info.storage().plugin().type(),
-      info.storage().plugin().name());
-
-  if (containerPaths.isError()) {
-    return Failure(
-        "Failed to find plugin containers for CSI plugin type '" +
-        info.storage().plugin().type() + "' and name '" +
-        info.storage().plugin().name() + ": " +
-        containerPaths.error());
-  }
-
-  vector<Future<Nothing>> futures;
-
-  foreach (const string& path, containerPaths.get()) {
-    Try<csi::paths::ContainerPath> containerPath =
-      csi::paths::parseContainerPath(
-          slave::paths::getCsiRootDir(workDir),
-          path);
-
-    if (containerPath.isError()) {
-      return Failure(
-          "Failed to parse container path '" + path + "': " +
-          containerPath.error());
-    }
-
-    CHECK_EQ(info.storage().plugin().type(), containerPath->type);
-    CHECK_EQ(info.storage().plugin().name(), containerPath->name);
-
-    const ContainerID& containerId = containerPath->containerId;
-
-    CHECK_SOME(nodeContainerId);
-
-    // Do not kill the up-to-date controller or node container.
-    // Otherwise, kill them and perform cleanups.
-    if (nodeContainerId == containerId ||
-        controllerContainerId == containerId) {
-      const string configPath = csi::paths::getContainerInfoPath(
+  return getContainers()
+    .then(defer(self(), [=](
+        const hashmap<ContainerID, Option<ContainerStatus>>& runningContainers)
+        -> Future<Nothing> {
+      Try<list<string>> containerPaths = csi::paths::getContainerPaths(
           slave::paths::getCsiRootDir(workDir),
           info.storage().plugin().type(),
-          info.storage().plugin().name(),
-          containerId);
+          info.storage().plugin().name());
 
-      if (os::exists(configPath)) {
-        Result<CSIPluginContainerInfo> config =
-          slave::state::read<CSIPluginContainerInfo>(configPath);
-
-        if (config.isError()) {
-          return Failure(
-              "Failed to read plugin container config from '" +
-              configPath + "': " + config.error());
-        }
-
-        if (config.isSome() &&
-            getCSIPluginContainerInfo(info, containerId) == config.get()) {
-          continue;
-        }
+      if (containerPaths.isError()) {
+        return Failure(
+            "Failed to find plugin containers for CSI plugin type '" +
+            info.storage().plugin().type() + "' and name '" +
+            info.storage().plugin().name() + "': " +
+            containerPaths.error());
       }
-    }
 
-    futures.push_back(killService(containerId)
-      .then(defer(self(), [=]() -> Future<Nothing> {
-        Result<string> endpointDir =
-          os::realpath(csi::paths::getEndpointDirSymlinkPath(
+      vector<Future<Nothing>> futures;
+
+      foreach (const string& path, containerPaths.get()) {
+        Try<csi::paths::ContainerPath> containerPath =
+          csi::paths::parseContainerPath(
+              slave::paths::getCsiRootDir(workDir),
+              path);
+
+        if (containerPath.isError()) {
+          return Failure(
+              "Failed to parse container path '" + path + "': " +
+              containerPath.error());
+        }
+
+        CHECK_EQ(info.storage().plugin().type(), containerPath->type);
+        CHECK_EQ(info.storage().plugin().name(), containerPath->name);
+
+        const ContainerID& containerId = containerPath->containerId;
+
+        // NOTE: Since `getContainers` might return containers that are not
+        // actually running, to identify if the container is actually running,
+        // we check if the `executor_pid` field is set as a workaround.
+        bool isRunningContainer = runningContainers.contains(containerId) &&
+          runningContainers.at(containerId).isSome() &&
+          runningContainers.at(containerId)->has_executor_pid();
+
+        // Do not kill the up-to-date running controller or node container.
+        if ((nodeContainerId == containerId ||
+             controllerContainerId == containerId) && isRunningContainer) {
+          const string configPath = csi::paths::getContainerInfoPath(
               slave::paths::getCsiRootDir(workDir),
               info.storage().plugin().type(),
               info.storage().plugin().name(),
-              containerId));
+              containerId);
 
-        if (endpointDir.isSome()) {
-          Try<Nothing> rmdir = os::rmdir(endpointDir.get());
-          if (rmdir.isError()) {
-            return Failure(
-                "Failed to remove endpoint directory '" + endpointDir.get() +
-                "': " + rmdir.error());
+          if (os::exists(configPath)) {
+            Result<CSIPluginContainerInfo> config =
+              slave::state::read<CSIPluginContainerInfo>(configPath);
+
+            if (config.isError()) {
+              return Failure(
+                  "Failed to read plugin container config from '" + configPath +
+                  "': " + config.error());
+            }
+
+            if (config.isSome() &&
+                getCSIPluginContainerInfo(info, containerId) == config.get()) {
+              continue;
+            }
           }
         }
 
-        Try<Nothing> rmdir = os::rmdir(path);
-        if (rmdir.isError()) {
-          return Failure(
-              "Failed to remove plugin container directory '" + path + "': " +
-              rmdir.error());
+        LOG(INFO) << "Cleaning up plugin container '" << containerId << "'";
+
+        // Otherwise, kill the container only if it is actually running (i.e.,
+        // not already being destroyed), then wait for the container to be
+        // destroyed before performing the cleanup despite if we kill it.
+        Future<Nothing> cleanup = Nothing();
+        if (runningContainers.contains(containerId)) {
+          if (isRunningContainer) {
+            cleanup = killContainer(containerId);
+          }
+          cleanup = cleanup
+            .then(defer(self(), &Self::waitContainer, containerId));
         }
 
-        return Nothing();
-      })));
-  }
+        cleanup = cleanup
+          .then(defer(self(), [=]() -> Future<Nothing> {
+            Result<string> endpointDir =
+              os::realpath(csi::paths::getEndpointDirSymlinkPath(
+                  slave::paths::getCsiRootDir(workDir),
+                  info.storage().plugin().type(),
+                  info.storage().plugin().name(),
+                  containerId));
 
-  // NOTE: The `Controller` service is supported if the plugin has the
-  // `CONTROLLER_SERVICE` capability, and the `NodeGetId` call is
-  // supported if the `Controller` service has the
-  // `PUBLISH_UNPUBLISH_VOLUME` capability. Therefore, we first launch
-  // the node plugin to get the plugin capabilities, then decide if we
-  // need to launch the controller plugin and get the node ID.
-  return collect(futures)
+            if (endpointDir.isSome()) {
+              Try<Nothing> rmdir = os::rmdir(endpointDir.get());
+              if (rmdir.isError()) {
+                return Failure(
+                    "Failed to remove endpoint directory '" +
+                    endpointDir.get() + "': " + rmdir.error());
+              }
+            }
+
+            Try<Nothing> rmdir = os::rmdir(path);
+                if (rmdir.isError()) {
+              return Failure(
+                  "Failed to remove plugin container directory '" + path +
+                  "': " + rmdir.error());
+            }
+
+            return Nothing();
+          }));
+
+        futures.push_back(cleanup);
+      }
+
+      return collect(futures).then([] { return Nothing(); });
+    }))
+    // NOTE: The `Controller` service is supported if the plugin has the
+    // `CONTROLLER_SERVICE` capability, and the `NodeGetId` call is supported if
+    // the `Controller` service has the `PUBLISH_UNPUBLISH_VOLUME` capability.
+    // So we first launch the node plugin to get the plugin capabilities, then
+    // decide if we need to launch the controller plugin and get the node ID.
     .then(defer(self(), &Self::prepareIdentityService))
     .then(defer(self(), &Self::prepareControllerService))
     .then(defer(self(), &Self::prepareNodeService));
@@ -811,7 +833,7 @@ Future<Nothing> StorageLocalResourceProviderProcess::recoverVolumes()
     return Failure(
         "Failed to find volumes for CSI plugin type '" +
         info.storage().plugin().type() + "' and name '" +
-        info.storage().plugin().name() + ": " + volumePaths.error());
+        info.storage().plugin().name() + "': " + volumePaths.error());
   }
 
   vector<Future<Nothing>> futures;
@@ -965,9 +987,8 @@ StorageLocalResourceProviderProcess::recoverResourceProviderState()
 
   if (realpath.isError()) {
     return Failure(
-        "Failed to read the latest symlink for resource provider with "
-        "type '" + info.type() + "' and name '" + info.name() + "'"
-        ": " + realpath.error());
+        "Failed to read the latest symlink for resource provider with type '" +
+        info.type() + "' and name '" + info.name() + "': " + realpath.error());
   }
 
   if (realpath.isSome()) {
@@ -1138,7 +1159,16 @@ StorageLocalResourceProviderProcess::reconcileOperationStatuses()
           uuid.error());
     }
 
-    CHECK(operations.contains(uuid.get()));
+    // NOTE: This could happen if we failed to remove the operation path before.
+    if (!operations.contains(uuid.get())) {
+      LOG(WARNING)
+        << "Ignoring unknown operation (uuid: " << uuid.get()
+        << ") for resource provider " << info.id();
+
+      garbageCollectOperationPath(uuid.get());
+      continue;
+    }
+
     operationUuids.emplace_back(std::move(uuid.get()));
   }
 
@@ -1149,25 +1179,21 @@ StorageLocalResourceProviderProcess::reconcileOperationStatuses()
       using StreamState =
         typename OperationStatusUpdateManagerState::StreamState;
 
-      // Clean up the operations that are terminated.
+      // Clean up the operations that are completed.
+      vector<id::UUID> completedOperations;
       foreachpair (const id::UUID& uuid,
                    const Option<StreamState>& stream,
                    statusUpdateManagerState.streams) {
         if (stream.isSome() && stream->terminated) {
           operations.erase(uuid);
-
-          // Garbage collect the operation metadata.
-          const string path = slave::paths::getOperationPath(
-              slave::paths::getResourceProviderPath(
-                  metaDir, slaveId, info.type(), info.name(), info.id()),
-              uuid);
-
-          Try<Nothing> rmdir = os::rmdir(path);
-          if (rmdir.isError()) {
-            return Failure(
-                "Failed to remove directory '" + path + "': " + rmdir.error());
-          }
+          completedOperations.push_back(uuid);
         }
+      }
+
+      // Garbage collect the operation streams after checkpointing.
+      checkpointResourceProviderState();
+      foreach (const id::UUID& uuid, completedOperations) {
+        garbageCollectOperationPath(uuid);
       }
 
       // Send updates for all missing statuses.
@@ -1240,7 +1266,7 @@ StorageLocalResourceProviderProcess::reconcileOperationStatuses()
 
         auto err = [](const id::UUID& uuid, const string& message) {
           LOG(ERROR)
-            << "Falied to apply operation (uuid: " << uuid << "): "
+            << "Failed to apply operation (uuid: " << uuid << "): "
             << message;
         };
 
@@ -1774,25 +1800,11 @@ void StorageLocalResourceProviderProcess::acknowledgeOperationStatus(
   // acknowledgement will be received. In this case, the following call
   // will fail, so we just leave an error log.
   statusUpdateManager.acknowledgement(operationUuid.get(), statusUuid.get())
-    .then(defer(self(), [=](bool continuation) -> Future<Nothing> {
+    .then(defer(self(), [=](bool continuation) {
       if (!continuation) {
         operations.erase(operationUuid.get());
-
-        // Garbage collect the operation metadata.
-        const string path = slave::paths::getOperationPath(
-            slave::paths::getResourceProviderPath(
-                metaDir, slaveId, info.type(), info.name(), info.id()),
-            operationUuid.get());
-
-        // NOTE: We check if the path exists since we do not checkpoint
-        // some status updates, such as OPERATION_DROPPED.
-        if (os::exists(path)) {
-          Try<Nothing> rmdir = os::rmdir(path);
-          if (rmdir.isError()) {
-            return Failure(
-                "Failed to remove directory '" + path + "': " + rmdir.error());
-          }
-        }
+        checkpointResourceProviderState();
+        garbageCollectOperationPath(operationUuid.get());
       }
 
       return Nothing();
@@ -1886,7 +1898,8 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::connect(
   return future
     .then(defer(self(), [=](csi::v0::Client client) {
       return call<csi::v0::PROBE>(client, csi::v0::ProbeRequest())
-        .then(defer(self(), [=](const csi::v0::ProbeResponse& response) {
+        .then(defer(self(), [=](
+            const csi::v0::ProbeResponse& response) -> csi::v0::Client {
           return client;
         }));
     }));
@@ -1906,11 +1919,24 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
 
   Option<CSIPluginContainerInfo> config =
     getCSIPluginContainerInfo(info, containerId);
-
   CHECK_SOME(config);
 
-  CommandInfo commandInfo;
+  // We checkpoint the config first to keep track of the plugin container even
+  // if we fail to create its container daemon.
+  const string configPath = csi::paths::getContainerInfoPath(
+      slave::paths::getCsiRootDir(workDir),
+      info.storage().plugin().type(),
+      info.storage().plugin().name(),
+      containerId);
 
+  Try<Nothing> checkpoint = slave::state::checkpoint(configPath, config.get());
+  if (checkpoint.isError()) {
+    return Failure(
+        "Failed to checkpoint plugin container config to '" + configPath +
+        "': " + checkpoint.error());
+  }
+
+  CommandInfo commandInfo;
   if (config->has_command()) {
     commandInfo.CopyFrom(config->command());
   }
@@ -1935,7 +1961,6 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
   endpointVar->set_value("unix://" + endpointPath);
 
   ContainerInfo containerInfo;
-
   if (config->has_container()) {
     containerInfo.CopyFrom(config->container());
   } else {
@@ -1980,20 +2005,10 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
       commandInfo,
       config->resources(),
       containerInfo,
-      std::function<Future<Nothing>()>(defer(self(), [=]() {
-        CHECK(services.at(containerId)->future().isPending());
-
-        return connect(endpointPath)
-          .then(defer(self(), [=](const csi::v0::Client& client) {
-            services.at(containerId)->set(client);
-            return Nothing();
-          }))
-          .onFailed(defer(self(), [=](const string& failure) {
-            services.at(containerId)->fail(failure);
-          }))
-          .onDiscarded(defer(self(), [=] {
-            services.at(containerId)->discard();
-          }));
+      std::function<Future<Nothing>()>(defer(self(), [=]() -> Future<Nothing> {
+        CHECK(services.at(containerId)->associate(connect(endpointPath)));
+        return services.at(containerId)->future()
+          .then([] { return Nothing(); });
       })),
       std::function<Future<Nothing>()>(defer(self(), [=]() -> Future<Nothing> {
         ++metrics.csi_plugin_container_terminations;
@@ -2005,8 +2020,8 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
           Try<Nothing> rm = os::rm(endpointPath);
           if (rm.isError()) {
             return Failure(
-                "Failed to remove endpoint '" + endpointPath +
-                "': " + rm.error());
+                "Failed to remove endpoint '" + endpointPath + "': " +
+                rm.error());
           }
         }
 
@@ -2017,20 +2032,6 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
     return Failure(
         "Failed to create container daemon for plugin container '" +
         stringify(containerId) + "': " + daemon.error());
-  }
-
-  // Checkpoint the plugin container config.
-  const string configPath = csi::paths::getContainerInfoPath(
-      slave::paths::getCsiRootDir(workDir),
-      info.storage().plugin().type(),
-      info.storage().plugin().name(),
-      containerId);
-
-  Try<Nothing> checkpoint = slave::state::checkpoint(configPath, config.get());
-  if (checkpoint.isError()) {
-    return Failure(
-        "Failed to checkpoint plugin container config to '" + configPath +
-        "': " + checkpoint.error());
   }
 
   auto die = [=](const string& message) {
@@ -2048,14 +2049,92 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
 }
 
 
-// Kills the specified plugin container and returns a future that waits
-// for it to terminate.
-Future<Nothing> StorageLocalResourceProviderProcess::killService(
+// Lists all running plugin containers for this resource provider.
+// NOTE: This might return containers that are not actually running,
+// e.g., if they are being destroyed.
+Future<hashmap<ContainerID, Option<ContainerStatus>>>
+StorageLocalResourceProviderProcess::getContainers()
+{
+  agent::Call call;
+  call.set_type(agent::Call::GET_CONTAINERS);
+  call.mutable_get_containers()->set_show_nested(false);
+  call.mutable_get_containers()->set_show_standalone(true);
+
+  return http::post(
+      extractParentEndpoint(url),
+      getAuthHeader(authToken) +
+        http::Headers{{"Accept", stringify(contentType)}},
+      serialize(contentType, evolve(call)),
+      stringify(contentType))
+    .then(defer(self(), [=](const http::Response& httpResponse)
+        -> Future<hashmap<ContainerID, Option<ContainerStatus>>> {
+      hashmap<ContainerID, Option<ContainerStatus>> result;
+
+      if (httpResponse.status != http::OK().status) {
+        return Failure(
+            "Failed to get containers: Unexpected response '" +
+            httpResponse.status + "' (" + httpResponse.body + ")");
+      }
+
+      Try<v1::agent::Response> v1Response =
+        deserialize<v1::agent::Response>(contentType, httpResponse.body);
+      if (v1Response.isError()) {
+        return Failure("Failed to get containers: " + v1Response.error());
+      }
+
+      const Principal principal = LocalResourceProvider::principal(info);
+      CHECK(principal.claims.contains("cid_prefix"));
+
+      const string& cidPrefix = principal.claims.at("cid_prefix");
+
+      agent::Response response = devolve(v1Response.get());
+      foreach (const agent::Response::GetContainers::Container& container,
+               response.get_containers().containers()) {
+        if (strings::startsWith(container.container_id().value(), cidPrefix)) {
+          result.put(
+              container.container_id(),
+              container.has_container_status()
+                ? container.container_status()
+                : Option<ContainerStatus>::none());
+        }
+      }
+
+      return result;
+    }));
+}
+
+
+// Waits for the specified plugin container to be terminated.
+Future<Nothing> StorageLocalResourceProviderProcess::waitContainer(
     const ContainerID& containerId)
 {
-  CHECK(!daemons.contains(containerId));
-  CHECK(!services.contains(containerId));
+  agent::Call call;
+  call.set_type(agent::Call::WAIT_CONTAINER);
+  call.mutable_wait_container()->mutable_container_id()->CopyFrom(containerId);
 
+  return http::post(
+      extractParentEndpoint(url),
+      getAuthHeader(authToken),
+      serialize(contentType, evolve(call)),
+      stringify(contentType))
+    .then([containerId](const http::Response& response) -> Future<Nothing> {
+      if (response.status != http::OK().status &&
+          response.status != http::NotFound().status) {
+        return Failure(
+            "Failed to wait for container '" + stringify(containerId) +
+            "': Unexpected response '" + response.status + "' (" + response.body
+            + ")");
+      }
+
+      return Nothing();
+    });
+}
+
+
+// Kills the specified plugin container.
+Future<Nothing> StorageLocalResourceProviderProcess::killContainer(
+    const ContainerID& containerId)
+{
   agent::Call call;
   call.set_type(agent::Call::KILL_CONTAINER);
   call.mutable_kill_container()->mutable_container_id()->CopyFrom(containerId);
@@ -2065,41 +2144,17 @@ Future<Nothing> StorageLocalResourceProviderProcess::killService(
       getAuthHeader(authToken),
       serialize(contentType, evolve(call)),
       stringify(contentType))
-    .then(defer(self(), [=](const http::Response& response) -> Future<Nothing> {
-      if (response.status == http::NotFound().status) {
-        return Nothing();
-      }
-
-      if (response.status != http::OK().status) {
+    .then([containerId](const http::Response& response) -> Future<Nothing> {
+      if (response.status != http::OK().status &&
+          response.status != http::NotFound().status) {
         return Failure(
             "Failed to kill container '" + stringify(containerId) +
             "': Unexpected response '" + response.status + "' (" + response.body
             + ")");
       }
 
-      agent::Call call;
-      call.set_type(agent::Call::WAIT_CONTAINER);
-      call.mutable_wait_container()
-        ->mutable_container_id()->CopyFrom(containerId);
-
-      return http::post(
-          extractParentEndpoint(url),
-          getAuthHeader(authToken),
-          serialize(contentType, evolve(call)),
-          stringify(contentType))
-        .then(defer(self(), [=](
-            const http::Response& response) -> Future<Nothing> {
-          if (response.status != http::OK().status &&
-              response.status != http::NotFound().status) {
-            return Failure(
-                "Failed to wait for container '" + stringify(containerId) +
-                "': Unexpected response '" + response.status + "' (" +
-                response.body + ")");
-          }
-
-          return Nothing();
-        }));
-    }));
+      return Nothing();
+    });
 }
 
 
@@ -2620,7 +2675,8 @@ Future<string> StorageLocalResourceProviderProcess::createVolume(
       *request.mutable_parameters() = profileInfo.parameters;
 
       return call<csi::v0::CREATE_VOLUME>(client, std::move(request))
-        .then(defer(self(), [=](const csi::v0::CreateVolumeResponse& response) {
+        .then(defer(self(), [=](
+            const csi::v0::CreateVolumeResponse& response) -> string {
           const csi::v0::Volume& volume = response.volume();
 
           if (volumes.contains(volume.id())) {
@@ -3233,8 +3289,8 @@ StorageLocalResourceProviderProcess::applyDestroyDisk(
           Resource::DiskInfo::Source::RAW);
       converted.mutable_disk()->mutable_source()->clear_mount();
 
-      // We only clear the the volume ID and metadata if the destroyed volume is
-      // not a pre-existing volume.
+      // We only clear the volume ID and metadata if the destroyed volume is not
+      // a pre-existing volume.
       if (resource.disk().source().has_profile()) {
         converted.mutable_disk()->mutable_source()->clear_id();
         converted.mutable_disk()->mutable_source()->clear_metadata();
@@ -3376,6 +3432,28 @@ Try<Nothing> StorageLocalResourceProviderProcess::updateOperationStatus(
 }
 
 
+void StorageLocalResourceProviderProcess::garbageCollectOperationPath(
+    const id::UUID& operationUuid)
+{
+  CHECK(!operations.contains(operationUuid));
+
+  const string path = slave::paths::getOperationPath(
+      slave::paths::getResourceProviderPath(
+          metaDir, slaveId, info.type(), info.name(), info.id()),
+      operationUuid);
+
+  // NOTE: We check if the path exists since we do not checkpoint some status
+  // updates, such as OPERATION_DROPPED.
+  if (os::exists(path)) {
+    Try<Nothing> rmdir =  os::rmdir(path);
+    if (rmdir.isError()) {
+      LOG(ERROR)
+        << "Failed to remove directory '" << path << "': " << rmdir.error();
+    }
+  }
+}
+
+
 void StorageLocalResourceProviderProcess::checkpointResourceProviderState()
 {
   ResourceProviderState state;
@@ -3416,7 +3494,9 @@ void StorageLocalResourceProviderProcess::checkpointResourceProviderState()
   const string statePath = slave::paths::getResourceProviderStatePath(
       metaDir, slaveId, info.type(), info.name(), info.id());
 
-  Try<Nothing> checkpoint = slave::state::checkpoint(statePath, state);
+  // NOTE: We ensure the checkpoint is synced to the filesystem to avoid
+  // resulting in a stale or empty checkpoint when a system crash happens.
+  Try<Nothing> checkpoint = slave::state::checkpoint(statePath, state, true);
   CHECK_SOME(checkpoint)
     << "Failed to checkpoint resource provider state to '" << statePath << "': "
     << checkpoint.error();
@@ -3432,8 +3512,10 @@ void StorageLocalResourceProviderProcess::checkpointVolumeState(
       info.storage().plugin().name(),
       volumeId);
 
+  // NOTE: We ensure the checkpoint is synced to the filesystem to avoid
+  // resulting in a stale or empty checkpoint when a system crash happens.
   Try<Nothing> checkpoint =
-    slave::state::checkpoint(statePath, volumes.at(volumeId).state);
+    slave::state::checkpoint(statePath, volumes.at(volumeId).state, true);
 
   CHECK_SOME(checkpoint)
     << "Failed to checkpoint volume state to '" << statePath << "':"
@@ -3471,8 +3553,8 @@ void StorageLocalResourceProviderProcess::sendResourceProviderStateUpdate()
   };
 
   driver->send(evolve(call))
-    .onFailed(std::bind(die, info.id(), lambda::_1))
-    .onDiscarded(std::bind(die, info.id(), "future discarded"));
+    .onFailed(defer(self(), std::bind(die, info.id(), lambda::_1)))
+    .onDiscarded(defer(self(), std::bind(die, info.id(), "future discarded")));
 }
 
 
@@ -3683,6 +3765,19 @@ Try<Owned<LocalResourceProvider>> StorageLocalResourceProvider::create(
     const Option<string>& authToken,
     bool strict)
 {
+  Option<Error> error = validate(info);
+  if (error.isSome()) {
+    return error.get();
+  }
+
+  return Owned<LocalResourceProvider>(new StorageLocalResourceProvider(
+      url, workDir, info, slaveId, authToken, strict));
+}
+
+
+Option<Error> StorageLocalResourceProvider::validate(
+    const ResourceProviderInfo& info)
+{
   if (info.has_id()) {
     return Error("'ResourceProviderInfo.id' must not be set");
   }
@@ -3733,17 +3828,7 @@ Try<Owned<LocalResourceProvider>> StorageLocalResourceProvider::create(
         stringify(CSIPluginContainerInfo::NODE_SERVICE) + " not found");
   }
 
-  return Owned<LocalResourceProvider>(new StorageLocalResourceProvider(
-      url, workDir, info, slaveId, authToken, strict));
-}
-
-
-Try<Principal> StorageLocalResourceProvider::principal(
-    const ResourceProviderInfo& info)
-{
-  return Principal(
-      Option<string>::none(),
-      {{"cid_prefix", getContainerIdPrefix(info)}});
+  return None();
 }
 
 

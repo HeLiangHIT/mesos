@@ -71,7 +71,6 @@ public:
       const Option<process::http::authentication::Principal>&) const;
 
   // /slave/monitor/statistics
-  // /slave/monitor/statistics.json
   process::Future<process::http::Response> statistics(
       const process::http::Request& request,
       const Option<process::http::authentication::Principal>& principal) const;
@@ -326,6 +325,9 @@ private:
       const mesos::agent::Call& call,
       process::Owned<recordio::Reader<agent::Call>>&& decoder,
       const RequestMediaTypes& mediaTypes) const;
+
+  process::Future<process::http::Response> acknowledgeContainerInputResponse(
+      const ContainerID& containerId) const;
 
   process::Future<process::http::Response> attachContainerOutput(
       const mesos::agent::Call& call,

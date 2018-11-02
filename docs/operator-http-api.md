@@ -2953,6 +2953,10 @@ Content-Type: application/json
         "value": "0.1"
       },
       {
+        "name": "gc_non_executor_container_sandboxes",
+        "value": "false"
+      },
+      {
         "name": "help",
         "value": "false"
       },
@@ -3588,6 +3592,13 @@ This call launches a nested container. Any authorized entity,
 including the executor itself, its tasks, or the operator can use this
 API to launch a nested container.
 
+**NOTE**: Successful invocation of this API will result in some metadata
+tracked by the agent and the creation of a container sandbox under the
+parent container. The REMOVE_NESTED_CONTAINER should be used to remove
+the metadata and sandbox. If the `--gc_non_executor_container_sandboxes`
+agent flag is enabled, the agent will garbage collect the sandboxes of
+any containers launched via this API.
+
 ```
 LAUNCH_NESTED_CONTAINER HTTP Request (JSON):
 
@@ -3958,6 +3969,81 @@ REMOVE_NESTED_CONTAINER HTTP Response (JSON):
 
 HTTP/1.1 200 OK
 ```
+
+### GET_RESOURCE_PROVIDERS
+
+This call retrieves information about all the resource providers known
+to the agent.
+
+```
+GET_RESOURCE_PROVIDERS HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "GET_RESOURCE_PROVIDERS"
+}
+
+
+GET_RESOURCE_PROVIDERS HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+
+Content-Type: application/json
+
+{
+  "type": "GET_RESOURCE_PROVIDERS",
+  "get_resource_providers": {
+    "resource_providers": [
+      {
+        "resource_provider_info": {
+          "id": {
+            "value": "22d25a71-9134-4fe6-88f4-146c31ceaf4a"
+          },
+          "type": "org.apache.mesos.rp.local.storage",
+          "name": "test",
+          "default_reservations": [
+            {
+              "type": "DYNAMIC",
+              "role": "storage"
+            }
+          ],
+          "storage": {
+            "plugin": {
+              "type": "org.apache.mesos.csi.test",
+              "name": "test_csi_plugin",
+              "containers": [
+                {
+                  "services": [
+                    "CONTROLLER_SERVICE",
+                    "NODE_SERVICE"
+                  ],
+                  "command": {
+                    "shell": false,
+                    "value": "/opt/mesos/bin/test-csi-plugin",
+                    "arguments": [
+                      "/opt/mesos/bin/test-csi-plugin",
+                      "--available_capacity=4GB",
+                      "--volumes=",
+                      "--work_dir=/var/run/mesos/test_csi_plugin"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+
+```
+
 
 ### ADD_RESOURCE_PROVIDER_CONFIG
 

@@ -193,15 +193,6 @@ Try<DockerContainerizer*> DockerContainerizer::create(
 
   Shared<Docker> docker = create->share();
 
-  if (flags.docker_mesos_image.isSome()) {
-    Try<Nothing> validateResult = docker->validateVersion(Version(1, 5, 0));
-    if (validateResult.isError()) {
-      string message = "Docker with mesos images requires docker 1.5+";
-      message += validateResult.error();
-      return Error(message);
-    }
-  }
-
   // TODO(tnachen): We should also mark the work directory as shared
   // mount here, more details please refer to MESOS-3483.
 
@@ -588,24 +579,15 @@ Try<Nothing> DockerContainerizerProcess::updatePersistentVolumes(
               << "' for persistent volume " << resource
               << " of container " << containerId;
 
+    const unsigned flags =
+      MS_BIND | (resource.disk().volume().mode() == Volume::RO ? MS_RDONLY : 0);
+
     // Bind mount the persistent volume to the container.
-    Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, nullptr);
+    Try<Nothing> mount = fs::mount(source, target, None(), flags, nullptr);
     if (mount.isError()) {
       return Error(
           "Failed to mount persistent volume from '" +
           source + "' to '" + target + "': " + mount.error());
-    }
-
-    // If the mount needs to be read-only, do a remount.
-    if (resource.disk().volume().mode() == Volume::RO) {
-      mount = fs::mount(
-          None(), target, None(), MS_BIND | MS_RDONLY | MS_REMOUNT, nullptr);
-
-      if (mount.isError()) {
-        return Error(
-            "Failed to remount persistent volume as read-only from '" +
-            source + "' to '" + target + "': " + mount.error());
-      }
     }
   }
 #else
@@ -2068,8 +2050,8 @@ Try<ResourceStatistics> DockerContainerizerProcess::cgroupsStatistics(
 #ifndef __linux__
   return Error("Does not support cgroups on non-linux platform");
 #else
-  const Result<string> cpuacctHierarchy = cgroups::hierarchy("cpuacct");
-  const Result<string> memHierarchy = cgroups::hierarchy("memory");
+  static const Result<string> cpuacctHierarchy = cgroups::hierarchy("cpuacct");
+  static const Result<string> memHierarchy = cgroups::hierarchy("memory");
 
   // NOTE: Normally, a Docker container should be in its own cgroup.
   // However, a zombie process (exited but not reaped) will be
@@ -2144,7 +2126,7 @@ Try<ResourceStatistics> DockerContainerizerProcess::cgroupsStatistics(
 
   // Add the cpu.stat information only if CFS is enabled.
   if (flags.cgroups_enable_cfs) {
-    const Result<string> cpuHierarchy = cgroups::hierarchy("cpu");
+    static const Result<string> cpuHierarchy = cgroups::hierarchy("cpu");
 
     if (cpuHierarchy.isError()) {
       return Error(

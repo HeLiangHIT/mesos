@@ -212,7 +212,7 @@ AC_ARG_WITH([libev],
 AC_ARG_WITH([libevent],
             AS_HELP_STRING([--with-libevent=@<:@=DIR@:>@],
                            [specify where to locate the libevent library]),
-            [], [])
+            [without_bundled_libevent=yes], [])
 
 AC_ARG_WITH([picojson],
             AS_HELP_STRING([--with-picojson@<:@=DIR@:>@],
@@ -282,30 +282,12 @@ AM_CONDITIONAL([ENABLE_HARDENING], [test x"$enable_hardening" = "xyes"])
 
 AS_CASE($ax_cv_cxx_compiler_vendor,
   [clang], [
-    # Check if -Wno-unused-local-typedef is needed by checking a sample
-    # compilation which contains a local unused typedef.
-    # This is needed because Boost 1.53.0 fails to compile with upstream
-    # Clang 3.6 without -Wno-unused-local-typedef. Apple LLVM based on
-    # Clang 3.6 doesn't have the same behavior.
-    AC_LANG_PUSH([C++])
-    AC_COMPILE_IFELSE(
-    [AC_LANG_SOURCE([[
-      #pragma clang diagnostic error "-Wunused-local-typedef"
-
-      int foo()
-      {
-        typedef int return_type;
-        return 5;
-      }
-    ]])],
-    [warn_local_typedefs=no], [warn_local_typedefs=yes])
-    AC_LANG_POP([C++])
-
-    if test "x$warn_local_typedefs" = "xyes"; then
-      AC_MSG_NOTICE([Disabling warnings about unused local typedefs])
-      CXXFLAGS="${CXXFLAGS} -Wno-unused-local-typedef"
-    fi
-
+    # Upstream Clang 3.6 emits `-Wunused-local-typedef` warnings when compiling
+    # Boost so we suppress them here. Apple LLVM based on Clang 3.6 doesn't have
+    # the same behavior. See: https://reviews.apache.org/r/32749/
+    # NOTE(chhsiao): Clang 3.6.0 from the link below seems to compile Boost
+    # 1.53.0/1.65.0 just fine: http://releases.llvm.org/download.html#3.6.0
+    AX_APPEND_COMPILE_FLAGS([-Wno-unused-local-typedef], [CXXFLAGS], [-Werror])
   ], [gnu], [
     # Check for GCC version >= 4.8.
     AX_COMPARE_VERSION([$ax_cv_cxx_compiler_version], [ge], [4.8],
@@ -316,9 +298,8 @@ AS_CASE($ax_cv_cxx_compiler_vendor,
     fi
 
     AC_MSG_NOTICE([Setting up CXXFLAGS for g++ version >= 4.8])
-    # Boost 1.53.0 fails to compile with GCC 4.8 without
-    # -Wno-unused-local-typedefs, and automake does not recognize the
-    # flag.
+    # Boost fails to compile with GCC 4.8+ without `-Wno-unused-local-typedefs`,
+    # and automake does not recognize the flag.
     # TODO(brenden): Remove this when Boost has a resolution.
     CFLAGS="${CFLAGS} -Wno-unused-local-typedefs"
     CXXFLAGS="${CXXFLAGS} -Wno-unused-local-typedefs"
@@ -817,38 +798,21 @@ if test -n "`echo $with_libevent`"; then
 fi
 
 if test "x$enable_libevent" = "xyes"; then
-  AC_CHECK_HEADERS([event2/event.h],
-                   [AC_CHECK_LIB([event],
-                                 [event_base_new],
-                                 [],
-                                 [AC_MSG_ERROR([cannot find libevent
--------------------------------------------------------------------
-libevent version 2+ is required for libprocess to build.
--------------------------------------------------------------------
-                                 ])])],
-                   [AC_MSG_ERROR([cannot find libevent headers
--------------------------------------------------------------------
-libevent version 2+ headers are required for libprocess to build.
--------------------------------------------------------------------
-  ])])
-
-  AC_CHECK_HEADERS([event2/thread.h],
-                   [AC_CHECK_LIB([event_pthreads],
-                                 [evthread_use_pthreads],
-                                 [],
-                                 [AC_MSG_ERROR([cannot find libevent_pthreads
--------------------------------------------------------------------
-libevent_pthreads version 2+ is required for libprocess to build.
--------------------------------------------------------------------
-                                 ])])],
-                   [AC_MSG_ERROR([cannot find libevent_pthreads headers
--------------------------------------------------------------------
-libevent_pthreads version 2+ headers are required for libprocess to build.
--------------------------------------------------------------------
-  ])])
+  # Check if user has asked us to use a preinstalled libevent, or if they
+  # asked us to ignore all bundled libraries while compiling and
+  # linking.
+  if test "x$without_bundled_libevent" = "xyes" || \
+     test "x$enable_bundled" != "xyes"; then
+     MESOS_HAVE_LIBEVENT()
+  else
+    with_bundled_libevent=yes
+  fi
 fi
 
-AM_CONDITIONAL([ENABLE_LIBEVENT], [test x"$enable_libevent" = "xyes"])
+AM_CONDITIONAL([ENABLE_LIBEVENT],
+               [test x"$enable_libevent" = "xyes"])
+AM_CONDITIONAL([WITH_BUNDLED_LIBEVENT],
+               [test "x$with_bundled_libevent" = "xyes"])
 
 
 if test -n "`echo $with_picojson`"; then
@@ -1034,27 +998,17 @@ libcrypto is required for an SSL-enabled build.
   LIBS="-lssl -lcrypto $LIBS"
 
   if test "x$enable_libevent" = "xyes"; then
-    AC_CHECK_HEADERS([event2/bufferevent_ssl.h],
-                     [AC_CHECK_LIB([event_openssl],
-                                   [bufferevent_openssl_get_ssl],
-                                   [],
-                                   [AC_MSG_ERROR([cannot find libevent_openssl
--------------------------------------------------------------------
-libevent_openssl version 2+ is required for an SSL-enabled build.
--------------------------------------------------------------------
-                                   ])])],
-                     [AC_MSG_ERROR([cannot find libevent_openssl headers
--------------------------------------------------------------------
-libevent_openssl version 2+ headers are required for an SSL-enabled build.
--------------------------------------------------------------------
-    ])])
+    if test "x$with_bundled_libevent" != "xyes"; then
+      MESOS_HAVE_LIBEVENT_SSL()
+    fi
   else
     AC_MSG_ERROR([SSL is currently only supported with libevent])
   fi
   AC_DEFINE([USE_SSL_SOCKET], [1])
 fi
 
-AM_CONDITIONAL([ENABLE_SSL], [test x"$enable_ssl" = "xyes"])
+AM_CONDITIONAL([ENABLE_SSL],
+               [test x"$enable_ssl" = "xyes"])
 
 AC_SUBST([SSL_CPPFLAGS])
 AC_SUBST([SSL_LINKERFLAGS])

@@ -523,8 +523,11 @@ class InternetFilter : public TestFilter
 public:
   InternetFilter()
   {
+#ifdef __WINDOWS__
+    error = os::system("ping -n 1 -w 1000 google.com") != 0;
+#else
     error = os::system("ping -c 1 -W 1 google.com") != 0;
-    // TODO(andschwa): Make ping command cross-platform.
+#endif // __WINDOWS__
     if (error) {
       std::cerr
         << "-------------------------------------------------------------\n"
@@ -541,6 +544,57 @@ public:
 
 private:
   bool error;
+};
+
+
+class IPTablesFilter : public TestFilter
+{
+public:
+  IPTablesFilter()
+  {
+#ifdef __linux__
+    // Check iptables -w option
+    //
+    if (os::which("iptables").isNone()) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "No 'iptables' command found so no tests depending\n"
+        << "on 'iptables' will be run\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+
+      iptablesError = Error("iptables command not found");
+      return;
+    }
+
+    if (::geteuid() != 0) {
+      iptablesError = Error("iptables command requires root");
+      return;
+    }
+
+    Try<string> iptables = os::shell("iptables -w -n -L OUTPUT");
+    if (iptables.isError()) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "'iptables' command does not support '-w' option\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+
+      iptablesError = Error("iptables command does not support -w option");
+      return;
+    }
+#else
+    iptablesError = Error("Unsupported platform");
+#endif
+  }
+
+  bool disable(const ::testing::TestInfo* test) const override
+  {
+    return iptablesError.isSome() && matches(test, "IPTABLES_");
+  }
+
+private:
+  Option<Error> iptablesError;
 };
 
 
@@ -922,6 +976,79 @@ private:
 };
 
 
+// This is a test filter for the veth CNI plugin.
+class VEthFilter : public TestFilter
+{
+public:
+  VEthFilter()
+  {
+#ifdef __linux__
+    vector<string> messages;
+
+    // Checking if it runs as root.
+    Result<string> user = os::user();
+    CHECK_SOME(user);
+
+    if (user.get() != "root") {
+      messages.emplace_back("non-root user");
+    }
+
+    // This command returns `ip utility, iproute2-YYMMDD` where
+    // `YYMMDD` is a release (snapshot) date of iproute2.
+    Try<string> ipVersion = os::shell("ip -Version");
+
+    // Checking if iproute2 exists.
+    if (ipVersion.isError()) {
+      messages.emplace_back("iproute2 not found");
+    } else {
+      // Checking if it supports `ip link set ... netns ...`.
+      const string version = strings::trim(ipVersion.get());
+      if (version.size() < 6) {
+        messages.emplace_back("unexpected version");
+      } else {
+        Try<int> snapshot = numify<int>(version.substr(version.size() - 6));
+        if (snapshot.isError()) {
+          messages.emplace_back("iproute2 version is not an integer");
+        } else if (snapshot.get() < 100224) {
+          // Support for `netns` was added to iproute2 in v2.6.33.
+          messages.emplace_back("iproute2 doesn't support network namespaces");
+        }
+      }
+    }
+
+    // Checking if libprocess is bound on loopback address, in that
+    // case network namespace with veth network won't be able to
+    // connect to parent process on host network namespace.
+    // TODO(urbanserj): Improve the network connectivity check.
+    process::network::inet::Address address = process::address();
+    if (address.ip.isLoopback()) {
+      messages.emplace_back("libprocess is bound on loopback address");
+    }
+
+    disabled = !messages.empty();
+    if (disabled) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "We can't run any VETH tests:\n"
+        << strings::join("\n", messages) << "\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+    }
+#else
+    disabled = true;
+#endif // __linux__
+  }
+
+  bool disable(const ::testing::TestInfo* test) const override
+  {
+    return matches(test, "VETH_") && disabled;
+  }
+
+private:
+  bool disabled;
+};
+
+
 Environment::Environment(const Flags& _flags)
   : stout::internal::tests::Environment(
         std::vector<std::shared_ptr<TestFilter>>{
@@ -933,6 +1060,7 @@ Environment::Environment(const Flags& _flags)
             std::make_shared<DockerFilter>(),
             std::make_shared<DtypeFilter>(),
             std::make_shared<InternetFilter>(),
+            std::make_shared<IPTablesFilter>(),
             std::make_shared<LogrotateFilter>(),
             std::make_shared<NetcatFilter>(),
             std::make_shared<NetClsCgroupsFilter>(),
@@ -944,6 +1072,7 @@ Environment::Environment(const Flags& _flags)
             std::make_shared<RootFilter>(),
             std::make_shared<UnprivilegedUserFilter>(),
             std::make_shared<UnzipFilter>(),
+            std::make_shared<VEthFilter>(),
             std::make_shared<XfsFilter>()}),
     flags(_flags)
 {

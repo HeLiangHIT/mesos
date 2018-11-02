@@ -209,7 +209,7 @@ struct Metrics
   std::vector<process::metrics::PullGauge> resources_revocable_used;
   std::vector<process::metrics::PullGauge> resources_revocable_percent;
 
-  void incrementInvalidSchedulerCalls(const scheduler::Call& call);
+  void incrementInvalidSchedulerCalls(const mesos::scheduler::Call& call);
 
   void incrementTasksStates(
       const TaskState& state,
@@ -220,28 +220,49 @@ struct Metrics
 
 struct FrameworkMetrics
 {
-  explicit FrameworkMetrics(const FrameworkInfo& _frameworkInfo);
+  FrameworkMetrics(
+      const FrameworkInfo& _frameworkInfo,
+      bool publishPerFrameworkMetrics);
 
   ~FrameworkMetrics();
 
-  void incrementCall(const scheduler::Call::Type& callType);
+  void incrementCall(const mesos::scheduler::Call::Type& callType);
 
-  void incrementEvent(const scheduler::Event& event);
+  void incrementEvent(const mesos::scheduler::Event& event);
+
+  // Overloads to convert unversioned messages into events.
+  void incrementEvent(const FrameworkErrorMessage& message);
+  void incrementEvent(const ExitedExecutorMessage& message);
+  void incrementEvent(const LostSlaveMessage& message);
+  void incrementEvent(const InverseOffersMessage& message);
+  void incrementEvent(const ExecutorToFrameworkMessage& message);
+  void incrementEvent(const ResourceOffersMessage& message);
+  void incrementEvent(const RescindResourceOfferMessage& message);
+  void incrementEvent(const RescindInverseOfferMessage& message);
+  void incrementEvent(const FrameworkRegisteredMessage& message);
+  void incrementEvent(const FrameworkReregisteredMessage& message);
+  void incrementEvent(const StatusUpdateMessage& message);
+  void incrementEvent(const UpdateOperationStatusMessage& message);
 
   void incrementTaskState(const TaskState& state);
   void decrementActiveTaskState(const TaskState& state);
 
   void incrementOperation(const Offer::Operation& operation);
 
+  template <typename T> void addMetric(const T& metric);
+  template <typename T> void removeMetric(const T& metric);
+
   const FrameworkInfo frameworkInfo;
+
+  bool publishPerFrameworkMetrics;
 
   process::metrics::PushGauge subscribed;
 
   process::metrics::Counter calls;
-  hashmap<scheduler::Call::Type, process::metrics::Counter> call_types;
+  hashmap<mesos::scheduler::Call::Type, process::metrics::Counter> call_types;
 
   process::metrics::Counter events;
-  hashmap<scheduler::Event::Type, process::metrics::Counter> event_types;
+  hashmap<mesos::scheduler::Event::Type, process::metrics::Counter> event_types;
 
   process::metrics::Counter offers_sent;
   process::metrics::Counter offers_accepted;

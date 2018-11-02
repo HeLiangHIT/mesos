@@ -14,8 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <type_traits>
+
 #include <stout/hashmap.hpp>
-#include <stout/lambda.hpp>
 
 #include "resource_provider/local.hpp"
 
@@ -32,6 +33,23 @@ using process::http::authentication::Principal;
 namespace mesos {
 namespace internal {
 
+struct ProviderAdaptor
+{
+  decltype(LocalResourceProvider::create)* const create;
+  decltype(LocalResourceProvider::validate)* const validate;
+};
+
+
+// TODO(jieyu): Document the built-in local resource providers.
+static const hashmap<string, ProviderAdaptor> adaptors = {
+#ifdef __linux__
+  {"org.apache.mesos.rp.local.storage",
+   {&StorageLocalResourceProvider::create,
+    &StorageLocalResourceProvider::validate}},
+#endif
+};
+
+
 Try<Owned<LocalResourceProvider>> LocalResourceProvider::create(
     const http::URL& url,
     const string& workDir,
@@ -40,40 +58,41 @@ Try<Owned<LocalResourceProvider>> LocalResourceProvider::create(
     const Option<string>& authToken,
     bool strict)
 {
-  // TODO(jieyu): Document the built-in local resource providers.
-  const hashmap<string, lambda::function<decltype(create)>> creators = {
-#if defined(__linux__)
-    {"org.apache.mesos.rp.local.storage", &StorageLocalResourceProvider::create}
-#endif
-  };
-
-  if (creators.contains(info.type())) {
-    return creators.at(info.type())(
-        url, workDir, info, slaveId, authToken, strict);
+  if (!adaptors.contains(info.type())) {
+    return Error("Unknown local resource provider type '" + info.type() + "'");
   }
 
-  return Error("Unknown local resource provider type '" + info.type() + "'");
+  return adaptors.at(info.type()).create(
+      url, workDir, info, slaveId, authToken, strict);
 }
 
 
-Try<Principal> LocalResourceProvider::principal(
-    const ResourceProviderInfo& info)
+Option<Error> LocalResourceProvider::validate(const ResourceProviderInfo& info)
 {
-  // TODO(chhsiao): Document the principals for built-in local resource
-  // providers.
-  const hashmap<string, lambda::function<decltype(principal)>>
-    principalGenerators = {
-#if defined(__linux__)
-      {"org.apache.mesos.rp.local.storage",
-        &StorageLocalResourceProvider::principal}
-#endif
-    };
-
-  if (principalGenerators.contains(info.type())) {
-    return principalGenerators.at(info.type())(info);
+  if (!adaptors.contains(info.type())) {
+    return Error("Unknown local resource provider type '" + info.type() + "'");
   }
 
-  return Error("Unknown local resource provider type '" + info.type() + "'");
+  return adaptors.at(info.type()).validate(info);
+}
+
+
+Principal LocalResourceProvider::principal(const ResourceProviderInfo& info)
+{
+  // The 'cid_prefix' for the resource provider is of the following format:
+  //     <rp_type>-<rp_name>--
+  // where <rp_type> and <rp_name> are the type and name of the resource
+  // provider, with dots replaced by dashes. We use a double-dash at the end to
+  // explicitly mark the end of the prefix.
+  const string cidPrefix = strings::join(
+      "-",
+      strings::replace(info.type(), ".", "-"),
+      info.name(),
+      "-");
+
+  return Principal(
+      Option<string>::none(),
+      {{"cid_prefix", cidPrefix}});
 }
 
 } // namespace internal {

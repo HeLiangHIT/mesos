@@ -620,6 +620,8 @@ TEST_F(FsTest, Close)
 
 
 #if defined(__linux__) || defined(__APPLE__)
+// NOTE: This test is otherwise disabled since it uses `os::setxattr`
+// and `os::getxattr` which are not available elsewhere.
 TEST_F(FsTest, Xattr)
 {
   const string file = path::join(os::getcwd(), id::UUID::random().toString());
@@ -800,5 +802,18 @@ TEST_F(FsTest, ReadWriteAsyncLargeBuffer)
   EXPECT_SOME(os::close(pipes.get()[0]));
   EXPECT_SOME(os::close(pipes.get()[1]));
 }
+#endif // __WINDOWS__
 
+#ifndef __WINDOWS__
+TEST_F(FsTest, Used)
+{
+  Try<Bytes> used = fs::used(".");
+  ASSERT_SOME(used);
+
+  struct statvfs b;
+  ASSERT_EQ(0, ::statvfs(".", &b));
+
+  // Check that the block counts match.
+  EXPECT_EQ(used.get() / b.f_frsize, b.f_blocks - b.f_bfree);
+}
 #endif // __WINDOWS__

@@ -33,6 +33,8 @@ using ::testing::DoDefault;
 using ::testing::Invoke;
 using ::testing::Return;
 
+using mesos::allocator::Options;
+
 namespace mesos {
 namespace internal {
 namespace tests {
@@ -45,7 +47,7 @@ namespace tests {
 
 ACTION_P(InvokeInitialize, allocator)
 {
-  allocator->real->initialize(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+  allocator->real->initialize(arg0, arg1, arg2);
 }
 
 
@@ -208,6 +210,18 @@ ACTION_P(InvokeUpdateWeights, allocator)
 }
 
 
+ACTION_P(InvokePause, allocator)
+{
+  allocator->real->pause();
+}
+
+
+ACTION_P(InvokeResume, allocator)
+{
+  allocator->real->resume();
+}
+
+
 template <typename T = master::allocator::HierarchicalDRFAllocator>
 mesos::allocator::Allocator* createAllocator()
 {
@@ -235,9 +249,9 @@ public:
     // to get the best of both worlds: the ability to use 'DoDefault'
     // and no warnings when expectations are not explicit.
 
-    ON_CALL(*this, initialize(_, _, _, _, _, _, _, _))
+    ON_CALL(*this, initialize(_, _, _))
       .WillByDefault(InvokeInitialize(this));
-    EXPECT_CALL(*this, initialize(_, _, _, _, _, _, _, _))
+    EXPECT_CALL(*this, initialize(_, _, _))
       .WillRepeatedly(DoDefault());
 
     ON_CALL(*this, recover(_, _))
@@ -364,23 +378,28 @@ public:
       .WillByDefault(InvokeUpdateWeights(this));
     EXPECT_CALL(*this, updateWeights(_))
       .WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, pause())
+      .WillByDefault(InvokePause(this));
+    EXPECT_CALL(*this, pause())
+      .WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, resume())
+      .WillByDefault(InvokeResume(this));
+    EXPECT_CALL(*this, resume())
+      .WillRepeatedly(DoDefault());
   }
 
   ~TestAllocator() override {}
 
-  MOCK_METHOD8(initialize, void(
-      const Duration&,
+  MOCK_METHOD3(initialize, void(
+      const Options& options,
       const lambda::function<
           void(const FrameworkID&,
                const hashmap<std::string, hashmap<SlaveID, Resources>>&)>&,
       const lambda::function<
           void(const FrameworkID&,
-               const hashmap<SlaveID, UnavailableResources>&)>&,
-      const Option<std::set<std::string>>&,
-      bool,
-      const Option<DomainInfo>&,
-      const Option<std::vector<Resources>>&,
-      const size_t maxCompletedFrameworks));
+               const hashmap<SlaveID, UnavailableResources>&)>&));
 
   MOCK_METHOD2(recover, void(
       const int expectedAgentCount,
@@ -491,6 +510,10 @@ public:
 
   MOCK_METHOD1(updateWeights, void(
       const std::vector<WeightInfo>&));
+
+  MOCK_METHOD0(pause, void());
+
+  MOCK_METHOD0(resume, void());
 
   process::Owned<mesos::allocator::Allocator> real;
 };

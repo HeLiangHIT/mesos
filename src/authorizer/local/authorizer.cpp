@@ -412,8 +412,9 @@ public:
         case authorization::STOP_MAINTENANCE:
         case authorization::UPDATE_MAINTENANCE_SCHEDULE:
         case authorization::MODIFY_RESOURCE_PROVIDER_CONFIG:
-        case authorization::PRUNE_IMAGES:
+        case authorization::MARK_RESOURCE_PROVIDER_GONE:
         case authorization::VIEW_RESOURCE_PROVIDER:
+        case authorization::PRUNE_IMAGES:
           aclObject.set_type(ACL::Entity::ANY);
 
           break;
@@ -732,6 +733,7 @@ public:
         case authorization::WAIT_NESTED_CONTAINER:
         case authorization::WAIT_STANDALONE_CONTAINER:
         case authorization::MODIFY_RESOURCE_PROVIDER_CONFIG:
+        case authorization::MARK_RESOURCE_PROVIDER_GONE:
         case authorization::VIEW_RESOURCE_PROVIDER:
         case authorization::UNKNOWN:
           UNREACHABLE();
@@ -977,6 +979,7 @@ public:
       case authorization::WAIT_NESTED_CONTAINER:
       case authorization::WAIT_STANDALONE_CONTAINER:
       case authorization::MODIFY_RESOURCE_PROVIDER_CONFIG:
+      case authorization::MARK_RESOURCE_PROVIDER_GONE:
       case authorization::VIEW_RESOURCE_PROVIDER:
         UNREACHABLE();
     }
@@ -1086,7 +1089,8 @@ public:
           (action == authorization::LAUNCH_STANDALONE_CONTAINER ||
            action == authorization::WAIT_STANDALONE_CONTAINER ||
            action == authorization::KILL_STANDALONE_CONTAINER ||
-           action == authorization::REMOVE_STANDALONE_CONTAINER));
+           action == authorization::REMOVE_STANDALONE_CONTAINER ||
+           action == authorization::VIEW_STANDALONE_CONTAINER));
 
     Option<string> subjectPrefix;
     foreach (const Label& claim, subject->claims().labels()) {
@@ -1133,7 +1137,8 @@ public:
       if (action == authorization::LAUNCH_STANDALONE_CONTAINER ||
           action == authorization::WAIT_STANDALONE_CONTAINER ||
           action == authorization::KILL_STANDALONE_CONTAINER ||
-          action == authorization::REMOVE_STANDALONE_CONTAINER) {
+          action == authorization::REMOVE_STANDALONE_CONTAINER ||
+          action == authorization::VIEW_STANDALONE_CONTAINER) {
         return getImplicitResourceProviderObjectApprover(subject, action);
       }
     }
@@ -1196,6 +1201,7 @@ public:
       case authorization::WAIT_NESTED_CONTAINER:
       case authorization::WAIT_STANDALONE_CONTAINER:
       case authorization::MODIFY_RESOURCE_PROVIDER_CONFIG:
+      case authorization::MARK_RESOURCE_PROVIDER_GONE:
       case authorization::VIEW_RESOURCE_PROVIDER:
       case authorization::UNKNOWN: {
         Result<vector<GenericACL>> genericACLs =
@@ -1552,11 +1558,12 @@ private:
         }
 
         return acls_;
-      case authorization::PRUNE_IMAGES:
-        foreach (const ACL::PruneImages& acl, acls.prune_images()) {
+      case authorization::MARK_RESOURCE_PROVIDER_GONE:
+        foreach (const ACL::MarkResourceProvidersGone& acl,
+                 acls.mark_resource_providers_gone()) {
           GenericACL acl_;
           acl_.subjects = acl.principals();
-          acl_.objects = acl.images();
+          acl_.objects = acl.resource_providers();
 
           acls_.push_back(acl_);
         }
@@ -1569,6 +1576,16 @@ private:
           GenericACL acl_;
           acl_.subjects = acl.principals();
           acl_.objects = acl.resource_providers();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+      case authorization::PRUNE_IMAGES:
+        foreach (const ACL::PruneImages& acl, acls.prune_images()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.images();
 
           acls_.push_back(acl_);
         }
@@ -1749,6 +1766,21 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
     }
   }
 
+  foreach (const ACL::MarkResourceProvidersGone& acl,
+           acls.mark_resource_providers_gone()) {
+    if (acl.resource_providers().type() == ACL::Entity::SOME) {
+      return Error(
+          "ACL.MarkResourceProvidersGone type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::ViewResourceProvider& acl,
+           acls.view_resource_providers()) {
+    if (acl.resource_providers().type() == ACL::Entity::SOME) {
+      return Error("ACL.ViewResourceProvider type must be either NONE or ANY");
+    }
+  }
+
   foreach (const ACL::ModifyResourceProviderConfig& acl,
            acls.modify_resource_provider_configs()) {
     if (acl.resource_providers().type() == ACL::Entity::SOME) {
@@ -1760,13 +1792,6 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
   foreach (const ACL::PruneImages& acl, acls.prune_images()) {
     if (acl.images().type() == ACL::Entity::SOME) {
       return Error("ACL.PruneImages type must be either NONE or ANY");
-    }
-  }
-
-  foreach (const ACL::ViewResourceProvider& acl,
-           acls.view_resource_providers()) {
-    if (acl.resource_providers().type() == ACL::Entity::SOME) {
-      return Error("ACL.ViewResourceProvider type must be either NONE or ANY");
     }
   }
 

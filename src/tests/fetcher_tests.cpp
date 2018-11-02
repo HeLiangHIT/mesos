@@ -71,7 +71,7 @@ namespace mesos {
 namespace internal {
 namespace tests {
 
-class FetcherTest : public TemporaryDirectoryTest
+class FetcherTest : public MesosTest
 {
 public:
   static void verifyMetrics(unsigned successCount, unsigned errorCount)
@@ -107,8 +107,7 @@ TEST_F(FetcherTest, FileURI)
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -129,6 +128,60 @@ TEST_F(FetcherTest, FileURI)
 }
 
 
+// Verify that the fetcher cache correctly handles duplicates
+// of the same URI in the CommandInfo.
+TEST_F(FetcherTest, DuplicateFileURI)
+{
+  string fromDir = path::join(os::getcwd(), "from");
+  ASSERT_SOME(os::mkdir(fromDir));
+  string testFile = path::join(fromDir, "test");
+  EXPECT_SOME(os::write(testFile, "data"));
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  ContainerID containerId;
+  containerId.set_value(id::UUID::random().toString());
+
+  CommandInfo commandInfo;
+
+  commandInfo.add_uris()->set_value(uri::from_path(testFile));
+  commandInfo.add_uris()->set_value(uri::from_path(testFile));
+  commandInfo.add_uris()->set_value(uri::from_path(testFile));
+
+  // Make each URI container different, even though they all
+  // refer to the same URI.
+  commandInfo.mutable_uris(0)->set_cache(true);
+  commandInfo.mutable_uris(1)->set_cache(true);
+  commandInfo.mutable_uris(2)->set_cache(true);
+  commandInfo.mutable_uris(0)->set_output_file("one");
+  commandInfo.mutable_uris(1)->set_output_file("two");
+  commandInfo.mutable_uris(2)->set_output_file("three");
+
+  EXPECT_FALSE(os::exists("one"));
+  EXPECT_FALSE(os::exists("two"));
+  EXPECT_FALSE(os::exists("three"));
+
+  Fetcher fetcher(flags);
+
+  Future<Nothing> fetch = fetcher.fetch(
+      containerId, commandInfo, os::getcwd(), None());
+  AWAIT_READY(fetch);
+
+  EXPECT_TRUE(os::exists("one"));
+  EXPECT_TRUE(os::exists("two"));
+  EXPECT_TRUE(os::exists("three"));
+
+  // This is still only 1 task fetch.
+  verifyMetrics(1, 0);
+
+  // We should have only consumed cache space for a single URI.
+  JSON::Object metrics = Metrics();
+  EXPECT_SOME_EQ(
+    os::stat::size(testFile)->bytes(),
+    metrics.at<JSON::Number>("containerizer/fetcher/cache_size_used_bytes"));
+}
+
+
 TEST_F(FetcherTest, LogSuccessToStderr)
 {
   // Valid test file with data.
@@ -144,8 +197,7 @@ TEST_F(FetcherTest, LogSuccessToStderr)
   string stderrFile = path::join(os::getcwd(), "stderr");
   EXPECT_FALSE(os::exists(stderrFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -169,7 +221,7 @@ TEST_F(FetcherTest, LogSuccessToStderr)
   const Try<string> stderrContent = os::read(stderrFile);
   EXPECT_SOME(stderrContent);
   EXPECT_TRUE(strings::contains(
-      stderrContent.get(), "Fetching directly into the sandbox directory"));
+      stderrContent.get(), "directly into the sandbox directory"));
   EXPECT_TRUE(strings::contains(
       stderrContent.get(), "Successfully fetched all URIs into"));
 }
@@ -188,8 +240,7 @@ TEST_F(FetcherTest, LogFailureToStderr)
   string stderrFile = path::join(os::getcwd(), "stderr");
   EXPECT_FALSE(os::exists(stderrFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -235,8 +286,7 @@ TEST_F(FetcherTest, ROOT_UNPRIVILEGED_USER_RootProtectedFileURI)
   EXPECT_SOME(os::write(testFile, "data"));
   EXPECT_SOME(os::chmod(testFile, 600));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -267,8 +317,7 @@ TEST_F(FetcherTest, CustomOutputFileSubdirectory)
   string localFile = path::join(os::getcwd(), customOutputFile);
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -304,8 +353,7 @@ TEST_F(FetcherTest, AbsoluteCustomSubdirectoryFails)
   string localFile = path::join(os::getcwd(), customOutputFile);
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -343,9 +391,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, InvalidUser)
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
-  flags.frameworks_home = "/tmp/frameworks";
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -380,9 +426,7 @@ TEST_F(FetcherTest, NonExistingFile)
   ASSERT_SOME(os::mkdir(fromDir));
   string testFile = path::join(fromDir, "nonExistingFile");
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
-  flags.frameworks_home = "/tmp/frameworks";
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -407,9 +451,7 @@ TEST_F(FetcherTest, NonExistingFile)
 // Negative test: malformed URI, missing path.
 TEST_F(FetcherTest, MalformedURI)
 {
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
-  flags.frameworks_home = "/tmp/frameworks";
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -441,8 +483,7 @@ TEST_F(FetcherTest, AbsoluteFilePath)
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -473,8 +514,7 @@ TEST_F(FetcherTest, RelativeFilePath)
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -565,9 +605,7 @@ TEST_F(FetcherTest, OSNetUriTest)
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
-  flags.frameworks_home = "/tmp/frameworks";
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -611,9 +649,7 @@ TEST_F(FetcherTest, OSNetUriSpaceTest)
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
-  flags.frameworks_home = "/tmp/frameworks";
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -651,8 +687,7 @@ TEST_F(FetcherTest, FileLocalhostURI)
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   ContainerID containerId;
   containerId.set_value(id::UUID::random().toString());
@@ -693,8 +728,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NoExtractNotExecutable)
   uri->set_executable(false);
   uri->set_extract(false);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -735,8 +769,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NoExtractExecutable)
   uri->set_executable(true);
   uri->set_extract(false);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -788,8 +821,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, ExtractNotExecutable)
   uri->set_executable(false);
   uri->set_extract(true);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -845,8 +877,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, ExtractTar)
   uri->set_value(uri::from_path(path.get() + ".tar"));
   uri->set_extract(true);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -887,8 +918,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, ExtractGzipFile)
   uri->set_value(path.get() + ".gz");
   uri->set_extract(true);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -936,8 +966,7 @@ TEST_F(FetcherTest, UNZIP_ExtractFile)
   uri->set_value(uri::from_path(path.get() + ".zip"));
   uri->set_extract(true);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -989,8 +1018,7 @@ TEST_F(FetcherTest, UNZIP_ExtractInvalidFile)
   uri->set_value(uri::from_path(path.get() + ".zip"));
   uri->set_extract(true);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -1037,8 +1065,7 @@ TEST_F(FetcherTest, UNZIP_ExtractFileWithDuplicatedEntries)
   uri->set_value(uri::from_path(path.get() + ".zip"));
   uri->set_extract(true);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -1080,8 +1107,7 @@ TEST_F(FetcherTest, UseCustomOutputFile)
   uri->set_extract(true);
   uri->set_output_file(customOutputFile);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -1121,8 +1147,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, CustomGzipOutputFile)
   uri->set_extract(true);
   uri->set_output_file(customOutputFile + ".gz");
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 
@@ -1205,8 +1230,7 @@ TEST_F(FetcherTest, HdfsURI)
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
   flags.hadoop_home = hadoopPath;
 
   ContainerID containerId;
@@ -1268,8 +1292,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, SSLEnvironmentSpillover)
   uri->set_value(path.get() + ".gz");
   uri->set_extract(true);
 
-  slave::Flags flags;
-  flags.launcher_dir = getLauncherDir();
+  slave::Flags flags = CreateSlaveFlags();
 
   Fetcher fetcher(flags);
 

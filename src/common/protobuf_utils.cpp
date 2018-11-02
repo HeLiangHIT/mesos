@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "common/protobuf_utils.hpp"
+
 #ifdef __WINDOWS__
 #include <stout/internal/windows/grp.hpp>
 #include <stout/internal/windows/pwd.hpp>
@@ -47,7 +49,6 @@
 #endif // __WINDOWS__
 
 #include "common/http.hpp"
-#include "common/protobuf_utils.hpp"
 #include "common/resources_utils.hpp"
 
 #include "master/master.hpp"
@@ -339,6 +340,10 @@ Task createTask(
 
   if (task.has_container()) {
     t.mutable_container()->CopyFrom(task.container());
+  }
+
+  if (task.has_health_check()) {
+    t.mutable_health_check()->CopyFrom(task.health_check());
   }
 
   // Copy `user` if set.

@@ -29,6 +29,8 @@
 #include "slave/containerizer/mesos/isolators/network/cni/spec.hpp"
 #include "slave/containerizer/mesos/isolators/network/cni/paths.hpp"
 
+#include "linux/ns.hpp"
+
 namespace mesos {
 namespace internal {
 namespace slave {
@@ -66,6 +68,9 @@ public:
       pid_t pid) override;
 
   process::Future<ContainerStatus> status(
+      const ContainerID& containerId) override;
+
+  process::Future<ResourceStatistics> usage(
       const ContainerID& containerId) override;
 
   process::Future<Nothing> cleanup(
@@ -130,15 +135,13 @@ private:
       const hashmap<std::string, std::string>& _networkConfigs,
       const hashmap<std::string, ContainerDNSInfo::MesosInfo>& _cniDNSMap,
       const Option<ContainerDNSInfo::MesosInfo>& _defaultCniDNS = None(),
-      const Option<std::string>& _rootDir = None(),
-      const Option<std::string>& _pluginDir = None())
+      const Option<std::string>& _rootDir = None())
     : ProcessBase(process::ID::generate("mesos-network-cni-isolator")),
       flags(_flags),
       networkConfigs(_networkConfigs),
       cniDNSMap(_cniDNSMap),
       defaultCniDNS(_defaultCniDNS),
-      rootDir(_rootDir),
-      pluginDir(_pluginDir) {}
+      rootDir(_rootDir) {}
 
   process::Future<Nothing> _isolate(
       const ContainerID& containerId,
@@ -183,6 +186,9 @@ private:
       const ContainerID& containerId,
       const std::vector<process::Future<Nothing>>& detaches);
 
+  static Try<ResourceStatistics> _usage(
+      const hashset<std::string> ifNames);
+
   // Searches the `networkConfigs` hashmap for a CNI network. If the
   // hashmap doesn't contain the network, will try to load all the CNI
   // configs from `flags.network_cni_config_dir`, and will then
@@ -213,11 +219,12 @@ private:
   // CNI network information root directory.
   const Option<std::string> rootDir;
 
-  // CNI plugins directory.
-  const Option<std::string> pluginDir;
-
   // Information of CNI networks that each container joins.
   hashmap<ContainerID, process::Owned<Info>> infos;
+
+  // Runner manages a separate thread to call `usage` functions
+  // in the containers' namespaces.
+  ns::NamespaceRunner namespaceRunner;
 };
 
 

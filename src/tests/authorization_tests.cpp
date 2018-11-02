@@ -4855,7 +4855,6 @@ TYPED_TEST(AuthorizationTest, ValidateEndpoints)
     mesos::ACL::GetEndpoint* acl = acls.add_get_endpoints();
     acl->mutable_principals()->add_values("foo");
     acl->mutable_paths()->add_values("/monitor/statistics");
-    acl->mutable_paths()->add_values("/monitor/statistics.json");
     acl->mutable_paths()->add_values("/containers");
 
     // Create an `Authorizer` with the ACLs.
@@ -5777,6 +5776,66 @@ TYPED_TEST(AuthorizationTest, ViewStandaloneContainer)
       invalid.add_view_standalone_containers();
     acl->mutable_principals()->add_values("foo");
     acl->mutable_users()->add_values("yoda");
+
+    Try<Authorizer*> create = TypeParam::create(parameterize(invalid));
+    EXPECT_ERROR(create);
+  }
+}
+
+
+// This tests the authorization of requests to MarkResourceProviderGone.
+TYPED_TEST(AuthorizationTest, MarkResourceProviderGone)
+{
+  ACLs acls;
+
+  {
+    // "foo" principal can mark resource providers gone.
+    mesos::ACL::MarkResourceProvidersGone* acl =
+      acls.add_mark_resource_providers_gone();
+    acl->mutable_principals()->add_values("foo");
+    acl->mutable_resource_providers()->set_type(mesos::ACL::Entity::ANY);
+  }
+
+  {
+    // Nobody else can mark resource providers gone.
+    mesos::ACL::MarkResourceProvidersGone* acl =
+      acls.add_mark_resource_providers_gone();
+    acl->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
+    acl->mutable_resource_providers()->set_type(mesos::ACL::Entity::NONE);
+  }
+
+  Try<Authorizer*> create = TypeParam::create(parameterize(acls));
+  ASSERT_SOME(create);
+  Owned<Authorizer> authorizer(create.get());
+
+  {
+    // "foo" is allowed to mark resource providers gone. The request
+    // should succeed.
+    authorization::Request request;
+    request.set_action(authorization::MARK_RESOURCE_PROVIDER_GONE);
+    request.mutable_subject()->set_value("foo");
+
+    AWAIT_EXPECT_TRUE(authorizer->authorized(request));
+  }
+
+  {
+    // "bar" is not allowed to mark resource provider gone. The
+    // request should fail.
+    authorization::Request request;
+    request.set_action(authorization::MARK_RESOURCE_PROVIDER_GONE);
+    request.mutable_subject()->set_value("bar");
+
+    AWAIT_EXPECT_FALSE(authorizer->authorized(request));
+  }
+
+  {
+    // Test that no authorizer is created with invalid ACLs.
+    ACLs invalid;
+
+    mesos::ACL::MarkResourceProvidersGone* acl =
+      invalid.add_mark_resource_providers_gone();
+    acl->mutable_principals()->add_values("foo");
+    acl->mutable_resource_providers()->add_values("yoda");
 
     Try<Authorizer*> create = TypeParam::create(parameterize(invalid));
     EXPECT_ERROR(create);

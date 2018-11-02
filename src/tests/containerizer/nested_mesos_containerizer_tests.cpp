@@ -1050,6 +1050,113 @@ TEST_F(NestedMesosContainerizerTest,
 }
 
 
+// This test verifies detection of task's `mnt` namespace for a debug nested
+// container. Debug nested container must enter `mnt` namespace of the task,
+// so the agent tries to detect task's `mnt` namespace. This test launches
+// a long-running task which runs a subtask that unshares `mnt` namespace.
+// The structure of the resulting process tree is similar to the process tree
+// of the command executor (the task of command executor unshares `mnt` ns):
+//
+// 0. root (aka "nanny"/"launcher" process) [root `mnt` namespace]
+//   1. task: sleep 1000 [root `mnt` namespace]
+//     2. subtaks: sleep 1000 [subtask's `mnt` namespace]
+//
+// We expect that the agent detects task's `mnt` namespace.
+TEST_F(NestedMesosContainerizerTest,
+       ROOT_CGROUPS_LaunchNestedDebugAfterUnshareMntNamespace)
+{
+  slave::Flags flags = CreateSlaveFlags();
+  flags.launcher = "linux";
+  flags.isolation = "filesystem/linux";
+
+  Fetcher fetcher(flags);
+
+  Try<MesosContainerizer*> create = MesosContainerizer::create(
+      flags,
+      true,
+      &fetcher);
+
+  ASSERT_SOME(create);
+
+  Owned<MesosContainerizer> containerizer(create.get());
+
+  SlaveState state;
+  state.id = SlaveID();
+
+  AWAIT_READY(containerizer->recover(state));
+
+  // Launch the parent container.
+  ContainerID containerId;
+  containerId.set_value(id::UUID::random().toString());
+
+  string pipe = path::join(sandbox.get(), "pipe");
+  ASSERT_EQ(0, ::mkfifo(pipe.c_str(), 0700));
+
+  const string cmd =
+    "(unshare -m sh -c"
+    " 'mkdir -p test_mnt; mount tmpfs -t tmpfs test_mnt;"
+    " touch test_mnt/check; exec sleep 1000')&"
+    "echo running > " + pipe + "; exec sleep 1000";
+
+  ExecutorInfo executor = createExecutorInfo("executor", cmd, "cpus:1");
+
+  Try<string> directory = environment->mkdtemp();
+  ASSERT_SOME(directory);
+
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
+      containerId,
+      createContainerConfig(None(), executor, directory.get()),
+      map<string, string>(),
+      None());
+
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
+
+  // Wait for the parent container to start running its task
+  // before launching a debug nested container.
+  Result<string> read = os::read(pipe);
+  ASSERT_SOME(read);
+  ASSERT_EQ("running\n", read.get());
+
+  // Launch a nested debug container.
+  ContainerID nestedContainerId;
+  nestedContainerId.mutable_parent()->CopyFrom(containerId);
+  nestedContainerId.set_value(id::UUID::random().toString());
+
+  // Launch a debug container inside the command task and check for the
+  // absence of a file we know to be inside the subtask's mounted directory.
+  launch = containerizer->launch(
+      nestedContainerId,
+      createContainerConfig(
+          createCommandInfo(
+              "LINES=`ls -la test_mnt/check | wc -l`;"
+              "if [ ${LINES} -ne 0 ]; then"
+              "  exit 1;"
+              "fi;"),
+          None(),
+          ContainerClass::DEBUG),
+      map<string, string>(),
+      None());
+
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
+
+  Future<Option<ContainerTermination>> wait =
+    containerizer->wait(nestedContainerId);
+
+  AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
+  ASSERT_TRUE(wait.get()->has_status());
+  EXPECT_WEXITSTATUS_EQ(0, wait.get()->status());
+
+  Future<Option<ContainerTermination>> termination =
+    containerizer->destroy(containerId);
+
+  AWAIT_READY(termination);
+  ASSERT_SOME(termination.get());
+  ASSERT_TRUE(termination.get()->has_status());
+  EXPECT_WTERMSIG_EQ(SIGKILL, termination.get()->status());
+}
+
+
 TEST_F(NestedMesosContainerizerTest,
        ROOT_CGROUPS_DestroyDebugContainerOnRecover)
 {
@@ -1918,7 +2025,7 @@ TEST_F(NestedMesosContainerizerTest, ROOT_CGROUPS_RecoverLauncherOrphans)
       buildPath(containerId, "mesos", JOIN));
 
   ASSERT_SOME(cgroups::create(freezerHierarchy.get(), cgroup, true));
-  ASSERT_SOME_TRUE(cgroups::exists(freezerHierarchy.get(), cgroup));
+  ASSERT_TRUE(cgroups::exists(freezerHierarchy.get(), cgroup));
 
   SlaveState state;
   state.id = SlaveID();
@@ -1931,7 +2038,7 @@ TEST_F(NestedMesosContainerizerTest, ROOT_CGROUPS_RecoverLauncherOrphans)
   // NOTE: `wait()` can return `Some` or `None` due to a race condition between
   // `recover()` and `______destroy()` for an orphan container.
   AWAIT_READY(containerizer->wait(containerId));
-  ASSERT_SOME_FALSE(cgroups::exists(freezerHierarchy.get(), cgroup));
+  ASSERT_FALSE(cgroups::exists(freezerHierarchy.get(), cgroup));
 
   Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
@@ -2096,7 +2203,7 @@ TEST_F(NestedMesosContainerizerTest,
       buildPath(containerId, "mesos", JOIN));
 
   ASSERT_SOME(cgroups::create(freezerHierarchy.get(), cgroupParent, true));
-  ASSERT_SOME_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupParent));
+  ASSERT_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupParent));
 
   ContainerID nestedContainerId;
   nestedContainerId.mutable_parent()->CopyFrom(containerId);
@@ -2107,7 +2214,7 @@ TEST_F(NestedMesosContainerizerTest,
       buildPath(nestedContainerId, "mesos", JOIN));
 
   ASSERT_SOME(cgroups::create(freezerHierarchy.get(), cgroupNested, true));
-  ASSERT_SOME_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupNested));
+  ASSERT_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupNested));
 
   SlaveState state;
   state.id = SlaveID();
@@ -2120,14 +2227,14 @@ TEST_F(NestedMesosContainerizerTest,
   // NOTE: `wait()` can return `Some` or `None` due to a race condition between
   // `recover()` and `______destroy()` for an orphan container.
   AWAIT_READY(containerizer->wait(nestedContainerId));
-  ASSERT_SOME_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupNested));
+  ASSERT_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupNested));
 
   Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
   ASSERT_FALSE(containers->contains(nestedContainerId));
 
   AWAIT_READY(containerizer->wait(containerId));
-  ASSERT_SOME_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupParent));
+  ASSERT_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupParent));
 
   containers = containerizer->containers();
   AWAIT_READY(containers);
@@ -2467,7 +2574,7 @@ TEST_F(NestedMesosContainerizerTest,
       buildPath(containerId, "mesos", JOIN));
 
   ASSERT_SOME(cgroups::create(freezerHierarchy.get(), cgroupParent, true));
-  ASSERT_SOME_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupParent));
+  ASSERT_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupParent));
 
   ContainerID nestedContainerId1;
   nestedContainerId1.mutable_parent()->CopyFrom(containerId);
@@ -2478,7 +2585,7 @@ TEST_F(NestedMesosContainerizerTest,
       buildPath(nestedContainerId1, "mesos", JOIN));
 
   ASSERT_SOME(cgroups::create(freezerHierarchy.get(), cgroupNested1, true));
-  ASSERT_SOME_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupNested1));
+  ASSERT_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupNested1));
 
   ContainerID nestedContainerId2;
   nestedContainerId2.mutable_parent()->CopyFrom(containerId);
@@ -2489,7 +2596,7 @@ TEST_F(NestedMesosContainerizerTest,
       buildPath(nestedContainerId2, "mesos", JOIN));
 
   ASSERT_SOME(cgroups::create(freezerHierarchy.get(), cgroupNested2, true));
-  ASSERT_SOME_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupNested2));
+  ASSERT_TRUE(cgroups::exists(freezerHierarchy.get(), cgroupNested2));
 
   SlaveState state;
   state.id = SlaveID();
@@ -2502,13 +2609,13 @@ TEST_F(NestedMesosContainerizerTest,
   // NOTE: `wait()` can return `Some` or `None` due to a race condition between
   // `recover()` and `______destroy()` for an orphan container.
   AWAIT_READY(containerizer->wait(nestedContainerId1));
-  ASSERT_SOME_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupNested1));
+  ASSERT_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupNested1));
 
   AWAIT_READY(containerizer->wait(nestedContainerId2));
-  ASSERT_SOME_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupNested2));
+  ASSERT_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupNested2));
 
   AWAIT_READY(containerizer->wait(containerId));
-  ASSERT_SOME_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupParent));
+  ASSERT_FALSE(cgroups::exists(freezerHierarchy.get(), cgroupParent));
 
   Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);

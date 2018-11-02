@@ -18,11 +18,12 @@
 The task plugin.
 """
 
-import cli.http as http
-
 from cli.exceptions import CLIException
+from cli.mesos import get_tasks
 from cli.plugins import PluginBase
 from cli.util import Table
+
+from cli.mesos import TaskIO
 
 PLUGIN_NAME = "task"
 PLUGIN_CLASS = "Task"
@@ -38,6 +39,25 @@ class Task(PluginBase):
     """
 
     COMMANDS = {
+        "attach": {
+            "arguments": ['<task-id>'],
+            "flags": {
+                "--no-stdin": "do not attach a stdin [default: False]"
+            },
+            "short_help": "Attach the CLI to the stdio of a running task",
+            "long_help": """
+                Attach the CLI to the stdio of a running task
+                To detach type the sequence CTRL-p CTRL-q."""
+        },
+        "exec": {
+            "arguments": ['<task-id>', '<command>', '[<args>...]'],
+            "flags": {
+                "-i --interactive" : "interactive [default: False]",
+                "-t --tty": "tty [default: False]"
+            },
+            "short_help": "Execute commands in a task's container",
+            "long_help": "Execute commands in a task's container"
+        },
         "list": {
             "arguments": [],
             "flags": {},
@@ -45,6 +65,42 @@ class Task(PluginBase):
             "long_help": "List all active tasks in a Mesos cluster"
         }
     }
+
+    def attach(self, argv):
+        """
+        Attach the stdin/stdout/stderr of the CLI to the
+        STDIN/STDOUT/STDERR of a running task.
+        """
+        try:
+            master = self.config.master()
+        except Exception as exception:
+            raise CLIException("Unable to get leading master address: {error}"
+                               .format(error=exception))
+
+        task_io = TaskIO(master, argv["<task-id>"])
+        task_io.attach(argv["--no-stdin"])
+        return 0
+
+
+    def exec(self, argv):
+        """
+        Launch a process inside a task's container.
+        """
+        try:
+            master = self.config.master()
+        except Exception as exception:
+            raise CLIException("Unable to get leading master address: {error}"
+                               .format(error=exception))
+
+        task_io = TaskIO(master, argv["<task-id>"])
+        task_io.exec(argv["<command>"],
+                     argv["<args>"],
+                     argv["--interactive"],
+                     argv["--tty"])
+
+        # TODO(ArmandGrillet): We should not return 0 here but
+        # whatever the result of `<command> [<args>...]` was.
+        return 0
 
     def list(self, argv):
         """
@@ -58,11 +114,11 @@ class Task(PluginBase):
                                .format(error=exception))
 
         try:
-            tasks = http.get_json(master, "tasks")["tasks"]
+            tasks = get_tasks(master)
         except Exception as exception:
-            raise CLIException("Could not open '/tasks'"
-                               " endpoint at '{addr}': {error}"
-                               .format(addr=master, error=exception))
+            raise CLIException("Unable to get tasks from leading"
+                               " master '{master}': {error}"
+                               .format(master=master, error=exception))
 
         if not tasks:
             print("There are no tasks running in the cluster.")

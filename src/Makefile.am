@@ -287,6 +287,7 @@ CONTAINERIZER_PROTO = $(top_srcdir)/include/mesos/slave/containerizer.proto
 DOCKER_SPEC_PROTO = $(top_srcdir)/include/mesos/docker/spec.proto
 DOCKER_V1_PROTO = $(top_srcdir)/include/mesos/docker/v1.proto
 DOCKER_V2_PROTO = $(top_srcdir)/include/mesos/docker/v2.proto
+DOCKER_V2_2_PROTO = $(top_srcdir)/include/mesos/docker/v2_2.proto
 EXECUTOR_PROTO = $(top_srcdir)/include/mesos/executor/executor.proto
 FETCHER_PROTO = $(top_srcdir)/include/mesos/fetcher/fetcher.proto
 HOOK_PROTO = $(top_srcdir)/include/mesos/module/hook.proto
@@ -333,6 +334,8 @@ CXX_PROTOS =								\
   ../include/mesos/docker/v1.pb.h					\
   ../include/mesos/docker/v2.pb.cc					\
   ../include/mesos/docker/v2.pb.h					\
+  ../include/mesos/docker/v2_2.pb.cc					\
+  ../include/mesos/docker/v2_2.pb.h					\
   ../include/mesos/executor/executor.pb.cc				\
   ../include/mesos/executor/executor.pb.h				\
   ../include/mesos/fetcher/fetcher.pb.cc				\
@@ -473,13 +476,15 @@ CLEANFILES +=								\
 ../include/mesos/%.pb.cc ../include/mesos/%.pb.h: $(top_srcdir)/include/mesos/%.proto
 	$(PROTOC) $(PROTOCFLAGS) --cpp_out=../include $^
 
-../include/csi/%.pb.cc ../include/csi/%.pb.h: ../$(CSI)/%.proto
-	$(PROTOC) $(PROTOCFLAGS) --cpp_out=../include/csi $^
-
 %.pb.cc %.pb.h: %.proto
 	$(PROTOC) $(PROTOCFLAGS) --cpp_out=. $^
 
+../include/csi/%.pb.cc ../include/csi/%.pb.h: ../$(CSI)/%.proto
+	$(MKDIR_P) $(@D)
+	$(PROTOC) $(PROTOCFLAGS) --cpp_out=../include/csi $^
+
 ../include/csi/%.grpc.pb.cc ../include/csi/%.grpc.pb.h: ../$(CSI)/%.proto
+	$(MKDIR_P) $(@D)
 	$(PROTOC) $(PROTOCFLAGS) --grpc_out=../include/csi $^		\
 	          --plugin=protoc-gen-grpc=$(GRPC_CPP_PLUGIN)
 
@@ -688,12 +693,15 @@ docker_HEADERS =							\
   $(top_srcdir)/include/mesos/docker/v1.hpp				\
   $(top_srcdir)/include/mesos/docker/v1.proto				\
   $(top_srcdir)/include/mesos/docker/v2.hpp				\
-  $(top_srcdir)/include/mesos/docker/v2.proto
+  $(top_srcdir)/include/mesos/docker/v2.proto       \
+  $(top_srcdir)/include/mesos/docker/v2_2.hpp				\
+  $(top_srcdir)/include/mesos/docker/v2_2.proto
 
 nodist_docker_HEADERS =							\
   ../include/mesos/docker/spec.pb.h					\
   ../include/mesos/docker/v1.pb.h					\
-  ../include/mesos/docker/v2.pb.h
+  ../include/mesos/docker/v2.pb.h         \
+  ../include/mesos/docker/v2_2.pb.h
 
 executordir = $(pkgincludedir)/executor
 
@@ -1019,6 +1027,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   master/metrics.cpp							\
   master/quota.cpp							\
   master/quota_handler.cpp						\
+  master/readonly_handler.cpp						\
   master/registrar.cpp							\
   master/registry_operations.cpp					\
   master/validation.cpp							\
@@ -1607,6 +1616,7 @@ libmesos_la_SOURCES =							\
   $(DOCKER_SPEC_PROTO)							\
   $(DOCKER_V1_PROTO)							\
   $(DOCKER_V2_PROTO)							\
+  $(DOCKER_V2_2_PROTO)							\
   $(FETCHER_PROTO)							\
   $(HOOK_PROTO)								\
   $(MAINTENANCE_PROTO)							\
@@ -1923,7 +1933,8 @@ if HAS_JAVA
 
 $(MESOS_JAR): $(MESOS_JAR_SOURCE) $(MESOS_JAR_GENERATED) java/mesos.pom
 	@echo "Building mesos-$(PACKAGE_VERSION).jar ..."
-	@cd $(abs_top_builddir)/src/java && $(MVN) -B -q -f mesos.pom clean package
+	@cd $(abs_top_builddir)/src/java &&  \
+	  env JAVA_HOME=$(JAVA_HOME) $(MVN) -B -q -f mesos.pom clean package
 
 # Convenience library for JNI bindings.
 # TODO(Charles Reiss): We really should be building the Java library
@@ -1999,55 +2010,23 @@ nodist_libjava_la_SOURCES =						\
 
 BUILT_SOURCES += $(nodist_libjava_la_SOURCES)
 
-java/jni/org_apache_mesos_MesosSchedulerDriver.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.MesosSchedulerDriver
-
-java/jni/org_apache_mesos_MesosExecutorDriver.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-          org.apache.mesos.MesosExecutorDriver
-
-java/jni/org_apache_mesos_Log.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.Log
-
-java/jni/org_apache_mesos_state_AbstractState.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.AbstractState
-
-java/jni/org_apache_mesos_state_LevelDBState.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.LevelDBState
-
-java/jni/org_apache_mesos_state_LogState.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.LogState
-
-java/jni/org_apache_mesos_state_Variable.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.Variable
-
-java/jni/org_apache_mesos_state_ZooKeeperState.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.ZooKeeperState
-
-java/jni/org_apache_mesos_v1_scheduler_V1Mesos.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.v1.scheduler.V1Mesos
-
-java/jni/org_apache_mesos_v1_scheduler_V0Mesos.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.v1.scheduler.V0Mesos
+# The automatic variable '$(*F)' captures the matching stem (whatever matches
+# the '%') of the target (e.g., 'org_apache_mesos_Log').
+# * For 'javah' recipe, we then substitute '_' with '.' to get the class name
+#   (e.g., org.apache.mesos.Log).
+# * For 'javac -h' recipe, we substitute '_' with '/' to compute the source path
+#   of the java file. Unlike 'javah', 'javac -h' requires java sources to
+#   generate headers.
+java/jni/%.h: $(MESOS_JAR)
+if HAS_JAVAH
+	$(JAVA_HOME)/bin/javah -d java/jni                              \
+	  -classpath $(MESOS_JAR):@PROTOBUF_JAR@                        \
+	   $(subst _,.,$(*F))
+else
+	$(JAVA_HOME)/bin/javac -h java/jni				\
+	  -classpath $(MESOS_JAR):@PROTOBUF_JAR@                        \
+	   $(srcdir)/java/src/$(subst _,/,$(*F)).java
+endif
 
 $(EXAMPLES_JAR): $(EXAMPLES_SOURCE)
 	@echo "Building examples.jar ..."
@@ -2061,7 +2040,7 @@ $(EXAMPLES_JAR): $(EXAMPLES_SOURCE)
 CLEANFILES += $(EXAMPLES_JAR)
 
 maven-install: $(MESOS_JAR) java/mesos.pom
-	$(MVN) -B -q -f java/mesos.pom install
+	env JAVA_HOME=$(JAVA_HOME) $(MVN) -B -q -f java/mesos.pom install
 
 PHONY_TARGETS += maven-install
 endif # HAS_JAVA
@@ -2296,6 +2275,11 @@ balloon_executor_SOURCES = examples/balloon_executor.cpp
 balloon_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
 balloon_executor_LDADD = libmesos.la $(LDADD)
 
+check_PROGRAMS += inverse-offer-framework
+inverse_offer_framework_SOURCES = examples/inverse_offer_framework.cpp
+inverse_offer_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
+inverse_offer_framework_LDADD = libmesos.la $(LDADD)
+
 check_PROGRAMS += load-generator-framework
 load_generator_framework_SOURCES = examples/load_generator_framework.cpp
 load_generator_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
@@ -2516,6 +2500,7 @@ mesos_tests_SOURCES =						\
   tests/gc_tests.cpp						\
   tests/hdfs_tests.cpp						\
   tests/health_check_tests.cpp					\
+  tests/hierarchical_allocator_benchmarks.cpp			\
   tests/hierarchical_allocator_tests.cpp			\
   tests/hook_tests.cpp						\
   tests/http_authentication_tests.cpp				\

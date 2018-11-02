@@ -51,10 +51,11 @@ if (WIN32)
   # NOTE: These dependencies are only rebundled on Windows because they
   # are available as installable packages on Linux; so they live
   # exclusively in the 3rdparty repo.
-  set(CURL_URL   ${3RDPARTY_DEPENDENCIES}/curl-${CURL_VERSION}.tar.gz)
-  set(LIBAPR_URL ${3RDPARTY_DEPENDENCIES}/libapr-${LIBAPR_VERSION}.tar.gz)
-  set(ZLIB_URL   ${3RDPARTY_DEPENDENCIES}/zlib-${ZLIB_VERSION}.tar.gz)
-  set(SASL2_URL  ${3RDPARTY_DEPENDENCIES}/cyrus-sasl-${SASL2_VERSION}.tar.gz)
+  set(CURL_URL    ${3RDPARTY_DEPENDENCIES}/curl-${CURL_VERSION}.tar.gz)
+  set(LIBAPR_URL  ${3RDPARTY_DEPENDENCIES}/libapr-${LIBAPR_VERSION}.tar.gz)
+  set(ZLIB_URL    ${3RDPARTY_DEPENDENCIES}/zlib-${ZLIB_VERSION}.tar.gz)
+  set(SASL2_URL   ${3RDPARTY_DEPENDENCIES}/cyrus-sasl-${SASL2_VERSION}.tar.gz)
+  set(WCLAYER_URL ${3RDPARTY_DEPENDENCIES}/wclayer.exe)
 
   # NOTE: The Windows version of Glog is patched and only available in the
   # 3rdparty repo, not the local repo.
@@ -423,9 +424,12 @@ target_compile_definitions(
   picojson INTERFACE
   __STDC_FORMAT_MACROS)
 
+PATCH_CMD(PICOJSON_PATCH_CMD picojson-${PICOJSON_VERSION}.patch)
+
 ExternalProject_Add(
   ${PICOJSON_TARGET}
   PREFIX            ${PICOJSON_CMAKE_ROOT}
+  PATCH_COMMAND     ${PICOJSON_PATCH_CMD}
   CONFIGURE_COMMAND ${CMAKE_NOOP}
   BUILD_COMMAND     ${CMAKE_NOOP}
   INSTALL_COMMAND   ${CMAKE_NOOP}
@@ -583,6 +587,7 @@ if (ENABLE_LIBEVENT)
       URL_HASH          ${LIBEVENT_HASH})
   else ()
     find_package(LIBEVENT REQUIRED)
+    add_library(libevent INTERFACE)
 
     foreach (lib ${LIBEVENT_LIBS})
       get_filename_component(LIBEVENT_LIB ${lib} NAME_WE)
@@ -593,7 +598,7 @@ if (ENABLE_LIBEVENT)
       target_link_libraries(libevent INTERFACE ${LIBEVENT_LIB})
     endforeach ()
   endif ()
-elseif (NOT ENABLE_LIBWINIO)
+elseif (NOT WIN32) # Windows defaults to `libwinio`, a native implementation.
   # libev: Full-featured high-performance event loop.
   # https://github.com/enki/libev
   ###################################################
@@ -740,7 +745,7 @@ if (WIN32)
 
     set_target_properties(
       curl PROPERTIES
-      IMPORTED_LOCATION_DEBUG ${CURL_ROOT}-build/src/Debug/curl-d.exe
+      IMPORTED_LOCATION_DEBUG ${CURL_ROOT}-build/src/Debug/curl.exe
       IMPORTED_LOCATION_RELEASE ${CURL_ROOT}-build/src/Release/curl.exe)
   else ()
     # This is for single-configuration generators such as Ninja.
@@ -755,7 +760,7 @@ if (WIN32)
 
     set_target_properties(
       curl PROPERTIES
-      IMPORTED_LOCATION ${CURL_ROOT}-build/src/curl${CURL_SUFFIX}.exe)
+      IMPORTED_LOCATION ${CURL_ROOT}-build/src/curl.exe)
   endif ()
 
   MAKE_INCLUDE_DIR(libcurl)
@@ -790,6 +795,37 @@ else ()
     INTERFACE_INCLUDE_DIRECTORIES ${CURL_INCLUDE_DIRS})
 endif ()
 
+
+# wclayer: Command line tool for manipulating Windows Container
+# storage layers.
+# https://github.com/Microsoft/hcsshim/blob/master/cmd/wclayer/wclayer.go
+#########################################################################
+if (WIN32)
+  EXTERNAL(wclayer WIP ${CMAKE_CURRENT_BINARY_DIR})
+
+  add_executable(wclayer IMPORTED GLOBAL)
+  add_dependencies(wclayer ${WCLAYER_TARGET})
+
+  # TODO(liazha): Change this to wherever you need it placed.
+  set(WCLAYER_PATH ${CMAKE_BINARY_DIR}/src/wclayer.exe)
+  set_target_properties(
+    wclayer PROPERTIES
+    IMPORTED_LOCATION ${WCLAYER_PATH})
+
+  set(WCLAYER_INSTALL_CMD ${CMAKE_COMMAND} -E copy ${WCLAYER_CMAKE_ROOT}/src/wclayer.exe ${WCLAYER_PATH})
+
+  GET_BYPRODUCTS(wclayer)
+
+  ExternalProject_Add(
+    ${WCLAYER_TARGET}
+    PREFIX              ${WCLAYER_CMAKE_ROOT}
+    BUILD_BYPRODUCTS    ${WCLAYER_BYPRODUCTS}
+    CONFIGURE_COMMAND   ${CMAKE_NOOP}
+    BUILD_COMMAND       ${CMAKE_NOOP}
+    INSTALL_COMMAND     ${WCLAYER_INSTALL_CMD}
+    DOWNLOAD_NO_EXTRACT FALSE
+    URL                 ${WCLAYER_URL})
+endif ()
 
 # bzip2: A high-quality data compressor.
 # http://www.bzip.org
@@ -959,7 +995,7 @@ set_target_properties(
 # libarchive: Multi-format archive and compression library.
 # https://github.com/libarchive/libarchive
 ###########################################################
-if (WIN32 OR REBUNDLED)
+if (NOT UNBUNDLED_LIBARCHIVE)
   EXTERNAL(libarchive ${LIBARCHIVE_VERSION} ${CMAKE_CURRENT_BINARY_DIR})
 
   add_library(libarchive STATIC IMPORTED GLOBAL)
@@ -1033,11 +1069,11 @@ if (WIN32 OR REBUNDLED)
     URL               ${LIBARCHIVE_URL}
     URL_HASH          ${LIBARCHIVE_HASH})
 else ()
-  find_package(LibArchive REQUIRED)
+  find_package(LIBARCHIVE REQUIRED)
   add_library(libarchive SHARED IMPORTED GLOBAL)
   set_target_properties(libarchive PROPERTIES
-    IMPORTED_LOCATION ${LibArchive_LIBRARIES}
-    INTERFACE_INCLUDE_DIRECTORIES ${LibArchive_INCLUDE_DIRS})
+    IMPORTED_LOCATION ${LIBARCHIVE_LIBS}
+    INTERFACE_INCLUDE_DIRECTORIES ${LIBARCHIVE_INCLUDE_DIR})
 endif ()
 
 # Google Test: Google's C++ test framework (GoogleTest and GoogleMock).

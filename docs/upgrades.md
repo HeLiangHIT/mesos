@@ -51,6 +51,9 @@ We categorize the changes as follows:
       <li>A <a href="#1-7-x-linux-devices-isolator">Linux devices isolator</a></li>
       <li>A <a href="#1-7-x-auto-load-subsystems">Automatically load local enabled cgroups subsystems</a></li>
       <li>A <a href="#1-7-x-container-specific-cgroups-mounts">Container-specific cgroups mounts</a></li>
+      <li>A <a href="#1-7-x-volume-mode-support">Volume mode support</a></li>
+      <li>C <a href="#1-7-x-create-disk">`CREATE_DISK` and `DESTROY_DISK` operations and ACLs</a></li>
+      <li>A <a href="#1-7-x-resource-provider-acls">Resource Provider ACLs</a></li>
     </ul>
   </td>
 
@@ -68,13 +71,13 @@ We categorize the changes as follows:
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
     <ul style="padding-left:10px;">
       <li>C <a href="#1-7-x-container-logger">ContainerLogger module interface changes</a></li>
-      <li>C <a href="#1-7-x-isolator-recover">Isolator::recover module interface change</a></li>
-      <li>C <a href="#1-7-x-sorter-update">Changed semantics of Sorter::update</a></li>
+      <li>C <a href="#1-7-x-isolator-recover">Isolator::recover module interface changes</a></li>
     </ul>
   </td>
 
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Endpoints-->
     <ul style="padding-left:10px;">
+      <li>C <a href="#1-7-x-json-serialization">JSON serialization changes</a></li>
     </ul>
   </td>
 </tr>
@@ -169,6 +172,7 @@ We categorize the changes as follows:
       <li>A <a href="#1-4-x-bounding-capabilities">Support for explicit bounding capabilities</a></li>
       <li>C <a href="#1-4-x-agent-recovery">Agent recovery post reboot</a></li>
       <li>C <a href="#1-4-x-xfs-no-enforce">XFS disk isolator support for not enforcing disk limits</a></li>
+      <li>C <a href="#1-4-x-update-minimal-docker-version">Update the minimal supported Docker version</a></li>
     </ul>
   </td>
 
@@ -442,12 +446,6 @@ We categorize the changes as follows:
   added. This isolator automatically populates containers with devices
   that have been whitelisted with the `--allowed_devices` agent flag.
 
-<a name="1-7-x-enforce-container-ports"></a>
-
-* A new [`--enforce_container_ports`](configuration/agent.md#enforce_container_ports)
-  has been added to toggle whether the [`network/ports`](isolators/network-ports.md)
-  isolator should enforce TCP ports usage limits.
-
 <a name="1-7-x-auto-load-subsystems"></a>
 
 * A new option `cgroups/all` has been added to the agent flag `--isolation`. This allows cgroups isolator to automatically load all the local enabled cgroups subsystems. If this option is specified in the agent flag `--isolation` along with other cgroups related options (e.g., `cgroups/cpu`), those options will be just ignored.
@@ -455,6 +453,24 @@ We categorize the changes as follows:
 <a name="1-7-x-container-specific-cgroups-mounts"></a>
 
 * Added container-specific cgroups mounts under `/sys/fs/cgroup` to containers with image launched by Mesos containerizer.
+
+<a name="1-7-x-volume-mode-support"></a>
+
+* Previously the `HOST_PATH`, `SANDBOX_PATH`, `IMAGE`, `SECRET`, and `DOCKER_VOLUME` volumes were always mounted for container in read-write mode, i.e., the `Volume.mode` field was not honored. Now we will mount these volumes based on the `Volume.mode` field so framework can choose to mount the volume for the container in either read-write mode or read-only mode.
+
+<a name="1-7-x-create-disk"></a>
+
+* To simplify the API for CSI-backed disk resources, the following operations and corresponding ACLs have been introduced to replace the experimental `CREATE_VOLUME`, `CREATE_BLOCK`, `DESTROY_VOLUME` and `DESTROY_BLOCK` operations:
+  * `CREATE_DISK` to create a `MOUNT` or `BLOCK` disk resource from a `RAW` disk resource. The `CreateMountDisk` and `CreateBlockDisk` ACLs control which principals are allowed to create `MOUNT` or `BLOCK` disks for which roles.
+  * `DESTROY_DISK` to reclaim a `MOUNT` or `BLOCK` disk resource back to a `RAW` disk resource. The `DestroyMountDisk` and `DestroyBlockDisk` ACLs control which principals are allowed to reclaim `MOUNT` or `BLOCK` disks for which roles.
+
+<a name="1-7-x-resource-provider-acls"></a>
+
+* A new `ViewResourceProvider` ACL has been introduced to control which principals are allowed to call the `GET_RESOURCE_PROVIDERS` agent API.
+
+<a name="1-7-x-enforce-container-ports"></a>
+
+* A new [`--enforce_container_ports`](configuration/agent.md#enforce_container_ports) flag has been added to toggle whether the [`network/ports`](isolators/network-ports.md) isolator should enforce TCP ports usage limits.
 
 <a name="1-7-x-container-logger"></a>
 
@@ -464,9 +480,9 @@ We categorize the changes as follows:
 
 * `Isolator::recover()` has been updated to take an `std::vector` instead of `std::list` of container states.
 
-<a name="1-7-x-sorter-update"></a>
+<a name="1-7-x-json-serialization"></a>
 
-* The semantics of `Sorter::update` has been changed so that resources can be removed from a client's allocation without removing the full agent in which they reside. Callers are expected to update the total resources of the agent as well by, e.g., removing the agent and adding it back with the new total resources.
+* As a result of adapting rapidjson for performance improvement, all JSON endpoints serialize differently while still conforming to the ECMA-404 spec for JSON. This means that if a client has a JSON de-serializer that conforms to ECMA-404 they will see no change. Otherwise, they may break. As an example, Mesos would previously serialize '/' as '\/', but the spec does not require the escaping and rapidjson does not escape '/'.
 
 ## Upgrading from 1.5.x to 1.6.x ##
 
@@ -581,6 +597,10 @@ We categorize the changes as follows:
 <a name="1-4-x-mesos-library"></a>
 
 * The `Resources` class in the internal Mesos C++ library changed its behavior to only support post-`RESERVATION_REFINEMENT` format. If a framework is using this internal utility, it is likely to break if the `RESERVATION_REFINEMENT` capability is not enabled.
+
+<a name="1-4-x-update-minimal-docker-version"></a>
+
+* To specify the `--type=container` option for the `docker inspect <container_name>` command, the minimal supported Docker version has been updated from 1.0.0 to 1.8.0 since Docker supported `--type=container` for the `docker inspect` command starting from 1.8.0.
 
 ## Upgrading from 1.2.x to 1.3.x ##
 

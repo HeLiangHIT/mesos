@@ -68,6 +68,8 @@
 #include "mesos/mesos.hpp"
 #include "mesos/resources.hpp"
 
+#include "resource_provider/local.hpp"
+
 #include "slave/http.hpp"
 #include "slave/slave.hpp"
 #include "slave/validation.hpp"
@@ -175,13 +177,6 @@ static void json(JSON::ObjectWriter* writer, const TaskInfo& task)
   if (task.has_discovery()) {
     writer->field("discovery", JSON::Protobuf(task.discovery()));
   }
-}
-
-static void json(
-    JSON::StringWriter* writer,
-    const SlaveInfo::Capability& capability)
-{
-  writer->set(SlaveInfo::Capability::Type_Name(capability.type()));
 }
 
 namespace internal {
@@ -1206,6 +1201,7 @@ string Http::STATE_HELP() {
         "         \"containerizers\" : \"mesos\",",
         "         \"docker_socket\" : \"/var/run/docker.sock\",",
         "         \"gc_delay\" : \"1weeks\",",
+        "         \"gc_non_executor_container_sandboxes\" : \"false\",",
         "         \"docker_remove_delay\" : \"6hrs\",",
         "         \"port\" : \"5051\",",
         "         \"systemd_runtime_directory\" : \"/run/systemd/system\",",
@@ -2091,21 +2087,11 @@ Future<Response> Http::getContainers(
               call.get_containers().show_nested(),
               call.get_containers().show_standalone());
         }))
-    .then([acceptType](const Future<JSON::Array>& result) -> Response {
-      if (!result.isReady()) {
-        LOG(WARNING) << "Could not collect container status and statistics: "
-                     << (result.isFailed()
-                          ? result.failure()
-                          : "Discarded");
-        return result.isFailed()
-          ? InternalServerError(result.failure())
-          : InternalServerError();
-      }
-
+    .then([acceptType](const JSON::Array& result) -> Response {
       return OK(
           serialize(
               acceptType,
-              evolve<v1::agent::Response::GET_CONTAINERS>(result.get())),
+              evolve<v1::agent::Response::GET_CONTAINERS>(result)),
           stringify(acceptType));
     });
 }
@@ -2132,20 +2118,8 @@ Future<Response> Http::_containers(
               false,
               false);
         }))
-    .then([request](const Future<JSON::Array>& result) -> Response {
-      if (!result.isReady()) {
-        LOG(WARNING) << "Could not collect container status and statistics: "
-                     << (result.isFailed()
-                         ? result.failure()
-                         : "Discarded");
-
-        return result.isFailed()
-            ? InternalServerError(result.failure())
-            : InternalServerError();
-      }
-
-      return process::http::OK(
-          result.get(), request.url.query.get("jsonp"));
+    .then([request](const JSON::Array& result) -> Response {
+      return process::http::OK(result, request.url.query.get("jsonp"));
     });
 }
 
@@ -2239,7 +2213,7 @@ Future<JSON::Array> Http::__containers(
         }
 
         if (isRootContainerStandalone &&
-            !approvers->approved<VIEW_STANDALONE_CONTAINER>()) {
+            !approvers->approved<VIEW_STANDALONE_CONTAINER>(rootContainerId)) {
           continue;
         }
 
@@ -2348,23 +2322,7 @@ Future<Response> Http::pruneImages(
           }
 
           return slave->containerizer->pruneImages(excludedImages)
-            .then([](const Future<Nothing>& result) -> Response {
-                if (!result.isReady()) {
-                  // TODO(zhitao): Because `containerizer::pruneImages` returns
-                  // a `Nothing` now, we cannot distinguish between actual
-                  // failure or the case that operator should drain the agent.
-                  // Consider returning more information.
-                  LOG(WARNING)
-                      << "Failed to prune images: "
-                      << (result.isFailed() ? result.failure() : "discarded");
-
-                  return result.isFailed()
-                      ? InternalServerError(result.failure())
-                      : InternalServerError();
-                }
-
-                return OK();
-              });
+            .then([]() -> Response { return OK(); });
         }));
 }
 
@@ -3062,15 +3020,7 @@ Future<Response> Http::_removeContainer(
   Future<Nothing> remove = slave->containerizer->remove(containerId);
 
   return remove
-    .then([=](const Future<Nothing>& result) -> Response {
-      if (result.isFailed()) {
-        LOG(ERROR) << "Failed to remove container " << containerId
-                   << ": " << result.failure();
-        return InternalServerError(result.failure());
-      }
-
-      return OK();
-    });
+    .then([=]() -> Response { return OK(); });
 }
 
 
@@ -3102,8 +3052,8 @@ Future<Response> Http::_attachContainerInput(
       std::move(decoder), encoder, writer);
 
   return slave->containerizer->attach(containerId)
-    .then([mediaTypes, reader, writer, transform](
-        Connection connection) mutable {
+    .then(defer(slave->self(), [=](
+        Connection connection) mutable -> Future<Response> {
       Request request;
       request.method = "POST";
       request.type = Request::PIPE;
@@ -3130,6 +3080,43 @@ Future<Response> Http::_attachContainerInput(
 
           writer.close();
          });
+
+      // This is a non Keep-Alive request which means the connection
+      // will be closed when the response is received. Since the
+      // 'Connection' is reference-counted, we must maintain a copy
+      // until the disconnection occurs.
+      connection.disconnected()
+        .onAny([connection]() {});
+
+      return connection.send(request)
+        .onAny(defer(
+            slave->self(),
+            [=](const Future<Response>&) {
+              // After we have received a response for `ATTACH_CONTAINER_INPUT`
+              // call, we need to send an acknowledgment to the IOSwitchboard,
+              // so that the IOSwitchboard process can terminate itself. This is
+              // a workaround for the problem with dropping outstanding HTTP
+              // responses due to a lack of graceful shutdown in libprocess.
+              acknowledgeContainerInputResponse(containerId)
+                .onFailed([containerId](const string& failure) {
+                  LOG(ERROR) << "Failed to send an acknowledgment to the"
+                             << " IOSwitchboard for container '"
+                             << containerId << "': " << failure;
+              });
+            }));
+    }));
+}
+
+
+Future<Response> Http::acknowledgeContainerInputResponse(
+    const ContainerID& containerId) const {
+  return slave->containerizer->attach(containerId)
+    .then([](Connection connection) {
+      Request request;
+      request.method = "POST";
+      request.type = Request::BODY;
+      request.url.domain = "";
+      request.url.path = "/acknowledge_container_input_response";
 
       // This is a non Keep-Alive request which means the connection
       // will be closed when the response is received. Since the
@@ -3222,6 +3209,14 @@ Future<Response> Http::addResourceProviderConfig(
               << "Processing ADD_RESOURCE_PROVIDER_CONFIG call with type '"
               << info.type() << "' and name '" << info.name() << "'";
 
+          Option<Error> error = LocalResourceProvider::validate(info);
+          if (error.isSome()) {
+            return BadRequest(
+                "Failed to validate resource provider config with type '" +
+                info.type() + "' and name '" + info.name() + "': " +
+                error->message);
+          }
+
           return slave->localResourceProviderDaemon->add(info)
             .then([](bool added) -> Response {
               if (!added) {
@@ -3229,15 +3224,7 @@ Future<Response> Http::addResourceProviderConfig(
               }
 
               return OK();
-            })
-            .repair([info](const Future<Response>& future) {
-                LOG(ERROR)
-                    << "Failed to add resource provider config with type '"
-                    << info.type() << "' and name '" << info.name() << "': "
-                    << future.failure();
-
-                return InternalServerError(future.failure());
-              });
+            });
         }));
 }
 
@@ -3267,6 +3254,14 @@ Future<Response> Http::updateResourceProviderConfig(
               << "Processing UPDATE_RESOURCE_PROVIDER_CONFIG call with type '"
               << info.type() << "' and name '" << info.name() << "'";
 
+          Option<Error> error = LocalResourceProvider::validate(info);
+          if (error.isSome()) {
+            return BadRequest(
+                "Failed to validate resource provider config with type '" +
+                info.type() + "' and name '" + info.name() + "': " +
+                error->message);
+          }
+
           return slave->localResourceProviderDaemon->update(info)
             .then([](bool updated) -> Response {
               if (!updated) {
@@ -3274,15 +3269,7 @@ Future<Response> Http::updateResourceProviderConfig(
               }
 
               return OK();
-            })
-            .repair([info](const Future<Response>& future) {
-                LOG(ERROR)
-                    << "Failed to update resource provider config with type '"
-                    << info.type() << "' and name '" << info.name() << "': "
-                    << future.failure();
-
-                return InternalServerError(future.failure());
-              });
+            });
         }));
 }
 
@@ -3313,18 +3300,7 @@ Future<Response> Http::removeResourceProviderConfig(
               << type << "' and name '" << name << "'";
 
           return slave->localResourceProviderDaemon->remove(type, name)
-            .then([]() -> Response {
-              // Config removal is always successful due to idempotency.
-              return OK();
-            })
-            .repair([type, name](const Future<Response>& future) {
-              LOG(ERROR)
-                  << "Failed to remove resource provider config with type '"
-                  << type << "' and name '" << name << "': "
-                  << future.failure();
-
-              return InternalServerError(future.failure());
-            });
+            .then([]() -> Response { return OK(); });
       }));
 }
 

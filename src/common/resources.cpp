@@ -40,9 +40,11 @@
 
 #include "common/resources_utils.hpp"
 
+using std::make_shared;
 using std::map;
 using std::ostream;
 using std::set;
+using std::shared_ptr;
 using std::string;
 using std::vector;
 
@@ -727,14 +729,14 @@ Try<Resources> Resources::parse(
   Resources result;
 
   // Validate the Resource objects.
-  foreach (Resource resource, resources.get()) {
+  foreach (Resource& resource, CHECK_NOTERROR(resources)) {
     // If invalid, propgate error instead of skipping the resource.
     Option<Error> error = Resources::validate(resource);
     if (error.isSome()) {
       return error.get();
     }
 
-    result.add(resource);
+    result.add(std::move(resource));
   }
 
   // TODO(jmlvanre): Move this up into `Containerizer::resources`.
@@ -1426,7 +1428,7 @@ Resources::Resources(Resource&& resource)
 
 Resources::Resources(const vector<Resource>& _resources)
 {
-  resources.reserve(_resources.size());
+  resourcesNoMutationWithoutExclusiveOwnership.reserve(_resources.size());
   foreach (const Resource& resource, _resources) {
     // NOTE: Invalid and zero Resource objects will be ignored.
     *this += resource;
@@ -1436,7 +1438,7 @@ Resources::Resources(const vector<Resource>& _resources)
 
 Resources::Resources(vector<Resource>&& _resources)
 {
-  resources.reserve(_resources.size());
+  resourcesNoMutationWithoutExclusiveOwnership.reserve(_resources.size());
   foreach (Resource& resource, _resources) {
     // NOTE: Invalid and zero Resource objects will be ignored.
     *this += std::move(resource);
@@ -1446,7 +1448,7 @@ Resources::Resources(vector<Resource>&& _resources)
 
 Resources::Resources(const RepeatedPtrField<Resource>& _resources)
 {
-  resources.reserve(_resources.size());
+  resourcesNoMutationWithoutExclusiveOwnership.reserve(_resources.size());
   foreach (const Resource& resource, _resources) {
     // NOTE: Invalid and zero Resource objects will be ignored.
     *this += resource;
@@ -1456,7 +1458,7 @@ Resources::Resources(const RepeatedPtrField<Resource>& _resources)
 
 Resources::Resources(RepeatedPtrField<Resource>&& _resources)
 {
-  resources.reserve(_resources.size());
+  resourcesNoMutationWithoutExclusiveOwnership.reserve(_resources.size());
   foreach (Resource& resource, _resources) {
     // NOTE: Invalid and zero Resource objects will be ignored.
     *this += std::move(resource);
@@ -1468,16 +1470,18 @@ bool Resources::contains(const Resources& that) const
 {
   Resources remaining = *this;
 
-  foreach (const Resource_& resource_, that.resources) {
+  foreach (
+      const Resource_Unsafe& resource_,
+      that.resourcesNoMutationWithoutExclusiveOwnership) {
     // NOTE: We use _contains because Resources only contain valid
     // Resource objects, and we don't want the performance hit of the
     // validity check.
-    if (!remaining._contains(resource_)) {
+    if (!remaining._contains(*resource_)) {
       return false;
     }
 
-    if (isPersistentVolume(resource_.resource)) {
-      remaining.subtract(resource_);
+    if (isPersistentVolume(resource_->resource)) {
+      remaining.subtract(*resource_);
     }
   }
 
@@ -1496,11 +1500,13 @@ bool Resources::contains(const Resource& that) const
 
 size_t Resources::count(const Resource& that) const
 {
-  foreach (const Resource_& resource_, resources) {
-    if (resource_.resource == that) {
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (resource_->resource == that) {
       // Return 1 for non-shared resources because non-shared
       // Resource objects in Resources are unique.
-      return resource_.isShared() ? resource_.sharedCount.get() : 1;
+      return resource_->isShared() ? CHECK_NOTNONE(resource_->sharedCount) : 1;
     }
   }
 
@@ -1510,17 +1516,29 @@ size_t Resources::count(const Resource& that) const
 
 void Resources::allocate(const string& role)
 {
-  foreach (Resource_& resource_, resources) {
-    resource_.resource.mutable_allocation_info()->set_role(role);
+  foreach (
+      Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    // Copy-on-write (if more than 1 reference).
+    if (resource_.use_count() > 1) {
+      resource_ = make_shared<Resource_>(*resource_);
+    }
+    resource_->resource.mutable_allocation_info()->set_role(role);
   }
 }
 
 
 void Resources::unallocate()
 {
-  foreach (Resource_& resource_, resources) {
-    if (resource_.resource.has_allocation_info()) {
-      resource_.resource.clear_allocation_info();
+  foreach (
+      Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (resource_->resource.has_allocation_info()) {
+      // Copy-on-write (if more than 1 reference).
+      if (resource_.use_count() > 1) {
+        resource_ = make_shared<Resource_>(*resource_);
+      }
+      resource_->resource.clear_allocation_info();
     }
   }
 }
@@ -1530,9 +1548,16 @@ Resources Resources::filter(
     const lambda::function<bool(const Resource&)>& predicate) const
 {
   Resources result;
-  foreach (const Resource_& resource_, resources) {
-    if (predicate(resource_.resource)) {
-      result.add(resource_);
+  result.resourcesNoMutationWithoutExclusiveOwnership.reserve(this->size());
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (predicate(resource_->resource)) {
+      // We `push_back()` here instead of `add()` (which is O(n)). `add()` is
+      // not necessary because we assume all Resource objects are already
+      // combined in `Resources` and `filter()` should only take away
+      // resource objects.
+      result.resourcesNoMutationWithoutExclusiveOwnership.push_back(resource_);
     }
   }
   return result;
@@ -1543,9 +1568,11 @@ hashmap<string, Resources> Resources::reservations() const
 {
   hashmap<string, Resources> result;
 
-  foreach (const Resource_& resource_, resources) {
-    if (isReserved(resource_.resource)) {
-      result[reservationRole(resource_.resource)].add(resource_);
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (isReserved(resource_->resource)) {
+      result[reservationRole(resource_->resource)].add(resource_);
     }
   }
 
@@ -1607,27 +1634,34 @@ hashmap<string, Resources> Resources::allocations() const
 {
   hashmap<string, Resources> result;
 
-  foreach (const Resource_& resource_, resources) {
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
     // We require that this is called only when
     // the resources are allocated.
-    CHECK(resource_.resource.has_allocation_info());
-    CHECK(resource_.resource.allocation_info().has_role());
-    result[resource_.resource.allocation_info().role()].add(resource_);
+    CHECK(resource_->resource.has_allocation_info());
+    CHECK(resource_->resource.allocation_info().has_role());
+    result[resource_->resource.allocation_info().role()].add(resource_);
   }
 
   return result;
 }
 
 
+// TODO(mzhu): Introduce `pushReservations`, so that for O(n) reservations
+// we only need to copy `Resources` once.
 Resources Resources::pushReservation(
     const Resource::ReservationInfo& reservation) const
 {
   Resources result;
 
-  foreach (Resource_ resource_, *this) {
-    resource_.resource.add_reservations()->CopyFrom(reservation);
-    CHECK_NONE(Resources::validate(resource_.resource));
-    result.add(resource_);
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    Resource_ r_ = *resource_;
+    r_.resource.add_reservations()->CopyFrom(reservation);
+    CHECK_NONE(Resources::validate(r_.resource));
+    result.add(std::move(r_));
   }
 
   return result;
@@ -1638,10 +1672,13 @@ Resources Resources::popReservation() const
 {
   Resources result;
 
-  foreach (Resource_ resource_, resources) {
-    CHECK_GT(resource_.resource.reservations_size(), 0);
-    resource_.resource.mutable_reservations()->RemoveLast();
-    result.add(resource_);
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    CHECK_GT(resource_->resource.reservations_size(), 0);
+    Resource_ r_ = *resource_;
+    r_.resource.mutable_reservations()->RemoveLast();
+    result.add(std::move(r_));
   }
 
   return result;
@@ -1652,9 +1689,16 @@ Resources Resources::toUnreserved() const
 {
   Resources result;
 
-  foreach (Resource_ resource_, *this) {
-    resource_.resource.clear_reservations();
-    result.add(resource_);
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (isReserved(resource_->resource)) {
+      Resource_ r_ = *resource_;
+      r_.resource.clear_reservations();
+      result.add(std::move(r_));
+    } else {
+      result.add(resource_);
+    }
   }
 
   return result;
@@ -1665,15 +1709,17 @@ Resources Resources::createStrippedScalarQuantity() const
 {
   Resources stripped;
 
-  foreach (const Resource& resource, resources) {
-    if (resource.type() == Value::SCALAR) {
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (resource_->resource.type() == Value::SCALAR) {
       Resource scalar;
 
-      scalar.set_name(resource.name());
-      scalar.set_type(resource.type());
-      scalar.mutable_scalar()->CopyFrom(resource.scalar());
+      scalar.set_name(resource_->resource.name());
+      scalar.set_type(resource_->resource.type());
+      scalar.mutable_scalar()->CopyFrom(resource_->resource.scalar());
 
-      stripped.add(scalar);
+      stripped.add(std::move(scalar));
     }
   }
 
@@ -1685,6 +1731,7 @@ Option<Resources> Resources::find(const Resources& targets) const
 {
   Resources total;
 
+  // TODO(mzhu): Traverse `Resource_` to preserve `sharedCount`.
   foreach (const Resource& target, targets) {
     Option<Resources> found = find(target);
 
@@ -1740,10 +1787,12 @@ Option<Value::Scalar> Resources::get(const string& name) const
   Value::Scalar total;
   bool found = false;
 
-  foreach (const Resource& resource, resources) {
-    if (resource.name() == name &&
-        resource.type() == Value::SCALAR) {
-      total += resource.scalar();
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (resource_->resource.name() == name &&
+        resource_->resource.type() == Value::SCALAR) {
+      total += resource_->resource.scalar();
       found = true;
     }
   }
@@ -1762,10 +1811,12 @@ Option<Value::Set> Resources::get(const string& name) const
   Value::Set total;
   bool found = false;
 
-  foreach (const Resource& resource, resources) {
-    if (resource.name() == name &&
-        resource.type() == Value::SET) {
-      total += resource.set();
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (resource_->resource.name() == name &&
+        resource_->resource.type() == Value::SET) {
+      total += resource_->resource.set();
       found = true;
     }
   }
@@ -1784,10 +1835,12 @@ Option<Value::Ranges> Resources::get(const string& name) const
   Value::Ranges total;
   bool found = false;
 
-  foreach (const Resource& resource, resources) {
-    if (resource.name() == name &&
-        resource.type() == Value::RANGES) {
-      total += resource.ranges();
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (resource_->resource.name() == name &&
+        resource_->resource.type() == Value::RANGES) {
+      total += resource_->resource.ranges();
       found = true;
     }
   }
@@ -1819,8 +1872,10 @@ Resources Resources::scalars() const
 set<string> Resources::names() const
 {
   set<string> result;
-  foreach (const Resource& resource, resources) {
-    result.insert(resource.name());
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    result.insert(resource_->resource.name());
   }
 
   return result;
@@ -1830,8 +1885,10 @@ set<string> Resources::names() const
 map<string, Value_Type> Resources::types() const
 {
   map<string, Value_Type> result;
-  foreach (const Resource& resource, resources) {
-    result[resource.name()] = resource.type();
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    result[resource_->resource.name()] = resource_->resource.type();
   }
 
   return result;
@@ -1904,11 +1961,13 @@ Option<Value::Ranges> Resources::ephemeral_ports() const
 }
 
 
-Option<Resource> Resources::match(const Resource& resource) const
+Option<Resource> Resources::match(const Resource& that) const
 {
-  foreach (const Resource_& resource_, resources) {
-    if (compareResourceMetadata(resource_.resource, resource)) {
-      return resource_.resource;
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (compareResourceMetadata(resource_->resource, that)) {
+      return resource_->resource;
     }
   }
 
@@ -1921,8 +1980,10 @@ Option<Resource> Resources::match(const Resource& resource) const
 
 bool Resources::_contains(const Resource_& that) const
 {
-  foreach (const Resource_& resource_, resources) {
-    if (resource_.contains(that)) {
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (resource_->contains(that)) {
       return true;
     }
   }
@@ -1949,23 +2010,27 @@ Option<Resources> Resources::find(const Resource& target) const
   predicates.push_back([](const Resource&) { return true; });
 
   foreach (const auto& predicate, predicates) {
-    foreach (const Resource_& resource_, total.filter(predicate)) {
+    foreach (
+        const Resource_Unsafe& resource_,
+        total.filter(predicate).resourcesNoMutationWithoutExclusiveOwnership) {
       // Need to `toUnreserved` to ignore the roles in contains().
-      Resources unreserved = Resources(resource_.resource).toUnreserved();
+      Resources unreserved;
+      unreserved.add(resource_);
+      unreserved = unreserved.toUnreserved();
 
       if (unreserved.contains(remaining)) {
         // The target has been found, return the result.
-        foreach (Resource_ r, remaining) {
-          r.resource.mutable_reservations()->CopyFrom(
-              resource_.resource.reservations());
-
-          found.add(r);
+        // TODO(mzhu): Traverse `Resource_` to preserve `sharedCount`.
+        foreach (Resource r, remaining) {
+          r.mutable_reservations()->CopyFrom(
+              resource_->resource.reservations());
+          found.add(std::move(r));
         }
 
         return found;
       } else if (remaining.contains(unreserved)) {
         found.add(resource_);
-        total.subtract(resource_);
+        total.subtract(*resource_);
         remaining -= unreserved;
         break;
       }
@@ -1983,8 +2048,10 @@ Option<Resources> Resources::find(const Resource& target) const
 Resources::operator RepeatedPtrField<Resource>() const
 {
   RepeatedPtrField<Resource> all;
-  foreach (const Resource& resource, resources) {
-    all.Add()->CopyFrom(resource);
+  foreach (
+      const Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    all.Add()->CopyFrom(resource_->resource);
   }
 
   return all;
@@ -2074,9 +2141,16 @@ void Resources::add(const Resource_& that)
   }
 
   bool found = false;
-  foreach (Resource_& resource_, resources) {
-    if (internal::addable(resource_.resource, that)) {
-      resource_ += that;
+  foreach (
+      Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (internal::addable(resource_->resource, that.resource)) {
+      // Copy-on-write (if more than 1 reference).
+      if (resource_.use_count() > 1) {
+        resource_ = make_shared<Resource_>(*resource_);
+      }
+
+      *resource_ += that;
       found = true;
       break;
     }
@@ -2084,7 +2158,8 @@ void Resources::add(const Resource_& that)
 
   // Cannot be combined with any existing Resource object.
   if (!found) {
-    resources.push_back(that);
+    resourcesNoMutationWithoutExclusiveOwnership.push_back(
+        make_shared<Resource_>(that));
   }
 }
 
@@ -2096,9 +2171,18 @@ void Resources::add(Resource_&& that)
   }
 
   bool found = false;
-  foreach (Resource_& resource_, resources) {
-    if (internal::addable(resource_.resource, that)) {
-      resource_ += that;
+  foreach (
+      Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (internal::addable(resource_->resource, that.resource)) {
+      // Copy-on-write (if more than 1 reference).
+      if (resource_.use_count() > 1) {
+        that += *resource_;
+        resource_ = make_shared<Resource_>(std::move(that));
+      } else {
+        *resource_ += that;
+      }
+
       found = true;
       break;
     }
@@ -2106,7 +2190,37 @@ void Resources::add(Resource_&& that)
 
   // Cannot be combined with any existing Resource object.
   if (!found) {
-    resources.push_back(std::move(that));
+    resourcesNoMutationWithoutExclusiveOwnership.push_back(
+        make_shared<Resource_>(std::move(that)));
+  }
+}
+
+
+void Resources::add(const Resource_Unsafe& that)
+{
+  if (that->isEmpty()) {
+    return;
+  }
+
+  bool found = false;
+  foreach (
+      Resource_Unsafe& resource_,
+      resourcesNoMutationWithoutExclusiveOwnership) {
+    if (internal::addable(resource_->resource, that->resource)) {
+      // Copy-on-write (if more than 1 reference).
+      if (resource_.use_count() > 1) {
+        resource_ = make_shared<Resource_>(*resource_);
+      }
+
+      *resource_ += *that;
+      found = true;
+      break;
+    }
+  }
+
+  // Cannot be combined with any existing Resource object.
+  if (!found) {
+    resourcesNoMutationWithoutExclusiveOwnership.push_back(that);
   }
 }
 
@@ -2149,7 +2263,9 @@ Resources& Resources::operator+=(Resource&& that)
 
 Resources& Resources::operator+=(const Resources& that)
 {
-  foreach (const Resource_& resource_, that) {
+  foreach (
+      const Resource_Unsafe& resource_,
+      that.resourcesNoMutationWithoutExclusiveOwnership) {
     add(resource_);
   }
 
@@ -2159,7 +2275,9 @@ Resources& Resources::operator+=(const Resources& that)
 
 Resources& Resources::operator+=(Resources&& that)
 {
-  foreach (Resource_& resource_, that.resources) {
+  foreach (
+      const Resource_Unsafe& resource_,
+      that.resourcesNoMutationWithoutExclusiveOwnership) {
     add(std::move(resource_));
   }
 
@@ -2189,11 +2307,18 @@ void Resources::subtract(const Resource_& that)
     return;
   }
 
-  for (size_t i = 0; i < resources.size(); i++) {
-    Resource_& resource_ = resources[i];
+  for (size_t i = 0; i < resourcesNoMutationWithoutExclusiveOwnership.size();
+       i++) {
+    Resource_Unsafe& resource_ =
+      resourcesNoMutationWithoutExclusiveOwnership[i];
 
-    if (internal::subtractable(resource_.resource, that)) {
-      resource_ -= that;
+    if (internal::subtractable(resource_->resource, that)) {
+      // Copy-on-write (if more than 1 reference).
+      if (resource_.use_count() > 1) {
+        resource_ = make_shared<Resource_>(*resource_);
+      }
+
+      *resource_ -= that;
 
       // Remove the resource if it has become negative or empty.
       // Note that a negative resource means the caller is
@@ -2205,16 +2330,17 @@ void Resources::subtract(const Resource_& that)
       // A "negative" Resource_ either has a negative sharedCount or
       // a negative scalar value.
       bool negative =
-        (resource_.isShared() && resource_.sharedCount.get() < 0) ||
-        (resource_.resource.type() == Value::SCALAR &&
-         resource_.resource.scalar().value() < 0);
+        (resource_->isShared() && resource_->sharedCount.get() < 0) ||
+        (resource_->resource.type() == Value::SCALAR &&
+         resource_->resource.scalar().value() < 0);
 
-      if (negative || resource_.isEmpty()) {
+      if (negative || resource_->isEmpty()) {
         // As `resources` is not ordered, and erasing an element
         // from the middle is expensive, we swap with the last element
         // and then shrink the vector by one.
-        resources[i] = resources.back();
-        resources.pop_back();
+        resourcesNoMutationWithoutExclusiveOwnership[i] =
+          resourcesNoMutationWithoutExclusiveOwnership.back();
+        resourcesNoMutationWithoutExclusiveOwnership.pop_back();
       }
 
       break;
@@ -2243,8 +2369,10 @@ Resources& Resources::operator-=(const Resource& that)
 
 Resources& Resources::operator-=(const Resources& that)
 {
-  foreach (const Resource_& resource_, that) {
-    subtract(resource_);
+  foreach (
+      const Resource_Unsafe& resource_,
+      that.resourcesNoMutationWithoutExclusiveOwnership) {
+    subtract(*resource_);
   }
 
   return *this;

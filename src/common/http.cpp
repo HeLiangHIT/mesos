@@ -32,6 +32,7 @@
 #include <mesos/quota/quota.hpp>
 
 #include <process/authenticator.hpp>
+#include <process/clock.hpp>
 #include <process/collect.hpp>
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
@@ -99,11 +100,9 @@ namespace internal {
 hashset<string> AUTHORIZABLE_ENDPOINTS{
     "/containers",
     "/files/debug",
-    "/files/debug.json",
     "/logging/toggle",
     "/metrics/snapshot",
-    "/monitor/statistics",
-    "/monitor/statistics.json"};
+    "/monitor/statistics"};
 
 
 string serialize(
@@ -585,6 +584,39 @@ static void json(JSON::ObjectWriter* writer, const ContainerStatus& status)
 }
 
 
+static void json(
+    JSON::ObjectWriter* writer,
+    const DomainInfo::FaultDomain::RegionInfo& regionInfo)
+{
+  writer->field("name", regionInfo.name());
+}
+
+
+static void json(
+    JSON::ObjectWriter* writer,
+    const DomainInfo::FaultDomain::ZoneInfo& zoneInfo)
+{
+  writer->field("name", zoneInfo.name());
+}
+
+
+static void json(
+    JSON::ObjectWriter* writer,
+    const DomainInfo::FaultDomain& faultDomain)
+{
+    writer->field("region", faultDomain.region());
+    writer->field("zone", faultDomain.zone());
+}
+
+
+void json(JSON::ObjectWriter* writer, const DomainInfo& domainInfo)
+{
+  if (domainInfo.has_fault_domain()) {
+    writer->field("fault_domain", domainInfo.fault_domain());
+  }
+}
+
+
 void json(JSON::ObjectWriter* writer, const ExecutorInfo& executorInfo)
 {
   writer->field("executor_id", executorInfo.executor_id().value());
@@ -612,11 +644,40 @@ void json(JSON::ObjectWriter* writer, const ExecutorInfo& executorInfo)
 }
 
 
+void json(
+    JSON::StringWriter* writer,
+    const FrameworkInfo::Capability& capability)
+{
+  writer->set(FrameworkInfo::Capability::Type_Name(capability.type()));
+}
+
+
 void json(JSON::ArrayWriter* writer, const Labels& labels)
 {
   foreach (const Label& label, labels.labels()) {
     writer->element(JSON::Protobuf(label));
   }
+}
+
+
+void json(JSON::ObjectWriter* writer, const MasterInfo& info)
+{
+  writer->field("id", info.id());
+  writer->field("pid", info.pid());
+  writer->field("port", info.port());
+  writer->field("hostname", info.hostname());
+
+  if (info.has_domain()) {
+    writer->field("domain", info.domain());
+  }
+}
+
+
+void json(
+    JSON::StringWriter* writer,
+    const MasterInfo::Capability& capability)
+{
+  writer->set(MasterInfo::Capability::Type_Name(capability.type()));
 }
 
 
@@ -650,6 +711,16 @@ static void json(JSON::ObjectWriter* writer, const NetworkInfo& info)
       }
     });
   }
+}
+
+
+void json(JSON::ObjectWriter* writer, const Offer& offer)
+{
+  writer->field("id", offer.id().value());
+  writer->field("framework_id", offer.framework_id().value());
+  writer->field("allocation_info", JSON::Protobuf(offer.allocation_info()));
+  writer->field("slave_id", offer.slave_id().value());
+  writer->field("resources", offer.resources());
 }
 
 
@@ -704,6 +775,27 @@ void json(
 }
 
 
+void json(JSON::ObjectWriter* writer, const SlaveInfo& slaveInfo)
+{
+  writer->field("id", slaveInfo.id().value());
+  writer->field("hostname", slaveInfo.hostname());
+  writer->field("port", slaveInfo.port());
+  writer->field("attributes", Attributes(slaveInfo.attributes()));
+
+  if (slaveInfo.has_domain()) {
+    writer->field("domain", slaveInfo.domain());
+  }
+}
+
+
+void json(
+    JSON::StringWriter* writer,
+    const SlaveInfo::Capability& capability)
+{
+  writer->set(SlaveInfo::Capability::Type_Name(capability.type()));
+}
+
+
 void json(JSON::ObjectWriter* writer, const Task& task)
 {
   writer->field("id", task.task_id().value());
@@ -735,6 +827,10 @@ void json(JSON::ObjectWriter* writer, const Task& task)
   if (task.has_container()) {
     writer->field("container", JSON::Protobuf(task.container()));
   }
+
+  if (task.has_health_check()) {
+    writer->field("health_check", JSON::Protobuf(task.health_check()));
+  }
 }
 
 
@@ -753,39 +849,6 @@ void json(JSON::ObjectWriter* writer, const TaskStatus& status)
 
   if (status.has_healthy()) {
     writer->field("healthy", status.healthy());
-  }
-}
-
-
-static void json(
-    JSON::ObjectWriter* writer,
-    const DomainInfo::FaultDomain::RegionInfo& regionInfo)
-{
-  writer->field("name", regionInfo.name());
-}
-
-
-static void json(
-    JSON::ObjectWriter* writer,
-    const DomainInfo::FaultDomain::ZoneInfo& zoneInfo)
-{
-  writer->field("name", zoneInfo.name());
-}
-
-
-static void json(
-    JSON::ObjectWriter* writer,
-    const DomainInfo::FaultDomain& faultDomain)
-{
-    writer->field("region", faultDomain.region());
-    writer->field("zone", faultDomain.zone());
-}
-
-
-void json(JSON::ObjectWriter* writer, const DomainInfo& domainInfo)
-{
-  if (domainInfo.has_fault_domain()) {
-    writer->field("fault_domain", domainInfo.fault_domain());
   }
 }
 
@@ -1126,6 +1189,20 @@ void logRequest(const process::http::Request& request)
             << (forwardedFor.isSome()
                 ? " with X-Forwarded-For='" + forwardedFor.get() + "'"
                 : "");
+}
+
+
+void logResponse(
+    const process::http::Request& request,
+    const process::http::Response& response)
+{
+  LOG(INFO) << "HTTP " << request.method << " for " << request.url
+            << (request.client.isSome()
+                ? " from " + stringify(request.client.get())
+                : "")
+            << ": '" << response.status << "'"
+            << " after " << (process::Clock::now() - request.received).ms()
+            << Milliseconds::units();
 }
 
 }  // namespace mesos {

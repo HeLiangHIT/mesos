@@ -175,15 +175,18 @@ mesos::internal::slave::Flags::Flags()
       "auto image gc is enabled. This image gc config can be provided either\n"
       "as a path pointing to a local file, or as a JSON-formatted string.\n"
       "Please note that the image garbage collection only work with Mesos\n"
-      "Containerizer for now."
+      "Containerizer for now.\n"
       "\n"
       "See the ImageGcConfig message in `flags.proto` for the expected\n"
       "format.\n"
-      "Example:\n"
+      "\n"
+      "In the following example, image garbage collection is configured to\n"
+      "sample disk usage every hour, and will attempt to maintain at least\n"
+      "10 percent of free space on the container image filesystem:\n"
       "{\n"
       "  \"image_disk_headroom\": 0.1,\n"
       "  \"image_disk_watch_interval\": {\n"
-      "    \"nanoseconds\": 3600\n"
+      "    \"nanoseconds\": 3600000000000\n"
       "  },\n"
       "  \"excluded_images\": []\n"
       "}");
@@ -202,11 +205,11 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::docker_registry,
       "docker_registry",
       "The default url for Mesos containerizer to pull Docker images. It\n"
-      "could either be a Docker registry server url (i.e: `https://registry.docker.io`),\n" // NOLINT(whitespace/line_length)
+      "could either be a Docker registry server url (e.g., `https://registry.docker.io`),\n" // NOLINT(whitespace/line_length)
       "or a source that Docker image archives (result of `docker save`) are\n"
       "stored. The Docker archive source could be specified either as a local\n"
-      "path (i.e: `/tmp/docker/images`), or as an HDFS URI\n"
-      "(i.e: `hdfs://localhost:8020/archives/`). Note that this option won't\n"
+      "path (e.g., `/tmp/docker/images`), or as an HDFS URI (*experimental*)\n"
+      "(e.g., `hdfs://localhost:8020/archives/`). Note that this option won't\n"
       "change the default registry server for Docker containerizer.",
       "https://registry-1.docker.io");
 
@@ -353,14 +356,29 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::authentication_backoff_factor,
       "authentication_backoff_factor",
-      "After a failed authentication the agent picks a random amount of time\n"
-      "between `[0, b]`, where `b = authentication_backoff_factor`, to\n"
-      "authenticate with a new master. Subsequent retries are exponentially\n"
-      "backed off based on this interval (e.g., 1st retry uses a random\n"
-      "value between `[0, b * 2^1]`, 2nd retry between `[0, b * 2^2]`, 3rd\n"
-      "retry between `[0, b * 2^3]`, etc up to a maximum of " +
-          stringify(AUTHENTICATION_RETRY_INTERVAL_MAX),
+      "The agent will time out its authentication with the master based on\n"
+      "exponential backoff. The timeout will be randomly chosen within the\n"
+      "range `[min, min + factor*2^n]` where `n` is the number of failed\n"
+      "attempts. To tune these parameters, set the\n"
+      "`--authentication_timeout_[min|max|factor]` flags.\n",
       DEFAULT_AUTHENTICATION_BACKOFF_FACTOR);
+
+  add(&Flags::authentication_timeout_min,
+      "authentication_timeout_min",
+      "The minimum amount of time the agent waits before retrying\n"
+      "authenticating with the master. See `authentication_backoff_factor`\n"
+      "for more details. NOTE that since authentication retry cancels the\n"
+      "previous authentication request, one should consider what is the\n"
+      "normal authentication delay when setting this flag to prevent\n"
+      "premature retry.",
+      DEFAULT_AUTHENTICATION_TIMEOUT_MIN);
+
+  add(&Flags::authentication_timeout_max,
+      "authentication_timeout_max",
+      "The maximum amount of time the agent waits before retrying\n"
+      "authenticating with the master. See `authentication_backoff_factor`\n"
+      "for more details.",
+      DEFAULT_AUTHENTICATION_TIMEOUT_MAX);
 
   add(&Flags::executor_environment_variables,
       "executor_environment_variables",
@@ -464,6 +482,15 @@ mesos::internal::slave::Flags::Flags()
       "be a value between 0.0 and 1.0",
       GC_DISK_HEADROOM);
 
+  add(&Flags::gc_non_executor_container_sandboxes,
+      "gc_non_executor_container_sandboxes",
+      "Determines whether nested container sandboxes created via the\n"
+      "LAUNCH_CONTAINER and LAUNCH_NESTED_CONTAINER APIs will be\n"
+      "automatically garbage collected by the agent upon termination.\n"
+      "The REMOVE_(NESTED_)CONTAINER API is unaffected by this flag\n"
+      "and can still be used.",
+      false);
+
   add(&Flags::disk_watch_interval,
       "disk_watch_interval",
       "Periodic time interval (e.g., 10secs, 2mins, etc)\n"
@@ -533,6 +560,13 @@ mesos::internal::slave::Flags::Flags()
       DEFAULT_MAX_COMPLETED_EXECUTORS_PER_FRAMEWORK);
 
 #ifdef __linux__
+  add(&Flags::cgroups_destroy_timeout,
+      "cgroups_destroy_timeout",
+      "Amount of time allowed to destroy a cgroup hierarchy. If the cgroup\n"
+      "hierarchy is not destroyed within the timeout, the corresponding\n"
+      "container destroy is considered failed.",
+      Seconds(60));
+
   add(&Flags::cgroups_hierarchy,
       "cgroups_hierarchy",
       "The path to the cgroups hierarchy root\n", "/sys/fs/cgroup");
@@ -1121,11 +1155,19 @@ mesos::internal::slave::Flags::Flags()
       "published by the agent's resources. Otherwise tasks are restricted\n"
       "to only listen on ports for which they have been assigned resources.",
       false);
+
   add(&Flags::enforce_container_ports,
       "enforce_container_ports",
       "Whether to enable port enforcement for containers. This flag\n"
-      "is used by `network/ports` isolator.",
+      "is used by the `network/ports` isolator.",
       false);
+
+  add(&Flags::container_ports_isolated_range,
+      "container_ports_isolated_range",
+      "When this flag is specified, the `network/ports` isolator will\n"
+      "only enforce port isolation for the specified range of ports.\n"
+      "(Example: `[0-35000]`)\n");
+
 #endif // ENABLE_NETWORK_PORTS_ISOLATOR
 
   add(&Flags::network_cni_plugins_dir,
@@ -1141,6 +1183,12 @@ mesos::internal::slave::Flags::Flags()
       "network that containers launched in Mesos agent can connect to,\n"
       "the operator should install a network configuration file in JSON\n"
       "format in the specified directory.");
+
+  add(&Flags::network_cni_metrics,
+      "network_cni_metrics",
+      "This setting controls whether the networking metrics of the CNI\n"
+      "isolator should be exposed.",
+      true);
 
   add(&Flags::container_disk_watch_interval,
       "container_disk_watch_interval",

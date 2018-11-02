@@ -48,8 +48,8 @@ BuildRequires: subversion-devel < 2.0
 BuildRequires: patch
 
 %if 0%{?el6}
-BuildRequires: devtoolset-3-gcc
-BuildRequires: devtoolset-3-gcc-c++
+BuildRequires: devtoolset-7-gcc
+BuildRequires: devtoolset-7-gcc-c++
 BuildRequires: epel-rpm-macros
 BuildRequires: libevent2-devel
 %define _with_xfs no
@@ -161,10 +161,11 @@ install -m 0644 src/java/target/mesos-*.jar %{buildroot}%{_datadir}/java/
 ######################
 %files devel
 %doc LICENSE NOTICE
+%{_includedir}/elfio/
 %{_includedir}/mesos/
 %{_includedir}/stout/
 %{_includedir}/process/
-%{_includedir}/elfio/
+%{_includedir}/rapidjson/
 %{_includedir}/picojson.h
 %{_libdir}/pkgconfig/%{name}.pc
 %{_libdir}/*.la

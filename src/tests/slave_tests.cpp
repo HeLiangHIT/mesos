@@ -2429,44 +2429,41 @@ TEST_F(SlaveTest, StatisticsEndpointAuthentication)
   Try<Owned<cluster::Slave>> agent = StartSlave(detector.get());
   ASSERT_SOME(agent);
 
-  const string statisticsEndpoints[] =
-    {"monitor/statistics", "monitor/statistics.json"};
+  const string statisticsEndpoint = "monitor/statistics";
 
-  foreach (const string& statisticsEndpoint, statisticsEndpoints) {
-    // Unauthenticated requests are rejected.
-    {
-      Future<Response> response = process::http::get(
-          agent.get()->pid,
-          statisticsEndpoint);
+  // Unauthenticated requests are rejected.
+  {
+    Future<Response> response = process::http::get(
+        agent.get()->pid,
+        statisticsEndpoint);
 
-      AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
-    }
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
+  }
 
-    // Incorrectly authenticated requests are rejected.
-    {
-      Credential badCredential;
-      badCredential.set_principal("badPrincipal");
-      badCredential.set_secret("badSecret");
+  // Incorrectly authenticated requests are rejected.
+  {
+    Credential badCredential;
+    badCredential.set_principal("badPrincipal");
+    badCredential.set_secret("badSecret");
 
-      Future<Response> response = process::http::get(
-          agent.get()->pid,
-          statisticsEndpoint,
-          None(),
-          createBasicAuthHeaders(badCredential));
+    Future<Response> response = process::http::get(
+        agent.get()->pid,
+        statisticsEndpoint,
+        None(),
+        createBasicAuthHeaders(badCredential));
 
-      AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
-    }
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
+  }
 
-    // Correctly authenticated requests succeed.
-    {
-      Future<Response> response = process::http::get(
-          agent.get()->pid,
-          statisticsEndpoint,
-          None(),
-          createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+  // Correctly authenticated requests succeed.
+  {
+    Future<Response> response = process::http::get(
+        agent.get()->pid,
+        statisticsEndpoint,
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-      AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
-    }
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 }
 
@@ -4587,9 +4584,8 @@ TEST_F(SlaveTest, RemoveExecutorUponFailedLaunch)
   EXPECT_CALL(exec, registered(_, _, _, _))
     .Times(0);
 
-  Future<TaskStatus> killTaskStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&killTaskStatus));
+    .Times(AtMost(1));
 
   Future<ExitedExecutorMessage> exitedExecutorMessage =
     FUTURE_PROTOBUF(ExitedExecutorMessage(), _, _);
@@ -7851,7 +7847,6 @@ TEST_F(SlaveTest, RunTaskGroupFailedSecretGeneration)
 
   StandaloneMasterDetector detector(master.get()->pid);
 
-  // This pointer is passed to the agent, which will perform the cleanup.
   Owned<MockSecretGenerator> secretGenerator(new MockSecretGenerator());
 
   Try<Owned<cluster::Slave>> slave = StartSlave(

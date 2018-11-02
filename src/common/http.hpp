@@ -154,15 +154,24 @@ void json(JSON::ObjectWriter* writer, const Task& task);
 
 void json(JSON::ObjectWriter* writer, const Attributes& attributes);
 void json(JSON::ObjectWriter* writer, const CommandInfo& command);
+void json(JSON::ObjectWriter* writer, const DomainInfo& domainInfo);
 void json(JSON::ObjectWriter* writer, const ExecutorInfo& executorInfo);
+void json(
+    JSON::StringWriter* writer, const FrameworkInfo::Capability& capability);
 void json(JSON::ArrayWriter* writer, const Labels& labels);
+void json(JSON::ObjectWriter* writer, const MasterInfo& info);
+void json(
+    JSON::StringWriter* writer, const MasterInfo::Capability& capability);
+void json(JSON::ObjectWriter* writer, const Offer& offer);
 void json(JSON::ObjectWriter* writer, const Resources& resources);
 void json(
     JSON::ObjectWriter* writer,
     const google::protobuf::RepeatedPtrField<Resource>& resources);
+void json(JSON::ObjectWriter* writer, const SlaveInfo& slaveInfo);
+void json(
+    JSON::StringWriter* writer, const SlaveInfo::Capability& capability);
 void json(JSON::ObjectWriter* writer, const Task& task);
 void json(JSON::ObjectWriter* writer, const TaskStatus& status);
-void json(JSON::ObjectWriter* writer, const DomainInfo& domainInfo);
 
 namespace authorization {
 
@@ -202,10 +211,7 @@ public:
   bool approved(const Args&... args)
   {
     if (!approvers.contains(action)) {
-      LOG(WARNING) << "Attempted to authorize "
-                   << (principal.isSome()
-                       ? "'" + stringify(principal.get()) + "'"
-                       : "")
+      LOG(WARNING) << "Attempted to authorize " << principal
                    << " for unexpected action " << stringify(action);
       return false;
     }
@@ -215,10 +221,7 @@ public:
 
     if (approved.isError()) {
       // TODO(joerg84): Expose these errors back to the caller.
-      LOG(WARNING) << "Failed to authorize principal "
-                   << (principal.isSome()
-                       ? "'" + stringify(principal.get()) + "' "
-                       : "")
+      LOG(WARNING) << "Failed to authorize principal " << principal
                    << "for action " << stringify(action) << ": "
                    << approved.error();
       return false;
@@ -233,10 +236,14 @@ private:
           authorization::Action,
           process::Owned<ObjectApprover>>&& _approvers,
       const Option<process::http::authentication::Principal>& _principal)
-    : approvers(std::move(_approvers)), principal(_principal) {}
+    : approvers(std::move(_approvers)),
+      principal(_principal.isSome()
+          ? "'" + stringify(_principal.get()) + "'"
+          : "")
+    {}
 
   hashmap<authorization::Action, process::Owned<ObjectApprover>> approvers;
-  Option<process::http::authentication::Principal> principal;
+  const std::string principal; // Only used for logging.
 };
 
 
@@ -337,6 +344,17 @@ Try<Nothing> initializeHttpAuthenticators(
 // Logs the request. Route handlers can compose this with the
 // desired request handler to get consistent request logging.
 void logRequest(const process::http::Request& request);
+
+
+// Log the response for the corresponding request together with the request
+// processing time. Route handlers can compose this with the desired request
+// handler to get consistent request/response logging.
+//
+// TODO(alexr): Consider taking `response` as a future to allow logging for
+// cases when response has not been generated.
+void logResponse(
+    const process::http::Request& request,
+    const process::http::Response& response);
 
 } // namespace mesos {
 

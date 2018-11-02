@@ -27,6 +27,7 @@
 #include <boost/functional/hash.hpp>
 
 #include <process/address.hpp>
+#include <process/clock.hpp>
 #include <process/future.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
@@ -331,7 +332,8 @@ public:
       CLOSED,
     };
 
-    explicit Reader(const std::shared_ptr<Data>& _data) : data(_data) {}
+    explicit Reader(const std::shared_ptr<Data>& _data)
+      : data(_data) {}
 
     std::shared_ptr<Data> data;
   };
@@ -372,12 +374,14 @@ public:
       FAILED,
     };
 
-    explicit Writer(const std::shared_ptr<Data>& _data) : data(_data) {}
+    explicit Writer(const std::shared_ptr<Data>& _data)
+      : data(_data) {}
 
     std::shared_ptr<Data> data;
   };
 
-  Pipe() : data(new Data()) {}
+  Pipe()
+    : data(new Data()) {}
 
   Reader reader() const;
   Writer writer() const;
@@ -389,8 +393,7 @@ private:
   struct Data
   {
     Data()
-      : readEnd(Reader::OPEN),
-        writeEnd(Writer::OPEN) {}
+      : readEnd(Reader::OPEN), writeEnd(Writer::OPEN) {}
 
     // Rather than use a process to serialize access to the pipe's
     // internal data we use a 'std::atomic_flag'.
@@ -517,7 +520,7 @@ public:
 struct Request
 {
   Request()
-    : keepAlive(false), type(BODY) {}
+    : keepAlive(false), type(BODY), received(Clock::now()) {}
 
   std::string method;
 
@@ -562,6 +565,8 @@ struct Request
   std::string body;
   Option<Pipe::Reader> reader;
 
+  Time received;
+
   /**
    * Returns whether the encoding is considered acceptable in the
    * response. See RFC 2616 section 14.3 for details.
@@ -594,8 +599,7 @@ private:
 struct Response
 {
   Response()
-    : type(NONE)
-  {}
+    : type(NONE) {}
 
   Response(uint16_t _code)
     : type(NONE), code(_code)
@@ -660,12 +664,14 @@ struct Response
 
 struct OK : Response
 {
-  OK() : Response(Status::OK) {}
+  OK()
+    : Response(Status::OK) {}
 
   explicit OK(const char* body)
     : Response(std::string(body), Status::OK) {}
 
-  explicit OK(const std::string& body) : Response(body, Status::OK) {}
+  explicit OK(const std::string& body)
+    : Response(body, Status::OK) {}
 
   explicit OK(const std::string& body, const std::string& contentType)
     : Response(body, Status::OK, contentType) {}
@@ -678,7 +684,8 @@ struct OK : Response
 
 struct Accepted : Response
 {
-  Accepted() : Response(Status::ACCEPTED) {}
+  Accepted()
+    : Response(Status::ACCEPTED) {}
 
   explicit Accepted(const std::string& body)
     : Response(body, Status::ACCEPTED) {}
@@ -697,7 +704,8 @@ struct TemporaryRedirect : Response
 
 struct BadRequest : Response
 {
-  BadRequest() : Response(Status::BAD_REQUEST) {}
+  BadRequest()
+    : BadRequest("400 Bad Request.") {}
 
   explicit BadRequest(const std::string& body)
     : Response(body, Status::BAD_REQUEST) {}
@@ -707,14 +715,7 @@ struct BadRequest : Response
 struct Unauthorized : Response
 {
   explicit Unauthorized(const std::vector<std::string>& challenges)
-    : Response(Status::UNAUTHORIZED)
-  {
-    // TODO(arojas): Many HTTP client implementations do not support
-    // multiple challenges within a single 'WWW-Authenticate' header.
-    // Once MESOS-3306 is fixed, we can use multiple entries for the
-    // same header.
-    headers["WWW-Authenticate"] = strings::join(", ", challenges);
-  }
+    : Unauthorized(challenges, "401 Unauthorized.") {}
 
   Unauthorized(
       const std::vector<std::string>& challenges,
@@ -732,7 +733,8 @@ struct Unauthorized : Response
 
 struct Forbidden : Response
 {
-  Forbidden() : Response(Status::FORBIDDEN) {}
+  Forbidden()
+    : Forbidden("403 Forbidden.") {}
 
   explicit Forbidden(const std::string& body)
     : Response(body, Status::FORBIDDEN) {}
@@ -741,7 +743,8 @@ struct Forbidden : Response
 
 struct NotFound : Response
 {
-  NotFound() : Response(Status::NOT_FOUND) {}
+  NotFound()
+    : NotFound("404 Not Found.") {}
 
   explicit NotFound(const std::string& body)
     : Response(body, Status::NOT_FOUND) {}
@@ -753,16 +756,9 @@ struct MethodNotAllowed : Response
   // According to RFC 2616, "An Allow header field MUST be present in a
   // 405 (Method Not Allowed) response".
 
-  explicit MethodNotAllowed(
-      const std::initializer_list<std::string>& allowedMethods)
-    : Response(Status::METHOD_NOT_ALLOWED)
-  {
-    headers["Allow"] = strings::join(", ", allowedMethods);
-  }
-
   MethodNotAllowed(
       const std::initializer_list<std::string>& allowedMethods,
-      const std::string& requestMethod)
+      const Option<std::string>& requestMethod = None())
     : Response(
         constructBody(allowedMethods, requestMethod),
         Status::METHOD_NOT_ALLOWED)
@@ -773,17 +769,23 @@ struct MethodNotAllowed : Response
 private:
   static std::string constructBody(
       const std::initializer_list<std::string>& allowedMethods,
-      const std::string& requestMethod)
+      const Option<std::string>& requestMethod)
   {
-    return "Expecting one of { '" + strings::join("', '", allowedMethods) +
-           "' }, but received '" + requestMethod + "'";
+    return
+        "405 Method Not Allowed. Expecting one of { '" +
+        strings::join("', '", allowedMethods) + "' }" +
+        (requestMethod.isSome()
+           ? ", but received '" + requestMethod.get() + "'"
+           : "") +
+        ".";
   }
 };
 
 
 struct NotAcceptable : Response
 {
-  NotAcceptable() : Response(Status::NOT_ACCEPTABLE) {}
+  NotAcceptable()
+    : NotAcceptable("406 Not Acceptable.") {}
 
   explicit NotAcceptable(const std::string& body)
     : Response(body, Status::NOT_ACCEPTABLE) {}
@@ -792,7 +794,8 @@ struct NotAcceptable : Response
 
 struct Conflict : Response
 {
-  Conflict() : Response(Status::CONFLICT) {}
+  Conflict()
+    : Conflict("409 Conflict.") {}
 
   explicit Conflict(const std::string& body)
     : Response(body, Status::CONFLICT) {}
@@ -801,7 +804,8 @@ struct Conflict : Response
 
 struct PreconditionFailed : Response
 {
-  PreconditionFailed() : Response(Status::PRECONDITION_FAILED) {}
+  PreconditionFailed()
+    : PreconditionFailed("412 Precondition Failed.") {}
 
   explicit PreconditionFailed(const std::string& body)
     : Response(body, Status::PRECONDITION_FAILED) {}
@@ -810,7 +814,8 @@ struct PreconditionFailed : Response
 
 struct UnsupportedMediaType : Response
 {
-  UnsupportedMediaType() : Response(Status::UNSUPPORTED_MEDIA_TYPE) {}
+  UnsupportedMediaType()
+    : UnsupportedMediaType("415 Unsupported Media Type.") {}
 
   explicit UnsupportedMediaType(const std::string& body)
     : Response(body, Status::UNSUPPORTED_MEDIA_TYPE) {}
@@ -819,7 +824,8 @@ struct UnsupportedMediaType : Response
 
 struct InternalServerError : Response
 {
-  InternalServerError() : Response(Status::INTERNAL_SERVER_ERROR) {}
+  InternalServerError()
+    : InternalServerError("500 Internal Server Error.") {}
 
   explicit InternalServerError(const std::string& body)
     : Response(body, Status::INTERNAL_SERVER_ERROR) {}
@@ -828,7 +834,8 @@ struct InternalServerError : Response
 
 struct NotImplemented : Response
 {
-  NotImplemented() : Response(Status::NOT_IMPLEMENTED) {}
+  NotImplemented()
+    : NotImplemented("501 Not Implemented.") {}
 
   explicit NotImplemented(const std::string& body)
     : Response(body, Status::NOT_IMPLEMENTED) {}
@@ -837,7 +844,8 @@ struct NotImplemented : Response
 
 struct ServiceUnavailable : Response
 {
-  ServiceUnavailable() : Response(Status::SERVICE_UNAVAILABLE) {}
+  ServiceUnavailable()
+    : ServiceUnavailable("503 Service Unavailable.") {}
 
   explicit ServiceUnavailable(const std::string& body)
     : Response(body, Status::SERVICE_UNAVAILABLE) {}

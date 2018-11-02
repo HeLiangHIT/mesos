@@ -586,6 +586,14 @@
   jira_user: lawrencew
   reviewboard_user: lawrencew
 
+- name: Liangyu Zhao
+  affiliations:
+    - {organization: Microsoft}
+  emails:
+    - liangyuzhaorain@hotmail.com
+  jira_user: liazha@microsoft.com
+  reviewboard_user: liazha
+
 - name: Lijun Tang
   emails:
     - hercule2400@gmail.com
@@ -719,6 +727,15 @@
     - qleng@mesosphere.io
   jira_user: quinn.leng.666@gmail.com
   reviewboard_user: quinn.leng
+
+- name: Robin Goegge
+  affiliations:
+    - {organization: Mesosphere}
+  emails:
+    - r.goegge@outlook.com
+    - rgoegge@mesosphere.io
+  jira_user: rgo3
+  reviewboard_user: rgo3
 
 - name: Ronald Petty
   affiliations:

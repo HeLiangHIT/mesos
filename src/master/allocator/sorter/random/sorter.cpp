@@ -285,6 +285,24 @@ void RandomSorter::deactivate(const string& clientPath)
 void RandomSorter::updateWeight(const string& path, double weight)
 {
   weights[path] = weight;
+
+  // Update the weight of the corresponding internal node,
+  // if it exists (this client may not exist despite there
+  // being a weight).
+  Node* node = find(path);
+
+  if (node == nullptr) {
+    return;
+  }
+
+  // If there is a virtual leaf, we need to move up one level.
+  if (node->name == ".") {
+    node = CHECK_NOTNULL(node->parent);
+  }
+
+  CHECK_EQ(path, node->path);
+
+  node->weight = weight;
 }
 
 
@@ -477,7 +495,7 @@ vector<string> RandomSorter::sort()
     vector<double> weights(inactiveBegin - node->children.begin());
 
     for (int i = 0; i < inactiveBegin - node->children.begin(); ++i) {
-      weights[i] = findWeight(node->children[i]);
+      weights[i] = getWeight(node->children[i]);
     }
 
     weightedShuffle(node->children.begin(), inactiveBegin, weights, generator);
@@ -497,6 +515,9 @@ vector<string> RandomSorter::sort()
   // The children of each node are already shuffled, with
   // inactive leaves stored after active leaves and internal nodes.
   vector<string> result;
+
+  // TODO(bmahler): This over-reserves where there are inactive
+  // clients, only reserve the number of active clients.
   result.reserve(clients.size());
 
   std::function<void (const Node*)> listClients =
@@ -537,15 +558,13 @@ size_t RandomSorter::count() const
 }
 
 
-double RandomSorter::findWeight(const Node* node) const
+double RandomSorter::getWeight(const Node* node) const
 {
-  Option<double> weight = weights.get(node->path);
-
-  if (weight.isNone()) {
-    return 1.0;
+  if (node->weight.isNone()) {
+    node->weight = weights.get(node->path).getOrElse(1.0);
   }
 
-  return weight.get();
+  return CHECK_NOTNONE(node->weight);
 }
 
 

@@ -42,6 +42,21 @@ namespace mesos {
 namespace allocator {
 
 /**
+ *  Pass in configuration to the allocator.
+ */
+struct Options
+{
+  Duration allocationInterval = Seconds(1);
+  Option<std::set<std::string>> fairnessExcludeResourceNames = None();
+  bool filterGpuResources = true;
+  Option<DomainInfo> domain = None();
+  Option<std::vector<Resources>> minAllocatableResources = None();
+  size_t maxCompletedFrameworks = 0;
+  bool publishPerFrameworkMetrics = true;
+};
+
+
+/**
  * Basic model of an allocator: resources are allocated to a framework
  * in the form of offers. A framework can refuse some resources in
  * offers and run tasks in others. Allocated resources can have offer
@@ -89,7 +104,7 @@ public:
    *     allocations from the frameworks.
    */
   virtual void initialize(
-      const Duration& allocationInterval,
+      const Options& options,
       const lambda::function<
           void(const FrameworkID&,
                const hashmap<std::string, hashmap<SlaveID, Resources>>&)>&
@@ -97,14 +112,7 @@ public:
       const lambda::function<
           void(const FrameworkID&,
                const hashmap<SlaveID, UnavailableResources>&)>&
-        inverseOfferCallback,
-      const Option<std::set<std::string>>&
-        fairnessExcludeResourceNames = None(),
-      bool filterGpuResources = true,
-      const Option<DomainInfo>& domain = None(),
-      const Option<std::vector<Resources>>&
-        minAllocatableResources = None(),
-      const size_t maxCompletedFrameworks = 0) = 0;
+        inverseOfferCallback) = 0;
 
   /**
    * Informs the allocator of the recovered state from the master.
@@ -439,6 +447,16 @@ public:
    */
   virtual void updateWeights(
       const std::vector<WeightInfo>& weightInfos) = 0;
+
+  /**
+   * Idempotent helper to pause allocations.
+   */
+  virtual void pause() = 0;
+
+  /**
+   * Idempotent helper to resume allocations.
+   */
+  virtual void resume() = 0;
 };
 
 } // namespace allocator {

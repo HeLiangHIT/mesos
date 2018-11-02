@@ -33,6 +33,7 @@
 
 #include <mesos/scheduler/scheduler.hpp>
 
+#include <process/collect.hpp>
 #include <process/dispatch.hpp>
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
@@ -1864,8 +1865,13 @@ TYPED_TEST(SlaveRecoveryTest, RecoverCompletedExecutor)
   Future<RegisterExecutorMessage> registerExecutor =
     FUTURE_PROTOBUF(RegisterExecutorMessage(), _, _);
 
-  Future<Nothing> schedule = FUTURE_DISPATCH(
-      _, &GarbageCollectorProcess::schedule);
+  // We use 'gc.schedule' as a proxy for the cleanup of the executor.
+  // The first event will correspond with the finished task, whereas
+  // the second is associated with the exited executor.
+  vector<Future<Nothing>> schedules = {
+    FUTURE_DISPATCH(_, &GarbageCollectorProcess::schedule),
+    FUTURE_DISPATCH(_, &GarbageCollectorProcess::schedule)
+  };
 
   driver.launchTasks(offers1.get()[0].id(), {task});
 
@@ -1873,8 +1879,7 @@ TYPED_TEST(SlaveRecoveryTest, RecoverCompletedExecutor)
   AWAIT_READY(registerExecutor);
   ExecutorID executorId = registerExecutor->executor_id();
 
-  // We use 'gc.schedule' as a proxy for the cleanup of the executor.
-  AWAIT_READY(schedule);
+  AWAIT_READY(collect(schedules));
 
   slave.get()->terminate();
 
@@ -3757,7 +3762,7 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileTasksMissingFromSlave)
 {
   TestAllocator<master::allocator::HierarchicalDRFAllocator> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -5064,6 +5069,8 @@ class MesosContainerizerSlaveRecoveryTest
   : public SlaveRecoveryTest<MesosContainerizer> {};
 
 
+// Tests that the containerizer will properly report resource limits
+// after an agent failover.
 TEST_F(MesosContainerizerSlaveRecoveryTest, ResourceStatistics)
 {
   Try<Owned<cluster::Master>> master = this->StartMaster();
@@ -5107,19 +5114,23 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, ResourceStatistics)
 
   TaskInfo task = createTask(offers.get()[0], SLEEP_COMMAND(1000));
 
-  // Message expectations.
+  // Wait until the executor registered and task resource updated.
   Future<Message> registerExecutor =
     FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
+  Future<Nothing> update1 =
+    FUTURE_DISPATCH(_, &MesosContainerizerProcess::update);
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(registerExecutor);
+  AWAIT_READY(update1);
 
   slave.get()->terminate();
 
-  // Set up so we can wait until the new slave updates the container's
-  // resources (this occurs after the executor has reregistered).
-  Future<Nothing> update =
+  // Wait until the executor re-registered and task resource updated.
+  Future<Message> reregisterExecutor =
+    FUTURE_MESSAGE(Eq(ReregisterExecutorMessage().GetTypeName()), _, _);
+  Future<Nothing> update2 =
     FUTURE_DISPATCH(_, &MesosContainerizerProcess::update);
 
   // Restart the slave (use same flags) with a new containerizer.
@@ -5130,8 +5141,8 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, ResourceStatistics)
   slave = this->StartSlave(detector.get(), containerizer.get(), flags);
   ASSERT_SOME(slave);
 
-  // Wait until the containerizer is updated.
-  AWAIT_READY(update);
+  AWAIT_READY(reregisterExecutor);
+  AWAIT_READY(update2);
 
   Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);

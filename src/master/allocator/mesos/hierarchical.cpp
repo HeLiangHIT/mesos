@@ -47,6 +47,7 @@ using std::string;
 using std::vector;
 
 using mesos::allocator::InverseOfferStatus;
+using mesos::allocator::Options;
 
 using process::after;
 using process::Continue;
@@ -132,19 +133,20 @@ private:
 };
 
 
-HierarchicalAllocatorProcess::Framework::Framework(
+Framework::Framework(
     const FrameworkInfo& frameworkInfo,
     const set<string>& _suppressedRoles,
-    bool _active)
+    bool _active,
+    bool publishPerFrameworkMetrics)
   : roles(protobuf::framework::getRoles(frameworkInfo)),
     suppressedRoles(_suppressedRoles),
     capabilities(frameworkInfo.capabilities()),
     active(_active),
-    metrics(new FrameworkMetrics(frameworkInfo)) {}
+    metrics(new FrameworkMetrics(frameworkInfo, publishPerFrameworkMetrics)) {}
 
 
 void HierarchicalAllocatorProcess::initialize(
-    const Duration& _allocationInterval,
+    const Options& _options,
     const lambda::function<
         void(const FrameworkID&,
              const hashmap<string, hashmap<SlaveID, Resources>>&)>&
@@ -152,42 +154,35 @@ void HierarchicalAllocatorProcess::initialize(
     const lambda::function<
         void(const FrameworkID&,
              const hashmap<SlaveID, UnavailableResources>&)>&
-      _inverseOfferCallback,
-    const Option<set<string>>& _fairnessExcludeResourceNames,
-    bool _filterGpuResources,
-    const Option<DomainInfo>& _domain,
-    const Option<std::vector<Resources>>& _minAllocatableResources,
-    const size_t maxCompletedFrameworks)
+      _inverseOfferCallback)
 {
-  allocationInterval = _allocationInterval;
+  options = _options;
   offerCallback = _offerCallback;
   inverseOfferCallback = _inverseOfferCallback;
-  fairnessExcludeResourceNames = _fairnessExcludeResourceNames;
-  filterGpuResources = _filterGpuResources;
-  domain = _domain;
-  minAllocatableResources = _minAllocatableResources;
   initialized = true;
   paused = false;
 
   completedFrameworkMetrics =
     BoundedHashMap<FrameworkID, process::Owned<FrameworkMetrics>>(
-        maxCompletedFrameworks);
+        options.maxCompletedFrameworks);
 
   // Resources for quota'ed roles are allocated separately and prior to
   // non-quota'ed roles, hence a dedicated sorter for quota'ed roles is
   // necessary.
-  roleSorter->initialize(fairnessExcludeResourceNames);
-  quotaRoleSorter->initialize(fairnessExcludeResourceNames);
+  roleSorter->initialize(options.fairnessExcludeResourceNames);
+  quotaRoleSorter->initialize(options.fairnessExcludeResourceNames);
 
   VLOG(1) << "Initialized hierarchical allocator process";
 
   // Start a loop to run allocation periodically.
   PID<HierarchicalAllocatorProcess> _self = self();
 
+  // Set a temporary variable for the lambda capture.
+  Duration allocationInterval = options.allocationInterval;
   loop(
       None(), // Use `None` so we iterate outside the allocator process.
-      [_allocationInterval]() {
-        return after(_allocationInterval);
+      [allocationInterval]() {
+        return after(allocationInterval);
       },
       [_self](const Nothing&) {
         return dispatch(_self, &HierarchicalAllocatorProcess::allocate)
@@ -271,7 +266,10 @@ void HierarchicalAllocatorProcess::addFramework(
   CHECK(!frameworks.contains(frameworkId));
 
   frameworks.insert(
-      {frameworkId, Framework(frameworkInfo, suppressedRoles, active)});
+      {frameworkId, Framework(frameworkInfo,
+          suppressedRoles,
+          active,
+          options.publishPerFrameworkMetrics)});
 
   const Framework& framework = frameworks.at(frameworkId);
 
@@ -553,6 +551,10 @@ void HierarchicalAllocatorProcess::addSlave(
 
   roleSorter->add(slaveId, total);
 
+  foreachvalue (const Owned<Sorter>& sorter, frameworkSorters) {
+    sorter->add(slaveId, total);
+  }
+
   // See comment at `quotaRoleSorter` declaration regarding non-revocable.
   quotaRoleSorter->add(slaveId, total.nonRevocable());
 
@@ -619,6 +621,10 @@ void HierarchicalAllocatorProcess::removeSlave(
   // than what we currently track in the allocator.
 
   roleSorter->remove(slaveId, slaves.at(slaveId).getTotal());
+
+  foreachvalue (const Owned<Sorter>& sorter, frameworkSorters) {
+    sorter->remove(slaveId, slaves.at(slaveId).getTotal());
+  }
 
   // See comment at `quotaRoleSorter` declaration regarding non-revocable.
   quotaRoleSorter->remove(
@@ -945,14 +951,10 @@ void HierarchicalAllocatorProcess::updateAllocation(
 
   updateSlaveTotal(slaveId, updatedTotal.get());
 
-  // Update the total resources in the framework sorter.
-  frameworkSorter->remove(slaveId, offeredResources);
-  frameworkSorter->add(slaveId, updatedOfferedResources);
-
   const Resources updatedFrameworkAllocation =
     frameworkSorter->allocation(frameworkId.value(), slaveId);
 
-  // Check that the changed quantities af the framework's allocation is exactly
+  // Check that the changed quantities of the framework's allocation is exactly
   // the same as the resources removed by the resource conversions.
   //
   // TODO(chhsiao): Revisit this constraint if we want to support other type of
@@ -1303,7 +1305,7 @@ void HierarchicalAllocatorProcess::recoverResources(
     //
     // TODO(alexr): If we allocated upon resource recovery
     // (MESOS-3078), we would not need to increase the timeout here.
-    timeout = std::max(allocationInterval, timeout.get());
+    timeout = std::max(options.allocationInterval, timeout.get());
 
     // We need to disambiguate the function call to pick the correct
     // `expire()` overload.
@@ -2010,7 +2012,7 @@ void HierarchicalAllocatorProcess::__allocate()
 
   // Similar to the first stage, we will allocate resources while ensuring
   // that the required unreserved non-revocable headroom is still available
-  // for unsastified quota guarantees. Otherwise, we will not be able to
+  // for unsatisfied quota guarantees. Otherwise, we will not be able to
   // satisfy quota guarantees later. Reservations to non-quota roles and
   // revocable resources will always be included in the offers since these
   // are not part of the headroom (and therefore can't be used to satisfy
@@ -2423,14 +2425,15 @@ bool HierarchicalAllocatorProcess::isFiltered(
 
 bool HierarchicalAllocatorProcess::allocatable(const Resources& resources)
 {
-  if (minAllocatableResources.isNone() ||
-      CHECK_NOTNONE(minAllocatableResources).empty()) {
+  if (options.minAllocatableResources.isNone() ||
+      CHECK_NOTNONE(options.minAllocatableResources).empty()) {
     return true;
   }
 
   Resources quantity = resources.createStrippedScalarQuantity();
   foreach (
-      const Resources& minResources, CHECK_NOTNONE(minAllocatableResources)) {
+      const Resources& minResources,
+      CHECK_NOTNONE(options.minAllocatableResources)) {
     if (quantity.contains(minResources)) {
       return true;
     }
@@ -2531,7 +2534,12 @@ void HierarchicalAllocatorProcess::trackFrameworkUnderRole(
 
     CHECK(!frameworkSorters.contains(role));
     frameworkSorters.insert({role, Owned<Sorter>(frameworkSorterFactory())});
-    frameworkSorters.at(role)->initialize(fairnessExcludeResourceNames);
+    frameworkSorters.at(role)->initialize(options.fairnessExcludeResourceNames);
+
+    foreachvalue (const Slave& slave, slaves) {
+      frameworkSorters.at(role)->add(slave.info.id(), slave.getTotal());
+    }
+
     metrics.addRole(role);
   }
 
@@ -2637,13 +2645,14 @@ bool HierarchicalAllocatorProcess::updateSlaveTotal(
     trackReservations(newReservations);
   }
 
-  // Currently `roleSorter` and `quotaRoleSorter`, being the root-level
-  // sorters, maintain all of `slaves[slaveId].total` (or the `nonRevocable()`
-  // portion in the case of `quotaRoleSorter`) in their own totals (which
-  // don't get updated in the allocation runs or during recovery of allocated
-  // resources). So, we update them using the resources in `slave.total`.
+  // Update the totals in the sorters.
   roleSorter->remove(slaveId, oldTotal);
   roleSorter->add(slaveId, total);
+
+  foreachvalue (const Owned<Sorter>& sorter, frameworkSorters) {
+    sorter->remove(slaveId, oldTotal);
+    sorter->add(slaveId, total);
+  }
 
   // See comment at `quotaRoleSorter` declaration regarding non-revocable.
   quotaRoleSorter->remove(slaveId, oldTotal.nonRevocable());
@@ -2672,14 +2681,14 @@ bool HierarchicalAllocatorProcess::isRemoteSlave(const Slave& slave) const
   // If the slave has a configured domain (and it has been allowed to
   // register with the master), the master must also have a configured
   // domain.
-  CHECK(domain.isSome());
+  CHECK(options.domain.isSome());
 
   // The master will not startup if configured with a domain but no
   // fault domain.
-  CHECK(domain->has_fault_domain());
+  CHECK(options.domain->has_fault_domain());
 
   const DomainInfo::FaultDomain::RegionInfo& masterRegion =
-    domain->fault_domain().region();
+    options.domain->fault_domain().region();
   const DomainInfo::FaultDomain::RegionInfo& slaveRegion =
     slave.info.domain().fault_domain().region();
 
@@ -2694,8 +2703,8 @@ bool HierarchicalAllocatorProcess::isCapableOfReceivingAgent(
   // Only offer resources from slaves that have GPUs to
   // frameworks that are capable of receiving GPUs.
   // See MESOS-5634.
-  if (filterGpuResources && !frameworkCapabilities.gpuResources &&
-      slave.getTotal().gpus().getOrElse(0) > 0) {
+  if (options.filterGpuResources && !frameworkCapabilities.gpuResources &&
+      slave.hasGpu()) {
     return false;
   }
 
@@ -2768,7 +2777,6 @@ void HierarchicalAllocatorProcess::trackAllocatedResources(
     CHECK(frameworkSorters.at(role)->contains(frameworkId.value()));
 
     roleSorter->allocated(role, slaveId, allocation);
-    frameworkSorters.at(role)->add(slaveId, allocation);
     frameworkSorters.at(role)->allocated(
         frameworkId.value(), slaveId, allocation);
 
@@ -2804,7 +2812,6 @@ void HierarchicalAllocatorProcess::untrackAllocatedResources(
 
     frameworkSorters.at(role)->unallocated(
         frameworkId.value(), slaveId, allocation);
-    frameworkSorters.at(role)->remove(slaveId, allocation);
 
     roleSorter->unallocated(role, slaveId, allocation);
 

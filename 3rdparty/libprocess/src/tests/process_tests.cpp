@@ -63,6 +63,8 @@
 #include <stout/os/killtree.hpp>
 #include <stout/os/write.hpp>
 
+#include <stout/tests/utils.hpp>
+
 #include "encoder.hpp"
 
 namespace http = process::http;
@@ -110,7 +112,10 @@ using testing::ReturnArg;
 
 // TODO(bmahler): Move tests into their own files as appropriate.
 
-TEST(ProcessTest, Event)
+class ProcessTest : public TemporaryDirectoryTest {};
+
+
+TEST_F(ProcessTest, Event)
 {
   Owned<Event> event(new TerminateEvent(UPID(), false));
   EXPECT_FALSE(event->is<MessageEvent>());
@@ -127,7 +132,7 @@ public:
 };
 
 
-TEST(ProcessTest, Spawn)
+TEST_F(ProcessTest, Spawn)
 {
   SpawnProcess process;
 
@@ -175,7 +180,7 @@ public:
 };
 
 
-TEST(ProcessTest, Dispatch)
+TEST_F(ProcessTest, Dispatch)
 {
   DispatchProcess process;
 
@@ -211,7 +216,7 @@ TEST(ProcessTest, Dispatch)
 }
 
 
-TEST(ProcessTest, Defer1)
+TEST_F(ProcessTest, Defer1)
 {
   DispatchProcess process;
 
@@ -331,7 +336,7 @@ private:
 };
 
 
-TEST(ProcessTest, Defer2)
+TEST_F(ProcessTest, Defer2)
 {
   DeferProcess process;
 
@@ -363,7 +368,7 @@ void set(T* t1, const T& t2)
 }
 
 
-TEST(ProcessTest, Defer3)
+TEST_F(ProcessTest, Defer3)
 {
   std::atomic_bool bool1(false);
   std::atomic_bool bool2(false);
@@ -395,7 +400,7 @@ public:
 };
 
 
-TEST(ProcessTest, Handlers)
+TEST_F(ProcessTest, Handlers)
 {
   HandlersProcess process;
 
@@ -418,7 +423,7 @@ TEST(ProcessTest, Handlers)
 
 // Tests DROP_MESSAGE and DROP_DISPATCH and in particular that an
 // event can get dropped before being processed.
-TEST(ProcessTest, Expect)
+TEST_F(ProcessTest, Expect)
 {
   HandlersProcess process;
 
@@ -447,7 +452,7 @@ TEST(ProcessTest, Expect)
 
 
 // Tests the FutureArg<N> action.
-TEST(ProcessTest, Action)
+TEST_F(ProcessTest, Action)
 {
   HandlersProcess process;
 
@@ -492,7 +497,7 @@ public:
 };
 
 
-TEST(ProcessTest, Inheritance)
+TEST_F(ProcessTest, Inheritance)
 {
   DerivedProcess process;
 
@@ -520,7 +525,7 @@ TEST(ProcessTest, Inheritance)
 }
 
 
-TEST(ProcessTest, Thunk)
+TEST_F(ProcessTest, Thunk)
 {
   struct Thunk
   {
@@ -563,7 +568,7 @@ public:
 };
 
 
-TEST(ProcessTest, Delegate)
+TEST_F(ProcessTest, Delegate)
 {
   DelegateeProcess delegatee;
   DelegatorProcess delegator(delegatee.self());
@@ -594,7 +599,7 @@ public:
 };
 
 
-TEST(ProcessTest, Delay)
+TEST_F(ProcessTest, Delay)
 {
   Clock::pause();
 
@@ -631,7 +636,7 @@ public:
 };
 
 
-TEST(ProcessTest, Order)
+TEST_F(ProcessTest, Order)
 {
   Clock::pause();
 
@@ -684,7 +689,7 @@ public:
 };
 
 
-TEST(ProcessTest, Donate)
+TEST_F(ProcessTest, Donate)
 {
   DonateProcess process;
   spawn(process);
@@ -696,6 +701,8 @@ TEST(ProcessTest, Donate)
 }
 
 
+// TODO(bmahler): Use an RAII-wrapper here to prevent crashes
+// during test assertion failures.
 class ExitedProcess : public Process<ExitedProcess>
 {
 public:
@@ -713,7 +720,7 @@ private:
 };
 
 
-TEST(ProcessTest, Exited)
+TEST_F(ProcessTest, Exited)
 {
   UPID pid = spawn(new ProcessBase(), true);
 
@@ -735,7 +742,7 @@ TEST(ProcessTest, Exited)
 }
 
 
-TEST(ProcessTest, InjectExited)
+TEST_F(ProcessTest, InjectExited)
 {
   UPID pid = spawn(new ProcessBase(), true);
 
@@ -754,6 +761,56 @@ TEST(ProcessTest, InjectExited)
 
   terminate(process);
   wait(process);
+}
+
+
+// TODO(bmahler): Move all message interception / dropping tests
+// (of the gmock.hpp functionality) into a separate file.
+TEST_F(ProcessTest, FutureExited)
+{
+  UPID linkee = spawn(new ProcessBase(), true);
+  ExitedProcess linker(linkee);
+
+  Future<Nothing> exited = FUTURE_EXITED(linkee, linker.self());
+
+  Future<UPID> exitedPid;
+  EXPECT_CALL(linker, exited(linkee))
+    .WillOnce(FutureArg<0>(&exitedPid));
+
+  spawn(linker);
+
+  terminate(linkee);
+
+  AWAIT_READY(exited);
+  AWAIT_ASSERT_EQ(linkee, exitedPid);
+
+  terminate(linker);
+  wait(linker);
+}
+
+
+// TODO(bmahler): Move all message interception / dropping tests
+// (of the gmock.hpp functionality) into a separate file.
+TEST_F(ProcessTest, DropExited)
+{
+  UPID linkee = spawn(new ProcessBase(), true);
+  ExitedProcess linker(linkee);
+
+  Future<Nothing> exited = DROP_EXITED(linkee, linker.self());
+
+  Future<UPID> exitedPid;
+  EXPECT_CALL(linker, exited(linkee))
+    .WillRepeatedly(FutureArg<0>(&exitedPid));
+
+  spawn(linker);
+
+  terminate(linkee);
+
+  AWAIT_READY(exited);
+  EXPECT_TRUE(exitedPid.isPending());
+
+  terminate(linker);
+  wait(linker);
 }
 
 
@@ -1200,7 +1257,7 @@ public:
 };
 
 
-TEST(ProcessTest, Settle)
+TEST_F(ProcessTest, Settle)
 {
   Clock::pause();
   SettleProcess process;
@@ -1213,7 +1270,7 @@ TEST(ProcessTest, Settle)
 }
 
 
-TEST(ProcessTest, Pid)
+TEST_F(ProcessTest, Pid)
 {
   TimeoutProcess process;
 
@@ -1246,7 +1303,7 @@ public:
 };
 
 
-TEST(ProcessTest, Listener)
+TEST_F(ProcessTest, Listener)
 {
   MultipleListenerProcess process;
 
@@ -1272,7 +1329,7 @@ public:
 };
 
 
-TEST(ProcessTest, Executor_Defer)
+TEST_F(ProcessTest, Executor_Defer)
 {
   EventReceiver receiver;
   Executor executor;
@@ -1311,7 +1368,7 @@ TEST(ProcessTest, Executor_Defer)
 }
 
 
-TEST(ProcessTest, Executor_Execute)
+TEST_F(ProcessTest, Executor_Execute)
 {
   Executor executor;
 
@@ -1379,7 +1436,7 @@ public:
 };
 
 
-TEST(ProcessTest, Remote)
+TEST_F(ProcessTest, Remote)
 {
   RemoteProcess process;
   spawn(process);
@@ -1415,7 +1472,7 @@ TEST(ProcessTest, Remote)
 
 
 // Like the 'remote' test but uses http::connect.
-TEST(ProcessTest, Http1)
+TEST_F(ProcessTest, Http1)
 {
   RemoteProcess process;
   spawn(process);
@@ -1468,7 +1525,7 @@ TEST(ProcessTest, Http1)
 
 // Like 'http1' but uses the 'Libprocess-From' header. We can
 // also use http::post here since we expect a 202 response.
-TEST(ProcessTest, Http2)
+TEST_F(ProcessTest, Http2)
 {
   RemoteProcess process;
   spawn(process);
@@ -1578,7 +1635,7 @@ static string itoa2(int* const& i)
 }
 
 
-TEST(ProcessTest, Async)
+TEST_F(ProcessTest, Async)
 {
   // Non-void functions with different no.of args.
   EXPECT_EQ(1, async(&foo).get());
@@ -1611,11 +1668,8 @@ public:
 };
 
 
-TEST(ProcessTest, Provide)
+TEST_F(ProcessTest, Provide)
 {
-  const Try<string> mkdtemp = os::mkdtemp();
-  ASSERT_SOME(mkdtemp);
-
   const string LOREM_IPSUM =
       "Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do "
       "eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad "
@@ -1625,7 +1679,7 @@ TEST(ProcessTest, Provide)
       "sint occaecat cupidatat non proident, sunt in culpa qui officia "
       "deserunt mollit anim id est laborum.";
 
-  const string path = path::join(mkdtemp.get(), "lorem.txt");
+  const string path = path::join(sandbox.get(), "lorem.txt");
   ASSERT_SOME(os::write(path, LOREM_IPSUM));
 
   FileServer server(path);
@@ -1650,7 +1704,7 @@ static int baz(string s) { return 42; }
 static Future<int> bam(string s) { return 42; }
 
 
-TEST(ProcessTest, Defers)
+TEST_F(ProcessTest, Defers)
 {
   {
     std::function<Future<int>(string)> f =
@@ -1806,7 +1860,7 @@ public:
 };
 
 
-TEST(ProcessTest, PercentEncodedURLs)
+TEST_F(ProcessTest, PercentEncodedURLs)
 {
   PercentEncodedIDProcess process;
   spawn(process);
@@ -1890,7 +1944,7 @@ public:
 
 // Sets firewall rules which disable endpoints on a process and then
 // attempts to connect to those endpoints.
-TEST(ProcessTest, FirewallDisablePaths)
+TEST_F(ProcessTest, FirewallDisablePaths)
 {
   const string id = "testprocess";
 
@@ -1974,7 +2028,7 @@ TEST(ProcessTest, FirewallDisablePaths)
 
 // Test that firewall rules can be changed by changing the vector.
 // An empty vector should allow all paths.
-TEST(ProcessTest, FirewallUninstall)
+TEST_F(ProcessTest, FirewallUninstall)
 {
   const string id = "testprocess";
 

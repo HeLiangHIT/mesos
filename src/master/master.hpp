@@ -25,8 +25,6 @@
 #include <string>
 #include <vector>
 
-#include <boost/circular_buffer.hpp>
-
 #include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
 #include <mesos/type_utils.hpp>
@@ -44,6 +42,7 @@
 
 #include <mesos/scheduler/scheduler.hpp>
 
+#include <process/future.hpp>
 #include <process/limiter.hpp>
 #include <process/http.hpp>
 #include <process/owned.hpp>
@@ -55,6 +54,7 @@
 
 #include <stout/boundedhashmap.hpp>
 #include <stout/cache.hpp>
+#include <stout/circular_buffer.hpp>
 #include <stout/foreach.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
@@ -1043,7 +1043,7 @@ private:
 
   void drop(
       const process::UPID& from,
-      const scheduler::Call& call,
+      const mesos::scheduler::Call& call,
       const std::string& message);
 
   void drop(
@@ -1053,27 +1053,27 @@ private:
 
   void drop(
       Framework* framework,
-      const scheduler::Call& call,
+      const mesos::scheduler::Call& call,
       const std::string& message);
 
   void drop(
       Framework* framework,
-      const scheduler::Call::Suppress& suppress,
+      const mesos::scheduler::Call::Suppress& suppress,
       const std::string& message);
 
   void drop(
       Framework* framework,
-      const scheduler::Call::Revive& revive,
+      const mesos::scheduler::Call::Revive& revive,
       const std::string& message);
 
   // Call handlers.
   void receive(
       const process::UPID& from,
-      scheduler::Call&& call);
+      mesos::scheduler::Call&& call);
 
   void subscribe(
       HttpConnection http,
-      const scheduler::Call::Subscribe& subscribe);
+      const mesos::scheduler::Call::Subscribe& subscribe);
 
   void _subscribe(
       HttpConnection http,
@@ -1084,7 +1084,7 @@ private:
 
   void subscribe(
       const process::UPID& from,
-      const scheduler::Call::Subscribe& subscribe);
+      const mesos::scheduler::Call::Subscribe& subscribe);
 
   void _subscribe(
       const process::UPID& from,
@@ -1102,67 +1102,67 @@ private:
 
   void accept(
       Framework* framework,
-      scheduler::Call::Accept&& accept);
+      mesos::scheduler::Call::Accept&& accept);
 
   void _accept(
       const FrameworkID& frameworkId,
       const SlaveID& slaveId,
       const Resources& offeredResources,
-      scheduler::Call::Accept&& accept,
+      mesos::scheduler::Call::Accept&& accept,
       const process::Future<
           std::vector<process::Future<bool>>>& authorizations);
 
   void acceptInverseOffers(
       Framework* framework,
-      const scheduler::Call::AcceptInverseOffers& accept);
+      const mesos::scheduler::Call::AcceptInverseOffers& accept);
 
   void decline(
       Framework* framework,
-      scheduler::Call::Decline&& decline);
+      mesos::scheduler::Call::Decline&& decline);
 
   void declineInverseOffers(
       Framework* framework,
-      const scheduler::Call::DeclineInverseOffers& decline);
+      const mesos::scheduler::Call::DeclineInverseOffers& decline);
 
   void revive(
       Framework* framework,
-      const scheduler::Call::Revive& revive);
+      const mesos::scheduler::Call::Revive& revive);
 
   void kill(
       Framework* framework,
-      const scheduler::Call::Kill& kill);
+      const mesos::scheduler::Call::Kill& kill);
 
   void shutdown(
       Framework* framework,
-      const scheduler::Call::Shutdown& shutdown);
+      const mesos::scheduler::Call::Shutdown& shutdown);
 
   void acknowledge(
       Framework* framework,
-      scheduler::Call::Acknowledge&& acknowledge);
+      mesos::scheduler::Call::Acknowledge&& acknowledge);
 
   void acknowledgeOperationStatus(
       Framework* framework,
-      scheduler::Call::AcknowledgeOperationStatus&& acknowledge);
+      mesos::scheduler::Call::AcknowledgeOperationStatus&& acknowledge);
 
   void reconcile(
       Framework* framework,
-      scheduler::Call::Reconcile&& reconcile);
+      mesos::scheduler::Call::Reconcile&& reconcile);
 
-  scheduler::Response::ReconcileOperations reconcileOperations(
+  mesos::scheduler::Response::ReconcileOperations reconcileOperations(
       Framework* framework,
-      const scheduler::Call::ReconcileOperations& reconcile);
+      const mesos::scheduler::Call::ReconcileOperations& reconcile);
 
   void message(
       Framework* framework,
-      scheduler::Call::Message&& message);
+      mesos::scheduler::Call::Message&& message);
 
   void request(
       Framework* framework,
-      const scheduler::Call::Request& request);
+      const mesos::scheduler::Call::Request& request);
 
   void suppress(
       Framework* framework,
-      const scheduler::Call::Suppress& suppress);
+      const mesos::scheduler::Call::Suppress& suppress);
 
   bool elected() const
   {
@@ -1180,6 +1180,9 @@ private:
 
   process::Future<bool> authorizeLogAccess(
       const Option<process::http::authentication::Principal>& principal);
+
+  std::vector<std::string> filterRoles(
+      const process::Owned<ObjectApprovers>& approvers) const;
 
   /**
    * Returns whether the given role is on the whitelist.
@@ -1383,12 +1386,60 @@ private:
     Master* master;
   };
 
+  // Inner class used to namespace HTTP handlers that do not change the
+  // underlying master object.
+  //
+  // NOTE: Most member functions of this class are not routed directly but
+  // dispatched from their corresponding handlers in the outer `Http` class.
+  // This is because deciding whether an incoming request is read-only often
+  // requires some inspection, e.g. distinguishing between "GET" and "POST"
+  // requests to the same endpoint.
+  class ReadOnlyHandler
+  {
+  public:
+    explicit ReadOnlyHandler(const Master* _master) : master(_master) {}
+
+    // /frameworks
+    process::http::Response frameworks(
+        const process::http::Request& request,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // /roles
+    process::http::Response roles(
+        const process::http::Request& request,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // /slaves
+    process::http::Response slaves(
+        const process::http::Request& request,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // /state
+    process::http::Response state(
+        const process::http::Request& request,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // /state-summary
+    process::http::Response stateSummary(
+        const process::http::Request& request,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    // /tasks
+    process::http::Response tasks(
+        const process::http::Request& request,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+  private:
+    const Master* master;
+  };
+
   // Inner class used to namespace HTTP route handlers (see
   // master/http.cpp for implementations).
   class Http
   {
   public:
     explicit Http(Master* _master) : master(_master),
+                                     readonlyHandler(_master),
                                      quotaHandler(_master),
                                      weightsHandler(_master) {}
 
@@ -1423,6 +1474,8 @@ private:
             principal) const;
 
     // /master/frameworks
+    //
+    // NOTE: Requests to this endpoint are batched.
     process::Future<process::http::Response> frameworks(
         const process::http::Request& request,
         const Option<process::http::authentication::Principal>&
@@ -1443,6 +1496,8 @@ private:
             principal) const;
 
     // /master/roles
+    //
+    // NOTE: Requests to this endpoint are batched.
     process::Future<process::http::Response> roles(
         const process::http::Request& request,
         const Option<process::http::authentication::Principal>&
@@ -1455,24 +1510,32 @@ private:
             principal) const;
 
     // /master/slaves
+    //
+    // NOTE: Requests to this endpoint are batched.
     process::Future<process::http::Response> slaves(
         const process::http::Request& request,
         const Option<process::http::authentication::Principal>&
             principal) const;
 
     // /master/state
+    //
+    // NOTE: Requests to this endpoint are batched.
     process::Future<process::http::Response> state(
         const process::http::Request& request,
         const Option<process::http::authentication::Principal>&
             principal) const;
 
     // /master/state-summary
+    //
+    // NOTE: Requests to this endpoint are batched.
     process::Future<process::http::Response> stateSummary(
         const process::http::Request& request,
         const Option<process::http::authentication::Principal>&
             principal) const;
 
     // /master/tasks
+    //
+    // NOTE: Requests to this endpoint are batched.
     process::Future<process::http::Response> tasks(
         const process::http::Request& request,
         const Option<process::http::authentication::Principal>&
@@ -1641,10 +1704,6 @@ private:
         const SlaveID& slaveId,
         Resources required,
         const Offer::Operation& operation) const;
-
-    process::Future<std::vector<std::string>> _roles(
-        const Option<process::http::authentication::Principal>&
-            principal) const;
 
     // Master API handlers.
 
@@ -1818,10 +1877,12 @@ private:
 
     process::Future<process::http::Response> reconcileOperations(
         Framework* framework,
-        const scheduler::Call::ReconcileOperations& call,
+        const mesos::scheduler::Call::ReconcileOperations& call,
         ContentType contentType) const;
 
     Master* master;
+
+    ReadOnlyHandler readonlyHandler;
 
     // NOTE: The quota specific pieces of the Operator API are factored
     // out into this separate class.
@@ -1830,6 +1891,33 @@ private:
     // NOTE: The weights specific pieces of the Operator API are factored
     // out into this separate class.
     WeightsHandler weightsHandler;
+
+    // Since the Master actor is one of the most loaded in a typical Mesos
+    // installation, we take some extra care to keep the backlog small.
+    // In particular, all read-only requests are batched and executed in
+    // parallel, instead of going through the master queue separately.
+
+    typedef process::http::Response
+      (Master::ReadOnlyHandler::*ReadOnlyRequestHandler)(
+          const process::http::Request&,
+          const process::Owned<ObjectApprovers>&) const;
+
+    process::Future<process::http::Response> deferBatchedRequest(
+        ReadOnlyRequestHandler handler,
+        const process::http::Request& request,
+        const process::Owned<ObjectApprovers>& approvers) const;
+
+    void processRequestsBatch() const;
+
+    struct BatchedRequest
+    {
+      ReadOnlyRequestHandler handler;
+      process::http::Request request;
+      process::Owned<ObjectApprovers> approvers;
+      process::Promise<process::http::Response> promise;
+    };
+
+    mutable std::vector<BatchedRequest> batchedRequests;
   };
 
   Master(const Master&);              // No copying.
@@ -2202,6 +2290,14 @@ private:
   double _slaves_inactive();
   double _slaves_unreachable();
 
+  // TODO(bevers): Remove these and make the above functions
+  // const instead after MESOS-4995 is resolved.
+  double _const_slaves_connected() const;
+  double _const_slaves_disconnected() const;
+  double _const_slaves_active() const;
+  double _const_slaves_inactive() const;
+  double _const_slaves_unreachable() const;
+
   double _frameworks_connected();
   double _frameworks_disconnected();
   double _frameworks_active();
@@ -2414,9 +2510,9 @@ struct Framework
   // Tasks launched by this framework that have reached a terminal
   // state and have had all their updates acknowledged. We only keep a
   // fixed-size cache to avoid consuming too much memory. We use
-  // boost::circular_buffer rather than BoundedHashMap because there
+  // circular_buffer rather than BoundedHashMap because there
   // can be multiple completed tasks with the same task ID.
-  boost::circular_buffer<process::Owned<Task>> completedTasks;
+  circular_buffer<process::Owned<Task>> completedTasks;
 
   // When an agent is marked unreachable, tasks running on it are stored
   // here. We only keep a fixed-size cache to avoid consuming too much memory.
@@ -2475,10 +2571,10 @@ struct Framework
   hashmap<SlaveID, Resources> offeredResources;
 
   // This is only set for HTTP frameworks.
-  Option<process::Owned<Heartbeater<scheduler::Event, v1::scheduler::Event>>>
-    heartbeater;
+  Option<process::Owned<
+      Heartbeater<mesos::scheduler::Event, v1::scheduler::Event>>> heartbeater;
 
-  // This is used for per-framwork metrics.
+  // This is used for per-framework metrics.
   FrameworkMetrics metrics;
 
 private:
@@ -2502,9 +2598,7 @@ void Framework::send(const Message& message)
                  << " framework " << *this;
   }
 
-  // TODO(gilbert): add a helper to transform `SchedulerDriver` API messages
-  // directly to v0 events.
-  metrics.incrementEvent(devolve(evolve(message)));
+  metrics.incrementEvent(message);
 
   if (http.isSome()) {
     if (!http->send(message)) {

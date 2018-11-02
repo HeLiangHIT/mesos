@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 
+#include <boost/iterator/indirect_iterator.hpp>
+
 #include <google/protobuf/repeated_field.h>
 
 #include <mesos/mesos.hpp>
@@ -166,6 +168,11 @@ private:
   };
 
 public:
+  // We rename the type here to alert people about the fact that with
+  // `shared_ptr`, no mutation should be made without obtaining exclusive
+  // ownership. See `resourcesNoMutationWithoutExclusiveOwnership`.
+  using Resource_Unsafe = std::shared_ptr<Resource_>;
+
   /**
    * Returns a Resource with the given name, value, and role.
    *
@@ -405,7 +412,8 @@ public:
   Resources& operator=(const Resources& that)
   {
     if (this != &that) {
-      resources = that.resources;
+      resourcesNoMutationWithoutExclusiveOwnership =
+        that.resourcesNoMutationWithoutExclusiveOwnership;
     }
     return *this;
   }
@@ -413,14 +421,21 @@ public:
   Resources& operator=(Resources&& that)
   {
     if (this != &that) {
-      resources = std::move(that.resources);
+      resourcesNoMutationWithoutExclusiveOwnership =
+        std::move(that.resourcesNoMutationWithoutExclusiveOwnership);
     }
     return *this;
   }
 
-  bool empty() const { return resources.size() == 0; }
+  bool empty() const
+  {
+    return resourcesNoMutationWithoutExclusiveOwnership.size() == 0;
+  }
 
-  size_t size() const { return resources.size(); }
+  size_t size() const
+  {
+    return resourcesNoMutationWithoutExclusiveOwnership.size();
+  }
 
   // Checks if this Resources is a superset of the given Resources.
   bool contains(const Resources& that) const;
@@ -585,24 +600,40 @@ public:
   // which holds the ephemeral ports allocation logic.
   Option<Value::Ranges> ephemeral_ports() const;
 
-  // NOTE: Non-`const` `iterator`, `begin()` and `end()` are __intentionally__
-  // defined with `const` semantics in order to prevent mutable access to the
-  // `Resource` objects within `resources`.
-  typedef std::vector<Resource_>::const_iterator iterator;
-  typedef std::vector<Resource_>::const_iterator const_iterator;
+  // We use `boost::indirect_iterator` to expose `Resource` (implicitly
+  // converted from `Resource_`) iteration, while actually storing
+  // `Resource_Unsafe`.
+  //
+  // NOTE: Non-const `begin()` and `end()` intentionally return const
+  // iterators to prevent mutable access to the `Resource` objects.
+
+  typedef boost::indirect_iterator<
+      std::vector<Resource_Unsafe>::const_iterator>
+    const_iterator;
 
   const_iterator begin()
   {
-    return static_cast<const std::vector<Resource_>&>(resources).begin();
+    return static_cast<const std::vector<Resource_Unsafe>&>(
+               resourcesNoMutationWithoutExclusiveOwnership)
+      .begin();
   }
 
   const_iterator end()
   {
-    return static_cast<const std::vector<Resource_>&>(resources).end();
+    return static_cast<const std::vector<Resource_Unsafe>&>(
+               resourcesNoMutationWithoutExclusiveOwnership)
+      .end();
   }
 
-  const_iterator begin() const { return resources.begin(); }
-  const_iterator end() const { return resources.end(); }
+  const_iterator begin() const
+  {
+    return resourcesNoMutationWithoutExclusiveOwnership.begin();
+  }
+
+  const_iterator end() const
+  {
+    return resourcesNoMutationWithoutExclusiveOwnership.end();
+  }
 
   // Using this operator makes it easy to copy a resources object into
   // a protocol buffer field.
@@ -666,6 +697,10 @@ private:
   // objects, so here the API can also accept a `Resource` object.
   void add(const Resource_& r);
   void add(Resource_&& r);
+
+  // TODO(mzhu): Add move support.
+  void add(const Resource_Unsafe& that);
+
   void subtract(const Resource_& r);
 
   Resources& operator+=(const Resource_& that);
@@ -673,7 +708,31 @@ private:
 
   Resources& operator-=(const Resource_& that);
 
-  std::vector<Resource_> resources;
+  // Resources are stored using copy-on-write:
+  //
+  //   (1) Copies are done by copying the `shared_ptr`. This
+  //       makes read-only filtering (e.g. `unreserved()`)
+  //       inexpensive as we do not have to perform copies
+  //       of the resource objects.
+  //
+  //   (2) When a write occurs:
+  //      (a) If there's a single reference to the resource
+  //          object, we mutate directly.
+  //      (b) If there's more than a single reference to the
+  //          resource object, we copy first, then mutate the copy.
+  //
+  // We name the `vector` field `resourcesNoMutationWithoutExclusiveOwnership`
+  // and typedef its item type to `Resource_Unsafe` to alert people
+  // regarding (2).
+  //
+  // TODO(mzhu): While naming the vector and its item type may help, this is
+  // still brittle and certainly not ideal. Explore more robust designs such as
+  // introducing a customized copy-on-write abstraction that hides direct
+  // setters and only allow mutations in a controlled fashion.
+  //
+  // TODO(mzhu): Consider using `boost::intrusive_ptr` for
+  // possibly better performance.
+  std::vector<Resource_Unsafe> resourcesNoMutationWithoutExclusiveOwnership;
 };
 
 
