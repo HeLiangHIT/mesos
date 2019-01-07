@@ -21,6 +21,8 @@
 #include <grpcpp/server_context.h>
 #include <grpcpp/security/server_credentials.h>
 
+#include <mesos/type_utils.hpp>
+
 #include <stout/bytes.hpp>
 #include <stout/flags.hpp>
 #include <stout/hashmap.hpp>
@@ -58,7 +60,6 @@ using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::Status;
 
-
 constexpr char PLUGIN_NAME[] = "org.apache.mesos.csi.test";
 constexpr char NODE_ID[] = "localhost";
 constexpr Bytes DEFAULT_VOLUME_CAPACITY = Megabytes(64);
@@ -82,9 +83,15 @@ public:
         "The available disk capacity managed by the plugin, in addition\n"
         "to the pre-existing volumes specified in the --volumes flag.");
 
+    add(&Flags::create_parameters,
+        "create_parameters",
+        "The parameters required for volume creation. The parameters are\n"
+        "specified as a semicolon-delimited list of param=value pairs.\n"
+        "(Example: 'param1=value1;param2=value2')");
+
     add(&Flags::volumes,
         "volumes",
-        "Creates pre-existing volumes upon start-up. The volumes are\n"
+        "Creates preprovisioned volumes upon start-up. The volumes are\n"
         "specified as a semicolon-delimited list of name:capacity pairs.\n"
         "If a volume with the same name already exists, the pair will be\n"
         "ignored. (Example: 'volume1:1GB;volume2:2GB')");
@@ -93,6 +100,7 @@ public:
   string endpoint;
   string work_dir;
   Bytes available_capacity;
+  Option<string> create_parameters;
   Option<string> volumes;
 };
 
@@ -107,11 +115,20 @@ public:
       const string& _workDir,
       const string& _endpoint,
       const Bytes& _availableCapacity,
+      const hashmap<string, string>& _createParameters,
       const hashmap<string, Bytes>& _volumes)
     : workDir(_workDir),
       endpoint(_endpoint),
-      availableCapacity(_availableCapacity)
+      availableCapacity(_availableCapacity),
+      createParameters(_createParameters.begin(), _createParameters.end())
   {
+    // Construct the default mount volume capability.
+    defaultVolumeCapability.mutable_mount();
+    defaultVolumeCapability.mutable_access_mode()
+      ->set_mode(csi::v0::VolumeCapability::AccessMode::SINGLE_NODE_WRITER);
+
+    // Scan for preprovisioned volumes.
+    //
     // TODO(jieyu): Consider not using CHECKs here.
     Try<list<string>> paths = os::ls(workDir);
     CHECK_SOME(paths);
@@ -260,6 +277,8 @@ private:
   const string endpoint;
 
   Bytes availableCapacity;
+  csi::v0::VolumeCapability defaultVolumeCapability;
+  google::protobuf::Map<string, string> createParameters;
   hashmap<string, VolumeInfo> volumes;
 
   unique_ptr<Server> server;
@@ -318,13 +337,40 @@ Status TestCSIPlugin::CreateVolume(
     return Status(grpc::INVALID_ARGUMENT, "Volume name cannot be empty");
   }
 
-  if (request->name().find_first_of(os::PATH_SEPARATOR) != string::npos) {
-    return Status(grpc::INVALID_ARGUMENT, "Volume name cannot contain '/'");
+  if (strings::contains(request->name(), stringify(os::PATH_SEPARATOR))) {
+    return Status(
+        grpc::INVALID_ARGUMENT,
+        "Volume name cannot contain '" + stringify(os::PATH_SEPARATOR) + "'");
   }
 
-  bool alreadyExists = volumes.contains(request->name());
+  foreach (const csi::v0::VolumeCapability& capability,
+           request->volume_capabilities()) {
+    if (capability != defaultVolumeCapability) {
+      return Status(grpc::INVALID_ARGUMENT, "Unsupported volume capabilities");
+    }
+  }
 
-  if (!alreadyExists) {
+  if (request->parameters() != createParameters) {
+    return Status(grpc::INVALID_ARGUMENT, "Unsupported create parameters");
+  }
+
+  // The volume ID is determined by `name`, so we check whether the volume
+  // corresponding to `name` is compatible to the request if it exists.
+  if (volumes.contains(request->name())) {
+    const VolumeInfo volumeInfo = volumes.at(request->name());
+
+    if (request->has_capacity_range()) {
+      const csi::v0::CapacityRange& range = request->capacity_range();
+
+      if (range.limit_bytes() != 0 &&
+          volumeInfo.size > Bytes(range.limit_bytes())) {
+        return Status(grpc::ALREADY_EXISTS, "Cannot satisfy 'limit_bytes'");
+      } else if (range.required_bytes() != 0 &&
+                 volumeInfo.size < Bytes(range.required_bytes())) {
+        return Status(grpc::ALREADY_EXISTS, "Cannot satisfy 'required_bytes'");
+      }
+    }
+  } else {
     if (availableCapacity == Bytes(0)) {
       return Status(grpc::OUT_OF_RANGE, "Insufficient capacity");
     }
@@ -337,13 +383,12 @@ Status TestCSIPlugin::CreateVolume(
       const csi::v0::CapacityRange& range = request->capacity_range();
 
       // The highest we can pick.
-      Bytes limit = availableCapacity;
-      if (range.limit_bytes() != 0) {
-        limit = min(availableCapacity, Bytes(range.limit_bytes()));
-      }
+      Bytes limit = range.limit_bytes() != 0
+        ? min(availableCapacity, Bytes(range.limit_bytes()))
+        : availableCapacity;
 
       if (range.required_bytes() != 0 &&
-          static_cast<size_t>(range.required_bytes()) > limit.bytes()) {
+          limit < Bytes(range.required_bytes())) {
         return Status(grpc::OUT_OF_RANGE, "Cannot satisfy 'required_bytes'");
       }
 
@@ -363,7 +408,7 @@ Status TestCSIPlugin::CreateVolume(
 
     CHECK_GE(availableCapacity, volumeInfo.size);
     availableCapacity -= volumeInfo.size;
-    volumes.put(volumeInfo.id, volumeInfo);
+    volumes.put(volumeInfo.id, std::move(volumeInfo));
   }
 
   const VolumeInfo& volumeInfo = volumes.at(request->name());
@@ -372,12 +417,6 @@ Status TestCSIPlugin::CreateVolume(
   response->mutable_volume()->set_capacity_bytes(volumeInfo.size.bytes());
   (*response->mutable_volume()->mutable_attributes())["path"] =
     getVolumePath(volumeInfo);
-
-  if (alreadyExists) {
-    return Status(
-        grpc::ALREADY_EXISTS,
-        "Volume with name '" + request->name() + "' already exists");
-  }
 
   return Status::OK;
 }
@@ -499,23 +538,15 @@ Status TestCSIPlugin::ValidateVolumeCapabilities(
 
   foreach (const csi::v0::VolumeCapability& capability,
            request->volume_capabilities()) {
-    if (capability.has_mount() &&
-        (!capability.mount().fs_type().empty() ||
-         !capability.mount().mount_flags().empty())) {
+    if (capability != defaultVolumeCapability) {
       response->set_supported(false);
-      response->set_message("Only default capability is supported");
-
-      return Status::OK;
-    }
-
-    if (capability.access_mode().mode() !=
-        csi::v0::VolumeCapability::AccessMode::SINGLE_NODE_WRITER) {
-      response->set_supported(false);
-      response->set_message("Access mode is not supported");
+      response->set_message("Unsupported volume capabilities");
 
       return Status::OK;
     }
   }
+
+  // TODO(chhsiao): Validate the parameters once we get CSI v1.
 
   response->set_supported(true);
 
@@ -561,22 +592,19 @@ Status TestCSIPlugin::GetCapacity(
   foreach (const csi::v0::VolumeCapability& capability,
            request->volume_capabilities()) {
     // We report zero capacity for any capability other than the
-    // default-constructed `MountVolume` capability since this plugin
+    // default-constructed mount volume capability since this plugin
     // does not support any filesystem types and mount flags.
-    if (!capability.has_mount() ||
-        !capability.mount().fs_type().empty() ||
-        !capability.mount().mount_flags().empty()) {
+    if (capability != defaultVolumeCapability) {
       response->set_available_capacity(0);
 
       return Status::OK;
     }
+  }
 
-    if (capability.access_mode().mode() !=
-        csi::v0::VolumeCapability::AccessMode::SINGLE_NODE_WRITER) {
+  if (request->parameters() != createParameters) {
       response->set_available_capacity(0);
 
       return Status::OK;
-    }
   }
 
   response->set_available_capacity(availableCapacity.bytes());
@@ -923,34 +951,54 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
+  hashmap<string, string> createParameters;
+
+  if (flags.create_parameters.isSome()) {
+    foreachpair (const string& param,
+                 const vector<string>& values,
+                 strings::pairs(flags.create_parameters.get(), ";", "=")) {
+      Option<Error> error;
+
+      if (values.size() != 1) {
+        error = "Parameter keys must be unique";
+      } else {
+        createParameters.put(param, values[0]);
+      }
+
+      if (error.isSome()) {
+        cerr << "Failed to parse the '--create_parameters' flags: "
+             << error->message << endl;
+        return EXIT_FAILURE;
+      }
+    }
+  }
+
   hashmap<string, Bytes> volumes;
 
   if (flags.volumes.isSome()) {
-    foreach (const string& token, strings::tokenize(flags.volumes.get(), ";")) {
-      vector<string> pair = strings::tokenize(token, ":");
-
+    foreachpair (const string& name,
+                 const vector<string>& capacities,
+                 strings::pairs(flags.volumes.get(), ";", ":")) {
       Option<Error> error;
 
-      if (pair.size() != 2) {
-        error = "Not a name:capacity pair";
-      } else if (pair[0].empty()) {
-        error = "Volume name cannot be empty";
-      } else if (pair[0].find_first_of(os::PATH_SEPARATOR) != string::npos) {
-        error = "Volume name cannot contain '/'";
-      } else if (volumes.contains(pair[0])) {
+      if (strings::contains(name, stringify(os::PATH_SEPARATOR))) {
+        error =
+          "Volume name cannot contain '" + stringify(os::PATH_SEPARATOR) + "'";
+      } else if (capacities.size() != 1) {
         error = "Volume name must be unique";
+      } else if (volumes.contains(name)) {
+        error = "Volume '" + name + "' already exists";
       } else {
-        Try<Bytes> capacity = Bytes::parse(pair[1]);
+        Try<Bytes> capacity = Bytes::parse(capacities[0]);
         if (capacity.isError()) {
           error = capacity.error();
         } else {
-          volumes.put(pair[0], capacity.get());
+          volumes.put(name, capacity.get());
         }
       }
 
       if (error.isSome()) {
-        cerr << "Failed to parse item '" << token << "' in 'volumes' flag: "
-             << error->message << endl;
+        cerr << "Failed to parse the '--volumes' flag: " << error.get() << endl;
         return EXIT_FAILURE;
       }
     }
@@ -969,6 +1017,7 @@ int main(int argc, char** argv)
       flags.work_dir,
       flags.endpoint,
       flags.available_capacity,
+      createParameters,
       volumes));
 
   plugin->wait();

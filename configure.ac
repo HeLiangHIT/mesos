@@ -43,7 +43,7 @@ AC_CONFIG_MACRO_DIR([m4])
 # Initialize automake.
 # -Wno-portability, since we require GNU Make for % patterns
 # Removal of -Werror due warnings introduced by automake 1.14.
-AM_INIT_AUTOMAKE([-Wall -Wno-portability foreign])
+AM_INIT_AUTOMAKE([-Wall -Wno-portability foreign tar-pax])
 AM_MAINTAINER_MODE([enable])
 
 # This is required for linking non-POSIX libs.
@@ -320,8 +320,9 @@ AC_ARG_ENABLE([optimize],
               [], [enable_optimize=no])
 
 AC_ARG_ENABLE([parallel_test_execution],
-              AS_HELP_STRING([--enable-parallel-test-execution],
-                             [execute tests in parallel where possible]))
+              AS_HELP_STRING([--disable-parallel-test-execution],
+                             [disable the parallel runner used during make check]),
+              [], [enable_parallel_test_execution=yes])
 
 AC_ARG_ENABLE([perftools],
               AS_HELP_STRING([--enable-perftools],

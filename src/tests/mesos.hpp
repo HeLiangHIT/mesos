@@ -798,6 +798,18 @@ inline TContainerInfo createContainerInfo(
 }
 
 
+inline SlaveID getAgentID(const Offer& offer)
+{
+  return offer.slave_id();
+}
+
+
+inline mesos::v1::AgentID getAgentID(const mesos::v1::Offer& offer)
+{
+  return offer.agent_id();
+}
+
+
 inline void setAgentID(TaskInfo* task, const SlaveID& slaveId)
 {
   task->mutable_slave_id()->CopyFrom(slaveId);
@@ -904,7 +916,7 @@ inline TTaskInfo createTask(
       TExecutorInfo,
       TCommandInfo,
       TOffer>(
-          offer.slave_id(),
+          getAgentID(offer),
           offer.resources(),
           command,
           executorId,
@@ -1298,17 +1310,17 @@ inline TDomainInfo createDomainInfo(
 
 
 // Helpers for creating operations.
-template <typename TResources, typename TOffer>
+template <typename TResources, typename TOperationID, typename TOffer>
 inline typename TOffer::Operation RESERVE(
     const TResources& resources,
-    const Option<std::string> operationId = None())
+    const Option<TOperationID>& operationId = None())
 {
   typename TOffer::Operation operation;
   operation.set_type(TOffer::Operation::RESERVE);
   operation.mutable_reserve()->mutable_resources()->CopyFrom(resources);
 
   if (operationId.isSome()) {
-    operation.mutable_id()->set_value(operationId.get());
+    operation.mutable_id()->CopyFrom(operationId.get());
   }
 
   return operation;
@@ -1398,19 +1410,28 @@ inline typename TOffer::Operation LAUNCH_GROUP(
 }
 
 
-template <typename TResource, typename TTargetType, typename TOffer>
+template <
+    typename TResource,
+    typename TTargetType,
+    typename TOperationID,
+    typename TOffer>
 inline typename TOffer::Operation CREATE_DISK(
     const TResource& source,
-    const TTargetType& type,
-    const Option<std::string>& operationId = None())
+    const TTargetType& targetType,
+    const Option<std::string>& targetProfile = None(),
+    const Option<TOperationID>& operationId = None())
 {
   typename TOffer::Operation operation;
   operation.set_type(TOffer::Operation::CREATE_DISK);
   operation.mutable_create_disk()->mutable_source()->CopyFrom(source);
-  operation.mutable_create_disk()->set_target_type(type);
+  operation.mutable_create_disk()->set_target_type(targetType);
+
+  if (targetProfile.isSome()) {
+    operation.mutable_create_disk()->set_target_profile(targetProfile.get());
+  }
 
   if (operationId.isSome()) {
-    operation.mutable_id()->set_value(operationId.get());
+    operation.mutable_id()->CopyFrom(operationId.get());
   }
 
   return operation;
@@ -1730,7 +1751,8 @@ inline DomainInfo createDomainInfo(Args&&... args)
 template <typename... Args>
 inline Offer::Operation RESERVE(Args&&... args)
 {
-  return common::RESERVE<Resources, Offer>(std::forward<Args>(args)...);
+  return common::RESERVE<Resources, OperationID, Offer>(
+      std::forward<Args>(args)...);
 }
 
 
@@ -1787,9 +1809,9 @@ inline Offer::Operation LAUNCH_GROUP(Args&&... args)
 template <typename... Args>
 inline Offer::Operation CREATE_DISK(Args&&... args)
 {
-  return common::CREATE_DISK<Resource,
-                             Resource::DiskInfo::Source::Type,
-                             Offer>(std::forward<Args>(args)...);
+  return common::
+    CREATE_DISK<Resource, Resource::DiskInfo::Source::Type, OperationID, Offer>(
+        std::forward<Args>(args)...);
 }
 
 
@@ -2024,8 +2046,10 @@ inline hashmap<std::string, double> convertToHashmap(Args&&... args)
 template <typename... Args>
 inline mesos::v1::Offer::Operation RESERVE(Args&&... args)
 {
-  return common::RESERVE<mesos::v1::Resources, mesos::v1::Offer>(
-      std::forward<Args>(args)...);
+  return common::RESERVE<
+      mesos::v1::Resources,
+      mesos::v1::OperationID,
+      mesos::v1::Offer>(std::forward<Args>(args)...);
 }
 
 
@@ -2090,10 +2114,11 @@ inline mesos::v1::Offer::Operation LAUNCH_GROUP(Args&&... args)
 template <typename... Args>
 inline mesos::v1::Offer::Operation CREATE_DISK(Args&&... args)
 {
-  return common::CREATE_DISK<mesos::v1::Resource,
-                             mesos::v1::Resource::DiskInfo::Source::Type,
-                             mesos::v1::Offer>(
-      std::forward<Args>(args)...);
+  return common::CREATE_DISK<
+      mesos::v1::Resource,
+      mesos::v1::Resource::DiskInfo::Source::Type,
+      mesos::v1::OperationID,
+      mesos::v1::Offer>(std::forward<Args>(args)...);
 }
 
 
@@ -2775,6 +2800,8 @@ public:
         case Event::ERROR:
           error(mesos, event.error());
           break;
+        case Event::HEARTBEAT:
+          break;
         case Event::UNKNOWN:
           LOG(FATAL) << "Received unexpected UNKNOWN event";
           break;
@@ -3108,18 +3135,23 @@ public:
         update->mutable_status()->add_converted_resources()->CopyFrom(
             operation.info().create_disk().source());
         update->mutable_status()
-          ->mutable_converted_resources()
-          ->Mutable(0)
+          ->mutable_converted_resources(0)
           ->mutable_disk()
           ->mutable_source()
           ->set_type(operation.info().create_disk().target_type());
+        if (operation.info().create_disk().has_target_profile()) {
+          update->mutable_status()
+            ->mutable_converted_resources(0)
+            ->mutable_disk()
+            ->mutable_source()
+            ->set_profile(operation.info().create_disk().target_profile());
+        }
         break;
       case Operation::DESTROY_DISK:
         update->mutable_status()->add_converted_resources()->CopyFrom(
             operation.info().destroy_disk().source());
         update->mutable_status()
-          ->mutable_converted_resources()
-          ->Mutable(0)
+          ->mutable_converted_resources(0)
           ->mutable_disk()
           ->mutable_source()
           ->set_type(Source::RAW);
@@ -3128,7 +3160,12 @@ public:
         break;
     }
 
-    update->mutable_latest_status()->CopyFrom(update->status());
+    if (update->has_status()) {
+      update->mutable_status()->mutable_resource_provider_id()->CopyFrom(
+          info.id());
+
+      update->mutable_latest_status()->CopyFrom(update->status());
+    }
 
     driver->send(call);
   }

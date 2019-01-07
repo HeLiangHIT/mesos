@@ -41,6 +41,7 @@ endif ()
 #################
 set(MESOS_TESTS_UTILS_SRC
   active_user_test_helper.cpp
+  allocator.cpp
   cluster.cpp
   containerizer.cpp
   environment.cpp
@@ -98,6 +99,7 @@ set(MESOS_TESTS_SRC
   gc_tests.cpp
   hdfs_tests.cpp
   health_check_tests.cpp
+  hierarchical_allocator_benchmarks.cpp
   hierarchical_allocator_tests.cpp
   hook_tests.cpp
   http_authentication_tests.cpp

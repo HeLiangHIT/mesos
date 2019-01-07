@@ -46,6 +46,7 @@
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
 
+#include "common/authorization.hpp"
 #include "common/build.hpp"
 #include "common/protobuf_utils.hpp"
 
@@ -106,6 +107,7 @@ using process::PID;
 using process::Promise;
 
 using process::http::Accepted;
+using process::http::InternalServerError;
 using process::http::OK;
 using process::http::Response;
 using process::http::Unauthorized;
@@ -2264,6 +2266,9 @@ TEST_F(MasterTest, MetricsInMetricsEndpoint)
 
   EXPECT_EQ(1u, snapshot.values.count("master/outstanding_offers"));
 
+  EXPECT_EQ(1u, snapshot.values.count(
+      "master/operator_event_stream_subscribers"));
+
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_staging"));
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_starting"));
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_running"));
@@ -3836,6 +3841,196 @@ TEST_F(MasterTest, RecoveredFramework)
 
   driver.stop();
   driver.join();
+}
+
+
+// This test ensures that when a master fails over, the recovered master will
+// not crash when executors that belong to recovered (but not yet reregistered)
+// frameworks try to send executor -> framework messages. See MESOS-8623.
+//
+// NOTE: This test uses an HTTP framework which has no PID and thus any
+// executor -> framework message is forwarded by the master. Otherwise, the
+// agent would bypass the master and directly sends it to the scheduler driver.
+TEST_F(MasterTest, ExecutorMessageToRecoveredHttpFramework)
+{
+  Clock::pause();
+
+  master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+
+  ASSERT_SOME(master);
+
+  StandaloneMasterDetector detector(master.get()->pid);
+
+  // Set up a mock executor to send messages.
+  auto executor = std::make_shared<v1::MockHTTPExecutor>();
+  TestContainerizer containerizer(DEFAULT_EXECUTOR_ID, executor);
+
+  Future<v1::executor::Mesos*> executorLibrary;
+  EXPECT_CALL(*executor, connected(_))
+    .WillOnce(FutureArg<0>(&executorLibrary));
+
+  Future<Nothing> executorSubscribed;
+  EXPECT_CALL(*executor, subscribed(_, _))
+    .WillOnce(FutureSatisfy(&executorSubscribed));
+
+  EXPECT_CALL(*executor, launch(_, _));
+
+  EXPECT_CALL(*executor, shutdown(_))
+    .Times(AtMost(1));
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(&detector, &containerizer, slaveFlags);
+
+  ASSERT_SOME(slave);
+
+  // Register an HTTP framework to launch the mock executor.
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+
+  Future<Nothing> schedulerConnected;
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&schedulerConnected))
+    .WillRepeatedly(Return()); // Ignore teardown reconnections, see MESOS-6033.
+
+  Future<v1::scheduler::Event::Subscribed> schedulerSubscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&schedulerSubscribed));
+
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<v1::scheduler::Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
+
+  Owned<v1::scheduler::TestMesos> schedulerLibrary(new v1::scheduler::TestMesos(
+      master.get()->pid, ContentType::PROTOBUF, scheduler));
+
+  AWAIT_READY(schedulerConnected);
+
+  {
+    v1::scheduler::Call call;
+    call.set_type(v1::scheduler::Call::SUBSCRIBE);
+    call.mutable_subscribe()->mutable_framework_info()
+      ->CopyFrom(v1::DEFAULT_FRAMEWORK_INFO);
+
+    schedulerLibrary->send(call);
+  }
+
+  AWAIT_READY(schedulerSubscribed);
+
+  const v1::FrameworkID& frameworkId = schedulerSubscribed->framework_id();
+
+  // Advance the clock and trigger a batch allocation.
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->offers().empty());
+
+  // Launch the mock executor through a `LAUNCH` operation.
+  {
+    v1::scheduler::Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.set_type(v1::scheduler::Call::ACCEPT);
+    call.mutable_accept()->add_offer_ids()->CopyFrom(offers->offers(0).id());
+
+    v1::Offer::Operation* operation = call.mutable_accept()->add_operations();
+    operation->set_type(v1::Offer::Operation::LAUNCH);
+    operation->mutable_launch()->add_task_infos()->CopyFrom(
+        v1::createTask(offers->offers(0), "hello", v1::DEFAULT_EXECUTOR_ID));
+
+    schedulerLibrary->send(call);
+  }
+
+  AWAIT_READY(executorLibrary);
+
+  {
+    v1::executor::Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.mutable_executor_id()->CopyFrom(v1::DEFAULT_EXECUTOR_ID);
+    call.set_type(v1::executor::Call::SUBSCRIBE);
+    call.mutable_subscribe();
+
+    executorLibrary.get()->send(call);
+  }
+
+  AWAIT_READY(executorSubscribed);
+
+  // Shutdown the master.
+  master->reset();
+
+  // Fail over the framework and ensure that no more callback will be made to
+  // the scheduler.
+  schedulerLibrary.reset();
+  Clock::settle();
+
+  // Restart the master.
+  master = StartMaster(masterFlags);
+
+  ASSERT_SOME(master);
+
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), master.get()->pid, _);
+
+  detector.appoint(master.get()->pid);
+
+  // Advance the clock to trigger agent reregistration.
+  Clock::advance(slaveFlags.registration_backoff_factor);
+
+  AWAIT_READY(slaveReregisteredMessage);
+
+  // Validate that the framework is recovered through agent reregistration.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "state",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_ASSERT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_ASSERT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+    Try<JSON::Object> state = JSON::parse<JSON::Object>(response->body);
+    ASSERT_SOME(state);
+    ASSERT_EQ(1u, state->values["frameworks"].as<JSON::Array>().values.size());
+
+    const JSON::Object& framework =
+      state->values.at("frameworks").as<JSON::Array>()
+      .values.at(0).as<JSON::Object>();
+
+    EXPECT_EQ(
+        frameworkId.value(),
+        framework.values.at("id").as<JSON::String>().value);
+
+    EXPECT_FALSE(framework.values.at("active").as<JSON::Boolean>().value);
+    EXPECT_FALSE(framework.values.at("connected").as<JSON::Boolean>().value);
+    EXPECT_TRUE(framework.values.at("recovered").as<JSON::Boolean>().value);
+  }
+
+  Future<ExecutorToFrameworkMessage> executorMessage =
+    FUTURE_PROTOBUF(ExecutorToFrameworkMessage(), _, master.get()->pid);
+
+  // Send an executor -> framework message to trigger the
+  // `Master::executorMessage` handler.
+  {
+    v1::executor::Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.mutable_executor_id()->CopyFrom(v1::DEFAULT_EXECUTOR_ID);
+    call.set_type(v1::executor::Call::MESSAGE);
+    call.mutable_message()->set_data("world");
+
+    executorLibrary.get()->send(call);
+  }
+
+  AWAIT_READY(executorMessage);
+
+  // Wait for the `Master::executorMessage` handler to finish.
+  Clock::settle();
 }
 
 
@@ -6287,6 +6482,34 @@ TEST_F(MasterTest, RejectFrameworkWithInvalidRole)
   driver.start();
 
   AWAIT_READY(error);
+}
+
+
+// This test validates the undocumented but currently supported ability of
+// frameworks to register with an empty, but set ID. This case is treated
+// identical to the case where the framework registered without an ID.
+//
+// TODO(bbannier): Remove this test once MESOS-9481 is implemented.
+TEST_F(MasterTest, FrameworkSubscribeEmptyId)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
+  framework.mutable_id()->set_value("");
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+  EXPECT_FALSE(frameworkId->value().empty());
 }
 
 
@@ -8868,11 +9091,7 @@ TEST_F(MasterTest, OperationUpdateDuringFailover)
   resourceProviderInfo.set_name("test");
 
   v1::Resources resourceProviderResources = v1::createDiskResource(
-      "200",
-      "*",
-      None(),
-      None(),
-      v1::createDiskSourceRaw());
+      "200", "*", None(), None(), v1::createDiskSourceRaw(None(), "profile"));
 
   v1::MockResourceProvider resourceProvider(
       resourceProviderInfo,
@@ -9098,7 +9317,7 @@ TEST_F(MasterTest, DropOperationWithIDAffectingDefaultResources)
   operationId.set_value("operation");
 
   mesos.send(v1::createCallAccept(
-      frameworkId, offer, {v1::RESERVE(reserved, operationId.value())}));
+      frameworkId, offer, {v1::RESERVE(reserved, operationId)}));
 
   // Wait for the framework to receive the OPERATION_ERROR update.
   AWAIT_READY(operationErrorUpdate);
@@ -10085,6 +10304,127 @@ TEST_P(MasterTestPrePostReservationRefinement, CreateAndDestroyVolumesV1)
       stringify(contentType));
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(Accepted().status, v1DestroyVolumesResponse);
+}
+
+
+// This test validates that an authorization error when requesting
+// volume creation does result in an internal server error.
+// See MESOS-9317.
+TEST_F(MasterTest, CreateVolumesV1AuthorizationFailure)
+{
+  MockAuthorizer authorizer;
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
+  ASSERT_SOME(master);
+
+  // For capturing the `SlaveID` so we can use it in the create/destroy
+  // volumes API call.
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  // Do static reservation so we can create persistent volumes from it.
+  slaveFlags.resources = "disk(role1):1024";
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+  SlaveID slaveId = slaveRegisteredMessage->slave_id();
+
+  // Create the persistent volume.
+  v1::master::Call v1CreateVolumesCall;
+  v1CreateVolumesCall.set_type(v1::master::Call::CREATE_VOLUMES);
+  v1::master::Call_CreateVolumes* createVolumes =
+    v1CreateVolumesCall.mutable_create_volumes();
+
+  Resources volume = createPersistentVolume(
+      Megabytes(64),
+      "role1",
+      "id1",
+      "path1",
+      None(),
+      None(),
+      DEFAULT_CREDENTIAL.principal());
+
+  createVolumes->mutable_agent_id()->CopyFrom(evolve(slaveId));
+  createVolumes->mutable_volumes()->CopyFrom(v1::Resources(evolve(volume)));
+
+  ContentType contentType = ContentType::PROTOBUF;
+
+  Promise<bool> promise;
+  EXPECT_CALL(authorizer, authorized(_))
+    .WillOnce(Return(promise.future()));
+
+  Future<Response> response = process::http::post(
+      master.get()->pid,
+      "api/v1",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+      serialize(contentType, v1CreateVolumesCall),
+      stringify(contentType));
+
+  promise.fail("Authorizer failure");
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(InternalServerError().status, response);
+}
+
+
+// Test for the authorization collect helper.
+TEST_F(MasterTest, CollectAuthorizations)
+{
+  {
+    Promise<bool> promise1;
+    Promise<bool> promise2;
+
+    Future<bool> result = authorization::collectAuthorizations(
+        {promise1.future(), promise2.future()});
+
+    promise1.set(true);
+    promise2.set(false);
+
+    AWAIT_EXPECT_FALSE(result);
+  }
+
+  {
+    Promise<bool> promise1;
+    Promise<bool> promise2;
+
+    Future<bool> result = authorization::collectAuthorizations(
+        {promise1.future(), promise2.future()});
+
+    promise1.set(true);
+    promise2.fail("Authorization failure");
+
+    AWAIT_EXPECT_FAILED(result);
+  }
+
+  {
+    Promise<bool> promise1;
+    Promise<bool> promise2;
+
+    Future<bool> result = authorization::collectAuthorizations(
+        {promise1.future(), promise2.future()});
+
+    promise1.set(true);
+    promise2.discard();
+
+    AWAIT_EXPECT_FAILED(result);
+  }
+
+  {
+    Promise<bool> promise1;
+    Promise<bool> promise2;
+
+    Future<bool> result = authorization::collectAuthorizations(
+        {promise1.future(), promise2.future()});
+
+    promise1.set(true);
+    promise2.set(true);
+
+    AWAIT_EXPECT_TRUE(result);
+  }
 }
 
 } // namespace tests {

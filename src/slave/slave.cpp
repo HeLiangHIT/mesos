@@ -82,6 +82,7 @@
 
 #include "authentication/cram_md5/authenticatee.hpp"
 
+#include "common/authorization.hpp"
 #include "common/build.hpp"
 #include "common/protobuf_utils.hpp"
 #include "common/resources_utils.hpp"
@@ -634,10 +635,18 @@ void Slave::initialize()
   taskStatusUpdateManager->initialize(defer(self(), &Slave::forward, lambda::_1)
     .operator std::function<void(StatusUpdate)>());
 
-  // We pause the task status update manager so that it doesn't forward any
-  // updates while the slave is still recovering. It is unpaused/resumed when
-  // the slave (re-)registers with the master.
+  // We pause the status update managers so that they don't forward any updates
+  // while the agent is still recovering. They are unpaused/resumed when the
+  // agent (re-)registers with the master.
   taskStatusUpdateManager->pause();
+  operationStatusUpdateManager.pause();
+
+  operationStatusUpdateManager.initialize(
+      defer(self(), &Self::sendOperationStatusUpdate, lambda::_1),
+      std::bind(
+          &slave::paths::getOperationUpdatesPath,
+          metaDir,
+          lambda::_1));
 
   // Start disk monitoring.
   // NOTE: We send a delayed message here instead of directly calling
@@ -836,13 +845,11 @@ void Slave::initialize()
             });
         });
 
-  const PID<Slave> slavePid = self();
+  // TODO(tillt): Use generalized lambda capture once we adopt C++14.
+  Option<Authorizer*> _authorizer = authorizer;
 
-  auto authorize = [slavePid](const Option<Principal>& principal) {
-    return dispatch(
-        slavePid,
-        &Slave::authorizeLogAccess,
-        principal);
+  auto authorize = [_authorizer](const Option<Principal>& principal) {
+    return authorization::authorizeLogAccess(_authorizer, principal);
   };
 
   // Expose the log file for the webui. Fall back to 'log_dir' if
@@ -1238,6 +1245,7 @@ void Slave::detected(const Future<Option<MasterInfo>>& _master)
 
   // Pause the status updates.
   taskStatusUpdateManager->pause();
+  operationStatusUpdateManager.pause();
 
   if (_master.isFailed()) {
     EXIT(EXIT_FAILURE) << "Failed to detect a master: " << _master.failure();
@@ -1493,6 +1501,7 @@ void Slave::registered(
       Clock::cancel(agentRegistrationTimer);
 
       taskStatusUpdateManager->resume(); // Resume status updates.
+      operationStatusUpdateManager.resume();
 
       info.mutable_id()->CopyFrom(slaveId); // Store the slave id.
 
@@ -1591,6 +1600,7 @@ void Slave::reregistered(
       LOG(INFO) << "Re-registered with master " << master.get();
       state = RUNNING;
       taskStatusUpdateManager->resume(); // Resume status updates.
+      operationStatusUpdateManager.resume();
 
       // We start the local resource providers daemon once the agent is
       // running, so the resource providers can use the agent API.
@@ -4059,8 +4069,8 @@ void Slave::updateFramework(
 
   Framework* framework = getFramework(frameworkId);
   if (framework == nullptr) {
-    LOG(WARNING) << "Ignoring info update for framework " << frameworkId
-                 << " because it does not exist";
+    LOG(INFO) << "Ignoring info update for framework " << frameworkId
+              << " because it does not exist";
     return;
   }
 
@@ -4349,13 +4359,20 @@ void Slave::applyOperation(const ApplyOperationMessage& message)
     return;
   }
 
-  Operation* operation = new Operation(
-      protobuf::createOperation(
-          message.operation_info(),
-          protobuf::createOperationStatus(OPERATION_PENDING, operationId),
-          frameworkId,
+  Operation* operation = new Operation(protobuf::createOperation(
+      message.operation_info(),
+      protobuf::createOperationStatus(
+          OPERATION_PENDING,
+          operationId,
+          None(),
+          None(),
+          None(),
           info.id(),
-          uuid));
+          resourceProviderId.isSome()
+            ? resourceProviderId.get() : Option<ResourceProviderID>::none()),
+      frameworkId,
+      info.id(),
+      uuid));
 
   addOperation(operation);
 
@@ -4386,7 +4403,15 @@ void Slave::applyOperation(const ApplyOperationMessage& message)
   UpdateOperationStatusMessage update =
     protobuf::createUpdateOperationStatusMessage(
         uuid,
-        protobuf::createOperationStatus(OPERATION_FINISHED, operationId),
+        protobuf::createOperationStatus(
+            OPERATION_FINISHED,
+            operationId,
+            None(),
+            None(),
+            id::UUID::random(),
+            info.id(),
+            resourceProviderId.isSome()
+              ? resourceProviderId.get() : Option<ResourceProviderID>::none()),
         None(),
         frameworkId,
         info.id());
@@ -4395,9 +4420,7 @@ void Slave::applyOperation(const ApplyOperationMessage& message)
 
   removeOperation(operation);
 
-  // TODO(nfnt): Use the status update manager to reliably send
-  // this message to the master.
-  send(master.get(), update);
+  operationStatusUpdateManager.update(update);
 }
 
 
@@ -4427,7 +4450,13 @@ void Slave::reconcileOperations(const ReconcileOperationsMessage& message)
       UpdateOperationStatusMessage update =
         protobuf::createUpdateOperationStatusMessage(
             operation.operation_uuid(),
-            protobuf::createOperationStatus(OPERATION_DROPPED),
+            protobuf::createOperationStatus(
+                OPERATION_DROPPED,
+                None(),
+                None(),
+                None(),
+                None(),
+                info.id()),
             None(),
             None(),
             info.id());
@@ -4602,7 +4631,7 @@ void Slave::operationStatusAcknowledgement(
 
 
 void Slave::subscribe(
-    HttpConnection http,
+    StreamingHttpConnection<v1::executor::Event> http,
     const Call::Subscribe& subscribe,
     Framework* framework,
     Executor* executor)
@@ -4662,6 +4691,18 @@ void Slave::subscribe(
       // Save the connection for the executor.
       executor->http = http;
       executor->pid = None();
+
+      // Create a heartbeater for HTTP executors.
+      executor::Event heartbeatEvent;
+      heartbeatEvent.set_type(executor::Event::HEARTBEAT);
+
+      executor->heartbeater.reset(
+          new ResponseHeartbeater<executor::Event, v1::executor::Event>(
+              "executor " + stringify(executor->id),
+              heartbeatEvent,
+              http,
+              DEFAULT_EXECUTOR_HEARTBEAT_INTERVAL,
+              DEFAULT_EXECUTOR_HEARTBEAT_INTERVAL));
 
       if (framework->info.checkpoint()) {
         // Write a marker file to indicate that this executor
@@ -5781,6 +5822,54 @@ void Slave::forward(StatusUpdate update)
   message.set_pid(self()); // The ACK will be first received by the slave.
 
   send(master.get(), message);
+}
+
+
+void Slave::sendOperationStatusUpdate(
+    const UpdateOperationStatusMessage& update)
+{
+  const UUID& operationUUID = update.operation_uuid();
+
+  Operation* operation = getOperation(operationUUID);
+
+  // TODO(greggomann): Make a note here of which cases may lead to
+  // the operation being unknown by the agent.
+  if (operation != nullptr) {
+    updateOperation(operation, update);
+  }
+
+  switch (state) {
+    case RECOVERING:
+    case DISCONNECTED:
+    case TERMINATING: {
+      LOG(WARNING)
+        << "Dropping status update of operation"
+        << (update.status().has_operation_id()
+             ? " '" + stringify(update.status().operation_id()) + "'"
+             : " with no ID")
+        << " (operation_uuid: " << operationUUID << ")"
+        << (update.has_framework_id()
+             ? " for framework " + stringify(update.framework_id())
+             : " for an operator API call")
+        << " because agent is in " << state << " state";
+      break;
+    }
+    case RUNNING: {
+      LOG(INFO)
+        << "Forwarding status update of"
+        << (operation == nullptr ? " unknown" : "") << " operation"
+        << (update.status().has_operation_id()
+             ? " '" + stringify(update.status().operation_id()) + "'"
+             : " with no ID")
+        << " (operation_uuid: " << operationUUID << ")"
+        << (update.has_framework_id()
+             ? " for framework " + stringify(update.framework_id())
+             : " for an operator API call");
+
+      send(master.get(), update);
+      break;
+    }
+  }
 }
 
 
@@ -7779,8 +7868,17 @@ void Slave::handleResourceProviderMessage(
     case ResourceProviderMessage::Type::UPDATE_OPERATION_STATUS: {
       CHECK_SOME(message->updateOperationStatus);
 
-      const UpdateOperationStatusMessage& update =
+      // The status update from the resource provider didn't provide
+      // the agent ID (because the resource provider doesn't know it),
+      // hence we inject it here.
+      UpdateOperationStatusMessage update =
         message->updateOperationStatus->update;
+
+      update.mutable_slave_id()->CopyFrom(info.id());
+      update.mutable_status()->mutable_slave_id()->CopyFrom(info.id());
+      if (update.has_latest_status()) {
+        update.mutable_latest_status()->mutable_slave_id()->CopyFrom(info.id());
+      }
 
       const UUID& operationUUID = update.operation_uuid();
 
@@ -7842,14 +7940,7 @@ void Slave::handleResourceProviderMessage(
                  ? " for framework " + stringify(update.framework_id())
                  : " for an operator API call");
 
-          // The status update from the resource provider didn't
-          // provide the agent ID (because the resource provider
-          // doesn't know it), hence we inject it here.
-          UpdateOperationStatusMessage _update;
-          _update.CopyFrom(update);
-          _update.mutable_slave_id()->CopyFrom(info.id());
-
-          send(master.get(), _update);
+          send(master.get(), update);
           break;
         }
       }
@@ -8014,7 +8105,7 @@ void Slave::updateOperation(
     return;
   }
 
-  switch (update.latest_status().state()) {
+  switch (operation->latest_status().state()) {
     // Terminal state, and the conversion is successful.
     case OPERATION_FINISHED: {
       apply(operation);
@@ -8035,8 +8126,8 @@ void Slave::updateOperation(
     case OPERATION_GONE_BY_OPERATOR:
     case OPERATION_RECOVERING:
     case OPERATION_UNKNOWN: {
-      LOG(FATAL) << "Unexpected operation state "
-                 << operation->latest_status().state();
+      LOG(FATAL)
+        << "Unexpected operation state " << operation->latest_status().state();
     }
   }
 }
@@ -8473,24 +8564,6 @@ Future<bool> Slave::authorizeTask(
     << "Authorizing framework principal '"
     << (frameworkInfo.has_principal() ? frameworkInfo.principal() : "ANY")
     << "' to launch task " << task.task_id();
-
-  return authorizer.get()->authorized(request);
-}
-
-
-Future<bool> Slave::authorizeLogAccess(const Option<Principal>& principal)
-{
-  if (authorizer.isNone()) {
-    return true;
-  }
-
-  authorization::Request request;
-  request.set_action(authorization::ACCESS_MESOS_LOG);
-
-  Option<authorization::Subject> subject = createSubject(principal);
-  if (subject.isSome()) {
-    request.mutable_subject()->CopyFrom(subject.get());
-  }
 
   return authorizer.get()->authorized(request);
 }

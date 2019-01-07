@@ -20,6 +20,7 @@ Set of classes and helper functions for building unit tests for the Mesos CLI.
 
 import io
 import os
+import pty
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,10 @@ import tempfile
 import unittest
 
 import parse
+
+from tenacity import retry
+from tenacity import stop_after_delay
+from tenacity import wait_fixed
 
 from cli import http
 
@@ -329,7 +334,7 @@ class Task(Executable):
             raise CLIException("No command supplied when creating task")
 
         self.flags = flags
-        self.name = "task"
+        self.name = flags["name"]
         self.executable = os.path.join(
             CLITestCase.MESOS_BUILD_DIR,
             "src",
@@ -471,3 +476,47 @@ def exec_command(command, env=None, stdin=None, timeout=None):
         raise CLIException("Timeout expired: {error}".format(error=exception))
 
     return (process.returncode, stdout, stderr)
+
+
+def popen_tty(cmd, shell=True):
+    """
+    Open a process with stdin connected to a pseudo-tty.
+
+    :param cmd: command to run
+    :type cmd: str
+    :returns: (Popen, master) tuple, where master is the master side
+       of the of the tty-pair.  It is the responsibility of the caller
+       to close the master fd, and to perform any cleanup (including
+       waiting for completion) of the Popen object.
+    :rtype: (Popen, int)
+    """
+    master, slave = pty.openpty()
+    # pylint: disable=subprocess-popen-preexec-fn
+    proc = subprocess.Popen(cmd,
+                            stdin=slave,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            preexec_fn=os.setsid,
+                            close_fds=True,
+                            shell=shell)
+    os.close(slave)
+
+    return (proc, master)
+
+
+def wait_for_task(master, name, state, delay=1):
+    """
+    Wait for a task with a certain name to be in a given state.
+    """
+    @retry(wait=wait_fixed(0.2), stop=stop_after_delay(delay))
+    def _wait_for_task():
+        tasks = http.get_json(master.addr, "tasks")["tasks"]
+        for task in tasks:
+            if task["name"] == name and task["state"] == state:
+                return task
+        raise Exception()
+
+    try:
+        return _wait_for_task()
+    except Exception:
+        raise CLIException("Timeout waiting for task expired")

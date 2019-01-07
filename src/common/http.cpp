@@ -48,6 +48,7 @@
 
 #include <stout/os/permissions.hpp>
 
+#include "common/authorization.hpp"
 #include "common/http.hpp"
 
 #include "messages/messages.hpp"
@@ -94,16 +95,6 @@ ostream& operator<<(ostream& stream, ContentType contentType)
 }
 
 namespace internal {
-
-// Set of endpoint whose access is protected with the authorization
-// action `GET_ENDPOINTS_WITH_PATH`.
-hashset<string> AUTHORIZABLE_ENDPOINTS{
-    "/containers",
-    "/files/debug",
-    "/logging/toggle",
-    "/metrics/snapshot",
-    "/monitor/statistics"};
-
 
 string serialize(
     ContentType contentType,
@@ -876,74 +867,6 @@ static void json(JSON::StringWriter* writer, const Value::Text& text)
   writer->set(text.value());
 }
 
-namespace authorization {
-
-const Option<authorization::Subject> createSubject(
-    const Option<Principal>& principal)
-{
-  if (principal.isSome()) {
-    authorization::Subject subject;
-
-    if (principal->value.isSome()) {
-      subject.set_value(principal->value.get());
-    }
-
-    foreachpair (const string& key, const string& value, principal->claims) {
-      Label* claim = subject.mutable_claims()->mutable_labels()->Add();
-      claim->set_key(key);
-      claim->set_value(value);
-    }
-
-    return subject;
-  }
-
-  return None();
-}
-
-} // namespace authorization {
-
-const AuthorizationCallbacks createAuthorizationCallbacks(
-    Authorizer* authorizer)
-{
-  typedef lambda::function<process::Future<bool>(
-      const process::http::Request& httpRequest,
-      const Option<Principal>& principal)> Callback;
-
-  AuthorizationCallbacks callbacks;
-
-  Callback getEndpoint = [authorizer](
-      const process::http::Request& httpRequest,
-      const Option<Principal>& principal) -> process::Future<bool> {
-        const string path = httpRequest.url.path;
-
-        if (!internal::AUTHORIZABLE_ENDPOINTS.contains(path)) {
-          return Failure(
-              "Endpoint '" + path + "' is not an authorizable endpoint.");
-        }
-
-        authorization::Request authRequest;
-        authRequest.set_action(mesos::authorization::GET_ENDPOINT_WITH_PATH);
-
-        Option<authorization::Subject> subject =
-          authorization::createSubject(principal);
-        if (subject.isSome()) {
-          authRequest.mutable_subject()->CopyFrom(subject.get());
-        }
-
-        authRequest.mutable_object()->set_value(path);
-
-        LOG(INFO) << "Authorizing principal '"
-                  << (principal.isSome() ? stringify(principal.get()) : "ANY")
-                  << "' to GET the endpoint '" << path << "'";
-
-        return authorizer->authorized(authRequest);
-      };
-
-  callbacks.insert(std::make_pair("/logging/toggle", getEndpoint));
-  callbacks.insert(std::make_pair("/metrics/snapshot", getEndpoint));
-
-  return callbacks;
-}
 
 Future<Owned<ObjectApprovers>> ObjectApprovers::create(
     const Option<Authorizer*>& authorizer,
@@ -1003,7 +926,7 @@ process::Future<bool> authorizeEndpoint(
     return Failure("Unexpected request method '" + method + "'");
   }
 
-  if (!internal::AUTHORIZABLE_ENDPOINTS.contains(endpoint)) {
+  if (!authorization::AUTHORIZABLE_ENDPOINTS.contains(endpoint)) {
     return Failure(
         "Endpoint '" + endpoint + "' is not an authorizable endpoint.");
   }

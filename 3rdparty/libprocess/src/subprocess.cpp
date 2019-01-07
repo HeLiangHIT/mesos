@@ -112,14 +112,6 @@ Subprocess::ChildHook Subprocess::ChildHook::DUP2(int oldFd, int newFd)
     return os::dup2(oldFd, newFd);
   });
 }
-
-
-Subprocess::ChildHook Subprocess::ChildHook::UNSET_CLOEXEC(int fd)
-{
-  return Subprocess::ChildHook([fd]() -> Try<Nothing> {
-    return os::unsetCloexec(fd);
-  });
-}
 #endif // __WINDOWS__
 
 
@@ -414,7 +406,8 @@ Try<Subprocess> subprocess(
         child_hooks,
         stdinfds,
         stdoutfds,
-        stderrfds);
+        stderrfds,
+        whitelist_fds);
 
     if (pid.isError()) {
       return Error(pid.error());

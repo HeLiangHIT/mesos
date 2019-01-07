@@ -201,6 +201,16 @@ layout: documentation
   </tr>
   <tr>
     <td>
+      --enable-new-cli
+    </td>
+    <td>
+      Whether to build the new Python CLI. This option requires Python 3
+      which can be set using the PYTHON_3 environment variable.
+      [default=no]
+    </td>
+  </tr>
+  <tr>
+    <td>
       --disable-python
     </td>
     <td>
@@ -569,7 +579,7 @@ it to find libraries and programs with nonstandard names/locations.
       PYTHON
     </td>
     <td>
-      Which Python interpreter to use.
+      Which Python 2 interpreter to use.
     </td>
   </tr>
   <tr>
@@ -577,8 +587,25 @@ it to find libraries and programs with nonstandard names/locations.
       PYTHON_VERSION
     </td>
     <td>
-      The installed Python version to use, for example '2.3'. This string will
-      be appended to the Python interpreter canonical name.
+      The installed Python 2 version to use, for example '2.3'. This string will
+      be appended to the Python 2 interpreter canonical name.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      PYTHON_3
+    </td>
+    <td>
+      Which Python 3 interpreter to use.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      PYTHON_3_VERSION
+    </td>
+    <td>
+      The installed Python 3 version to use, for example '3.6'. This string will
+      be appended to the Python 3 interpreter canonical name.
     </td>
   </tr>
 </table>

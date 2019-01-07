@@ -1196,9 +1196,9 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::launch(
   // to modify it based on the parent container (for nested containers).
   ContainerConfig containerConfig = _containerConfig;
 
-  // For nested containers, we must perform some extra validation
-  // (i.e. does the parent exist?) and create the sandbox directory
-  // based on the parent's sandbox.
+  // For nested containers, we must perform some extra validation (i.e. does
+  // the parent exist?), inherit user from parent if needed and create the
+  // sandbox directory based on the parent's sandbox.
   if (containerId.has_parent()) {
     if (containerConfig.has_task_info() ||
         containerConfig.has_executor_info()) {
@@ -1222,6 +1222,14 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::launch(
       return Failure(
           "Parent container " + stringify(parentContainerId) +
           " is in 'DESTROYING' state");
+    }
+
+    // Inherit user from the parent container iff there is no
+    // user specified in the nested container's `commandInfo`.
+    if (!containerConfig.has_user() &&
+        containers_[parentContainerId]->config.isSome() &&
+        containers_[parentContainerId]->config->has_user()) {
+      containerConfig.set_user(containers_[parentContainerId]->config->user());
     }
 
     const ContainerID rootContainerId =

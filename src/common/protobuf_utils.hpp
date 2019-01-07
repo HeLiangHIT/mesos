@@ -165,7 +165,9 @@ OperationStatus createOperationStatus(
     const Option<OperationID>& operationId = None(),
     const Option<std::string>& message = None(),
     const Option<Resources>& convertedResources = None(),
-    const Option<id::UUID>& statusUUID = None());
+    const Option<id::UUID>& statusUUID = None(),
+    const Option<SlaveID>& slaveId = None(),
+    const Option<ResourceProviderID>& resourceProviderId = None());
 
 
 Operation createOperation(
@@ -338,6 +340,27 @@ mesos::slave::ContainerState createContainerState(
     const ContainerID& id,
     pid_t pid,
     const std::string& directory);
+
+
+mesos::slave::ContainerMountInfo createContainerMount(
+    const std::string& source,
+    const std::string& target,
+    unsigned long flags);
+
+
+mesos::slave::ContainerMountInfo createContainerMount(
+    const std::string& source,
+    const std::string& target,
+    const std::string& type,
+    unsigned long flags);
+
+
+mesos::slave::ContainerMountInfo createContainerMount(
+    const std::string& source,
+    const std::string& target,
+    const std::string& type,
+    const std::string& options,
+    unsigned long flags);
 
 } // namespace slave {
 

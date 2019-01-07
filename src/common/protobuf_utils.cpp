@@ -67,6 +67,7 @@ using google::protobuf::RepeatedPtrField;
 using mesos::authorization::VIEW_ROLE;
 
 using mesos::slave::ContainerLimitation;
+using mesos::slave::ContainerMountInfo;
 using mesos::slave::ContainerState;
 
 using process::Owned;
@@ -93,14 +94,26 @@ bool frameworkHasCapability(
 
 bool isTerminalState(const TaskState& state)
 {
-  return (state == TASK_FINISHED ||
-          state == TASK_FAILED ||
-          state == TASK_KILLED ||
-          state == TASK_LOST ||
-          state == TASK_ERROR ||
-          state == TASK_DROPPED ||
-          state == TASK_GONE ||
-          state == TASK_GONE_BY_OPERATOR);
+  switch (state) {
+    case TASK_FINISHED:
+    case TASK_FAILED:
+    case TASK_KILLED:
+    case TASK_LOST:
+    case TASK_ERROR:
+    case TASK_DROPPED:
+    case TASK_GONE:
+    case TASK_GONE_BY_OPERATOR:
+      return true;
+    case TASK_KILLING:
+    case TASK_STAGING:
+    case TASK_STARTING:
+    case TASK_RUNNING:
+    case TASK_UNREACHABLE:
+    case TASK_UNKNOWN:
+      return false;
+  }
+
+  UNREACHABLE();
 }
 
 
@@ -431,7 +444,9 @@ OperationStatus createOperationStatus(
     const Option<OperationID>& operationId,
     const Option<string>& message,
     const Option<Resources>& convertedResources,
-    const Option<id::UUID>& uuid)
+    const Option<id::UUID>& uuid,
+    const Option<SlaveID>& slaveId,
+    const Option<ResourceProviderID>& resourceProviderId)
 {
   OperationStatus status;
   status.set_state(state);
@@ -450,6 +465,14 @@ OperationStatus createOperationStatus(
 
   if (uuid.isSome()) {
     status.mutable_uuid()->CopyFrom(protobuf::createUUID(uuid.get()));
+  }
+
+  if (slaveId.isSome()) {
+    status.mutable_slave_id()->CopyFrom(slaveId.get());
+  }
+
+  if (resourceProviderId.isSome()) {
+    status.mutable_resource_provider_id()->CopyFrom(resourceProviderId.get());
   }
 
   return status;
@@ -1108,6 +1131,57 @@ ContainerState createContainerState(
   state.set_directory(directory);
 
   return state;
+}
+
+
+ContainerMountInfo createContainerMount(
+    const string& source,
+    const string& target,
+    unsigned long flags)
+{
+  ContainerMountInfo mnt;
+
+  mnt.set_source(source);
+  mnt.set_target(target);
+  mnt.set_flags(flags);
+
+  return mnt;
+}
+
+
+ContainerMountInfo createContainerMount(
+    const string& source,
+    const string& target,
+    const string& type,
+    unsigned long flags)
+{
+  ContainerMountInfo mnt;
+
+  mnt.set_source(source);
+  mnt.set_target(target);
+  mnt.set_type(type);
+  mnt.set_flags(flags);
+
+  return mnt;
+}
+
+
+ContainerMountInfo createContainerMount(
+    const string& source,
+    const string& target,
+    const string& type,
+    const string& options,
+    unsigned long flags)
+{
+  ContainerMountInfo mnt;
+
+  mnt.set_source(source);
+  mnt.set_target(target);
+  mnt.set_type(type);
+  mnt.set_options(options);
+  mnt.set_flags(flags);
+
+  return mnt;
 }
 
 } // namespace slave {

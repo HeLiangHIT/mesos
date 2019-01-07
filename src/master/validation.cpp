@@ -508,11 +508,33 @@ Option<Error> validateRoles(const FrameworkInfo& frameworkInfo)
   return None();
 }
 
+
+Option<Error> validateFrameworkId(const FrameworkInfo& frameworkInfo)
+{
+  if (!frameworkInfo.has_id() || frameworkInfo.id().value().empty()) {
+    return None();
+  }
+
+  return common::validation::validateID(frameworkInfo.id().value());
+}
+
 } // namespace internal {
 
 Option<Error> validate(const mesos::FrameworkInfo& frameworkInfo)
 {
-  return internal::validateRoles(frameworkInfo);
+  Option<Error> error = internal::validateRoles(frameworkInfo);
+
+  if (error.isSome()) {
+    return error;
+  }
+
+  error = internal::validateFrameworkId(frameworkInfo);
+
+  if (error.isSome()) {
+    return error;
+  }
+
+  return None();
 }
 
 } // namespace framework {
@@ -2526,6 +2548,12 @@ Option<Error> validate(const Offer::Operation::CreateDisk& createDisk)
   if (createDisk.target_type() != Resource::DiskInfo::Source::MOUNT &&
       createDisk.target_type() != Resource::DiskInfo::Source::BLOCK) {
     return Error("'target_type' is neither MOUNT or BLOCK");
+  }
+
+  if (source.disk().source().has_profile() == createDisk.has_target_profile()) {
+    return createDisk.has_target_profile()
+      ? Error("'target_profile' must not be set when 'source' has a profile")
+      : Error("'target_profile' must be set when 'source' has no profile");
   }
 
   return None();

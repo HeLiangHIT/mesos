@@ -28,6 +28,8 @@
 #include <stout/strings.hpp>
 #include <stout/utils.hpp>
 
+#include "common/authorization.hpp"
+
 #include "master/weights.hpp"
 
 namespace http = process::http;
@@ -345,17 +347,7 @@ Future<bool> Master::WeightsHandler::authorizeUpdateWeights(
     return master->authorizer.get()->authorized(request);
   }
 
-  return await(authorizations)
-      .then([](const vector<Future<bool>>& authorizations)
-            -> Future<bool> {
-        // Compute a disjunction.
-        foreach (const Future<bool>& authorization, authorizations) {
-          if (!authorization.get()) {
-            return false;
-          }
-        }
-        return true;
-      });
+  return authorization::collectAuthorizations(authorizations);
 }
 
 

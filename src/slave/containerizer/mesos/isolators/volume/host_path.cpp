@@ -32,6 +32,7 @@
 #include <stout/os/stat.hpp>
 #include <stout/os/touch.hpp>
 
+#include "common/protobuf_utils.hpp"
 #include "common/validation.hpp"
 
 #include "linux/fs.hpp"
@@ -267,18 +268,13 @@ Future<Option<ContainerLaunchInfo>> VolumeHostPathIsolatorProcess::prepare(
     if (mountPropagationBidirectional) {
       // First, find the mount entry that is the parent of the host
       // volume source. If it is not a shared mount, return a failure.
-
-      // Get realpath here because the mount table uses realpaths.
-      Result<string> realHostPath = os::realpath(hostPath.get());
-      if (!realHostPath.isSome()) {
-        return Failure(
-            "Failed to get the realpath of the host path '" +
-            hostPath.get() + "': " +
-            (realHostPath.isError() ? realHostPath.error() : "Not found"));
+      Try<fs::MountInfoTable> table = fs::MountInfoTable::read();
+      if (table.isError()) {
+        return Failure("Failed to read mount table: " + table.error());
       }
 
       Try<fs::MountInfoTable::Entry> sourceMountEntry =
-        fs::MountInfoTable::findByTarget(realHostPath.get());
+        table->findByTarget(hostPath.get());
 
       if (sourceMountEntry.isError()) {
         return Failure(
@@ -309,10 +305,9 @@ Future<Option<ContainerLaunchInfo>> VolumeHostPathIsolatorProcess::prepare(
     // result, no need for the bind mount because the 'hostPath' is
     // already accessible in the container.
     if (hostPath.get() != mountPoint) {
-      ContainerMountInfo* mount = launchInfo.add_mounts();
-      mount->set_source(hostPath.get());
-      mount->set_target(mountPoint);
-      mount->set_flags(
+      *launchInfo.add_mounts() = protobuf::slave::createContainerMount(
+          hostPath.get(),
+          mountPoint,
           MS_BIND | MS_REC | (volume.mode() == Volume::RO ? MS_RDONLY : 0));
     }
   }

@@ -42,6 +42,7 @@
 
 #include <mesos/scheduler/scheduler.hpp>
 
+#include <process/collect.hpp>
 #include <process/future.hpp>
 #include <process/limiter.hpp>
 #include <process/http.hpp>
@@ -66,6 +67,7 @@
 #include <stout/try.hpp>
 #include <stout/uuid.hpp>
 
+#include "common/heartbeater.hpp"
 #include "common/http.hpp"
 #include "common/resources_utils.hpp"
 
@@ -327,109 +329,6 @@ inline std::ostream& operator<<(std::ostream& stream, const Slave& slave)
 }
 
 
-// Represents the streaming HTTP connection to a framework or a client
-// subscribed to the '/api/vX' endpoint.
-struct HttpConnection
-{
-  HttpConnection(const process::http::Pipe::Writer& _writer,
-                 ContentType _contentType,
-                 id::UUID _streamId)
-    : writer(_writer),
-      contentType(_contentType),
-      streamId(_streamId) {}
-
-  // We need to evolve the internal old style message/unversioned event into a
-  // versioned event e.g., `v1::scheduler::Event` or `v1::master::Event`.
-  template <typename Message, typename Event = v1::scheduler::Event>
-  bool send(const Message& message)
-  {
-    ::recordio::Encoder<Event> encoder (lambda::bind(
-        serialize, contentType, lambda::_1));
-
-    return writer.write(encoder.encode(evolve(message)));
-  }
-
-  bool close()
-  {
-    return writer.close();
-  }
-
-  process::Future<Nothing> closed() const
-  {
-    return writer.readerClosed();
-  }
-
-  process::http::Pipe::Writer writer;
-  ContentType contentType;
-  id::UUID streamId;
-};
-
-
-// This process periodically sends heartbeats to a given HTTP connection.
-// The `Message` template parameter is the type of the heartbeat event passed
-// into the heartbeater during construction, while the `Event` template
-// parameter is the versioned event type which is sent to the client.
-// The optional delay parameter is used to specify the delay period before it
-// sends the first heartbeat.
-template <typename Message, typename Event>
-class Heartbeater : public process::Process<Heartbeater<Message, Event>>
-{
-public:
-  Heartbeater(const std::string& _logMessage,
-              const Message& _heartbeatMessage,
-              const HttpConnection& _http,
-              const Duration& _interval,
-              const Option<Duration>& _delay = None(),
-              const Option<lambda::function<void(const Message&)>>&
-                _callback = None())
-    : process::ProcessBase(process::ID::generate("heartbeater")),
-      logMessage(_logMessage),
-      heartbeatMessage(_heartbeatMessage),
-      http(_http),
-      interval(_interval),
-      delay(_delay),
-      callback(_callback) {}
-
-protected:
-  void initialize() override
-  {
-    if (delay.isSome()) {
-      process::delay(
-          delay.get(),
-          this,
-          &Heartbeater<Message, Event>::heartbeat);
-    } else {
-      heartbeat();
-    }
-  }
-
-private:
-  void heartbeat()
-  {
-    // Only send a heartbeat if the connection is not closed.
-    if (http.closed().isPending()) {
-      VLOG(2) << "Sending heartbeat to " << logMessage;
-
-      if (callback.isSome()) {
-        callback.get()(heartbeatMessage);
-      }
-
-      Message message(heartbeatMessage);
-      http.send<Message, Event>(message);
-    }
-
-    process::delay(interval, this, &Heartbeater<Message, Event>::heartbeat);
-  }
-
-  const std::string logMessage;
-  const Message heartbeatMessage;
-  HttpConnection http;
-  const Duration interval;
-  const Option<Duration> delay;
-  const Option<lambda::function<void(const Message&)>> callback;
-};
-
-
 class Master : public ProtobufProcess<Master>
 {
 public:
@@ -595,7 +494,10 @@ protected:
   void consume(process::ExitedEvent&& event) override;
 
   void exited(const process::UPID& pid) override;
-  void exited(const FrameworkID& frameworkId, const HttpConnection& http);
+  void exited(
+      const FrameworkID& frameworkId,
+      const StreamingHttpConnection<v1::scheduler::Event>& http);
+
   void _exited(Framework* framework);
 
   // Invoked upon noticing a subscriber disconnection.
@@ -702,7 +604,7 @@ protected:
       Framework* framework,
       const FrameworkInfo& frameworkInfo,
       const Option<process::UPID>& pid,
-      const Option<HttpConnection>& http,
+      const Option<StreamingHttpConnection<v1::scheduler::Event>>& http,
       const std::set<std::string>& suppressedRoles);
 
   // Replace the scheduler for a framework with a new process ID, in
@@ -711,7 +613,9 @@ protected:
 
   // Replace the scheduler for a framework with a new HTTP connection,
   // in the event of a scheduler failover.
-  void failoverFramework(Framework* framework, const HttpConnection& http);
+  void failoverFramework(
+      Framework* framework,
+      const StreamingHttpConnection<v1::scheduler::Event>& http);
 
   void _failoverFramework(Framework* framework);
 
@@ -1072,11 +976,11 @@ private:
       mesos::scheduler::Call&& call);
 
   void subscribe(
-      HttpConnection http,
+      StreamingHttpConnection<v1::scheduler::Event> http,
       const mesos::scheduler::Call::Subscribe& subscribe);
 
   void _subscribe(
-      HttpConnection http,
+      StreamingHttpConnection<v1::scheduler::Event> http,
       const FrameworkInfo& frameworkInfo,
       bool force,
       const std::set<std::string>& suppressedRoles,
@@ -1095,7 +999,7 @@ private:
 
   // Subscribes a client to the 'api/vX' endpoint.
   void subscribe(
-      const HttpConnection& http,
+      const StreamingHttpConnection<v1::master::Event>& http,
       const Option<process::http::authentication::Principal>& principal);
 
   void teardown(Framework* framework);
@@ -1177,9 +1081,6 @@ private:
       const hashset<SlaveID>& toRemoveUnreachable,
       const hashset<SlaveID>& toRemoveGone,
       const process::Future<bool>& registrarResult);
-
-  process::Future<bool> authorizeLogAccess(
-      const Option<process::http::authentication::Principal>& principal);
 
   std::vector<std::string> filterRoles(
       const process::Owned<ObjectApprovers>& approvers) const;
@@ -2151,7 +2052,9 @@ private:
 
   struct Subscribers
   {
-    Subscribers(Master* _master) : master(_master) {};
+    Subscribers(Master* _master, size_t maxSubscribers)
+      : master(_master),
+        subscribed(maxSubscribers) {};
 
     // Represents a client subscribed to the 'api/vX' endpoint.
     //
@@ -2160,25 +2063,20 @@ private:
     struct Subscriber
     {
       Subscriber(
-          const HttpConnection& _http,
+          const StreamingHttpConnection<v1::master::Event>& _http,
           const Option<process::http::authentication::Principal> _principal)
         : http(_http),
-          principal(_principal)
-      {
-        mesos::master::Event event;
-        event.set_type(mesos::master::Event::HEARTBEAT);
-
-        heartbeater =
-          process::Owned<Heartbeater<mesos::master::Event, v1::master::Event>>(
-              new Heartbeater<mesos::master::Event, v1::master::Event>(
-                  "subscriber " + stringify(http.streamId),
-                  event,
-                  http,
-                  DEFAULT_HEARTBEAT_INTERVAL,
-                  DEFAULT_HEARTBEAT_INTERVAL));
-
-        process::spawn(heartbeater.get());
-      }
+          heartbeater(
+              "subscriber " + stringify(http.streamId),
+              []() {
+                mesos::master::Event event;
+                event.set_type(mesos::master::Event::HEARTBEAT);
+                return event;
+              }(),
+              http,
+              DEFAULT_HEARTBEAT_INTERVAL,
+              DEFAULT_HEARTBEAT_INTERVAL),
+          principal(_principal) {}
 
       // Not copyable, not assignable.
       Subscriber(const Subscriber&) = delete;
@@ -2199,14 +2097,10 @@ private:
         // after passing ownership to the `Subscriber` object. See MESOS-5843
         // for more details.
         http.close();
-
-        terminate(heartbeater.get());
-        wait(heartbeater.get());
       }
 
-      HttpConnection http;
-      process::Owned<Heartbeater<mesos::master::Event, v1::master::Event>>
-        heartbeater;
+      StreamingHttpConnection<v1::master::Event> http;
+      ResponseHeartbeater<mesos::master::Event, v1::master::Event> heartbeater;
       const Option<process::http::authentication::Principal> principal;
     };
 
@@ -2220,7 +2114,7 @@ private:
 
     // Active subscribers to the 'api/vX' endpoint keyed by the stream
     // identifier.
-    hashmap<id::UUID, process::Owned<Subscriber>> subscribed;
+    BoundedHashMap<id::UUID, process::Owned<Subscriber>> subscribed;
   };
 
   Subscribers subscribers;
@@ -2389,7 +2283,7 @@ struct Framework
   Framework(Master* const master,
             const Flags& masterFlags,
             const FrameworkInfo& info,
-            const HttpConnection& _http,
+            const StreamingHttpConnection<v1::scheduler::Event>& _http,
             const process::Time& time = process::Clock::now());
 
   Framework(Master* const master,
@@ -2458,7 +2352,8 @@ struct Framework
 
   void updateConnection(const process::UPID& newPid);
 
-  void updateConnection(const HttpConnection& newHttp);
+  void updateConnection(
+      const StreamingHttpConnection<v1::scheduler::Event>& newHttp);
 
   // Closes the HTTP connection and stops the heartbeat.
   //
@@ -2490,7 +2385,7 @@ struct Framework
   // (scheduler driver). At most one of `http` and `pid` will be set
   // according to the last connection made by the framework; neither
   // field will be set if the framework is in state `RECOVERED`.
-  Option<HttpConnection> http;
+  Option<StreamingHttpConnection<v1::scheduler::Event>> http;
   Option<process::UPID> pid;
 
   State state;
@@ -2571,8 +2466,8 @@ struct Framework
   hashmap<SlaveID, Resources> offeredResources;
 
   // This is only set for HTTP frameworks.
-  Option<process::Owned<
-      Heartbeater<mesos::scheduler::Event, v1::scheduler::Event>>> heartbeater;
+  process::Owned<ResponseHeartbeater<scheduler::Event, v1::scheduler::Event>>
+    heartbeater;
 
   // This is used for per-framework metrics.
   FrameworkMetrics metrics;
@@ -2593,21 +2488,35 @@ private:
 template <typename Message>
 void Framework::send(const Message& message)
 {
-  if (!connected()) {
-    LOG(WARNING) << "Master attempted to send message to disconnected"
-                 << " framework " << *this;
-  }
-
   metrics.incrementEvent(message);
+
+  if (!connected()) {
+    LOG(WARNING) << "Master attempting to send message to disconnected"
+                 << " framework " << *this;
+
+    // NOTE: We proceed here without returning to support the case where a
+    // "disconnected" framework is still talking to the master and the master
+    // wants to shut it down by sending a `FrameworkErrorMessage`. This can
+    // occur in a one-way network partition where the master -> framework link
+    // is broken but the framework -> master link remains intact. Note that we
+    // have no periodic heartbeats between the master and pid-based schedulers.
+    //
+    // TODO(chhsiao): Update the `FrameworkErrorMessage` call-sites that rely on
+    // the lack of a `return` here to directly call `process::send` so that this
+    // function doesn't need to deal with the special case. Then we can check
+    // that one of `http` or `pid` is set if the framework is connected.
+  }
 
   if (http.isSome()) {
     if (!http->send(message)) {
-      LOG(WARNING) << "Unable to send event to framework " << *this << ":"
+      LOG(WARNING) << "Unable to send message to framework " << *this << ":"
                    << " connection closed";
     }
-  } else {
-    CHECK_SOME(pid);
+  } else if (pid.isSome()) {
     master->send(pid.get(), message);
+  } else {
+    LOG(WARNING) << "Unable to send message to framework " << *this << ":"
+                 << " framework is recovered but has not reregistered";
   }
 }
 

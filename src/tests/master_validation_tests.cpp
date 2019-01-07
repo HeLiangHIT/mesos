@@ -2025,32 +2025,46 @@ TEST_F(ShrinkVolumeOperationValidationTest, MissingCapability)
 TEST(OperationValidationTest, CreateDisk)
 {
   Resource disk1 = createDiskResource(
-      "10", "*", None(), None(), createDiskSourceRaw());
+      "10", "*", None(), None(), createDiskSourceRaw(None(), "profile"));
 
   Resource disk2 = createDiskResource(
-      "20", "*", None(), None(), createDiskSourceMount());
+      "20", "*", None(), None(), createDiskSourceRaw());
 
   Resource disk3 = createDiskResource(
-      "30", "*", None(), None(), createDiskSourceRaw());
+      "30", "*", None(), None(), createDiskSourceMount());
+
+  Resource disk4 = createDiskResource(
+      "40", "*", None(), None(), createDiskSourceRaw(None(), "profile"));
 
   disk1.mutable_provider_id()->set_value("provider1");
   disk2.mutable_provider_id()->set_value("provider2");
+  disk3.mutable_provider_id()->set_value("provider3");
 
   Offer::Operation::CreateDisk createDisk;
   createDisk.mutable_source()->CopyFrom(disk1);
   createDisk.set_target_type(Resource::DiskInfo::Source::MOUNT);
+  createDisk.clear_target_profile();
 
   Option<Error> error = operation::validate(createDisk);
   EXPECT_NONE(error);
 
   createDisk.mutable_source()->CopyFrom(disk1);
   createDisk.set_target_type(Resource::DiskInfo::Source::BLOCK);
+  createDisk.clear_target_profile();
+
+  error = operation::validate(createDisk);
+  EXPECT_NONE(error);
+
+  createDisk.mutable_source()->CopyFrom(disk2);
+  createDisk.set_target_type(Resource::DiskInfo::Source::MOUNT);
+  createDisk.set_target_profile("profile");
 
   error = operation::validate(createDisk);
   EXPECT_NONE(error);
 
   createDisk.mutable_source()->CopyFrom(disk1);
   createDisk.set_target_type(Resource::DiskInfo::Source::PATH);
+  createDisk.clear_target_profile();
 
   error = operation::validate(createDisk);
   ASSERT_SOME(error);
@@ -2058,8 +2072,29 @@ TEST(OperationValidationTest, CreateDisk)
       error->message,
       "'target_type' is neither MOUNT or BLOCK"));
 
+  createDisk.mutable_source()->CopyFrom(disk1);
+  createDisk.set_target_type(Resource::DiskInfo::Source::MOUNT);
+  createDisk.set_target_profile("profile");
+
+  error = operation::validate(createDisk);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "'target_profile' must not be set when 'source' has a profile"));
+
   createDisk.mutable_source()->CopyFrom(disk2);
   createDisk.set_target_type(Resource::DiskInfo::Source::MOUNT);
+  createDisk.clear_target_profile();
+
+  error = operation::validate(createDisk);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "'target_profile' must be set when 'source' has no profile"));
+
+  createDisk.mutable_source()->CopyFrom(disk3);
+  createDisk.set_target_type(Resource::DiskInfo::Source::MOUNT);
+  createDisk.clear_target_profile();
 
   error = operation::validate(createDisk);
   ASSERT_SOME(error);
@@ -2067,8 +2102,9 @@ TEST(OperationValidationTest, CreateDisk)
       error->message,
       "'source' is not a RAW disk resource"));
 
-  createDisk.mutable_source()->CopyFrom(disk3);
+  createDisk.mutable_source()->CopyFrom(disk4);
   createDisk.set_target_type(Resource::DiskInfo::Source::MOUNT);
+  createDisk.clear_target_profile();
 
   error = operation::validate(createDisk);
   ASSERT_SOME(error);
@@ -4545,7 +4581,7 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
   {
     FrameworkInfo frameworkInfo;
 
-    EXPECT_NONE(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_NONE(::framework::validate(frameworkInfo));
   }
 
   // Not MULTI_ROLE, no 'role' (default to "*"), has 'roles' (error!).
@@ -4554,7 +4590,7 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
     frameworkInfo.add_roles("bar");
     frameworkInfo.add_roles("qux");
 
-    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_SOME(::framework::validate(frameworkInfo));
   }
 
   // Not MULTI_ROLE, has 'role', no 'roles'.
@@ -4562,7 +4598,7 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
     FrameworkInfo frameworkInfo;
     frameworkInfo.set_role("foo");
 
-    EXPECT_NONE(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_NONE(::framework::validate(frameworkInfo));
   }
 
   // Not MULTI_ROLE, has 'role', has 'roles' (error!).
@@ -4572,7 +4608,7 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
     frameworkInfo.add_roles("qux");
     frameworkInfo.set_role("foo");
 
-    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_SOME(::framework::validate(frameworkInfo));
   }
 
   // Is MULTI_ROLE, no 'role', no 'roles'.
@@ -4581,7 +4617,7 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
     frameworkInfo.add_capabilities()->set_type(
         FrameworkInfo::Capability::MULTI_ROLE);
 
-    EXPECT_NONE(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_NONE(::framework::validate(frameworkInfo));
   }
 
   // Is MULTI_ROLE, no 'role', has 'roles'.
@@ -4592,7 +4628,7 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
     frameworkInfo.add_roles("bar");
     frameworkInfo.add_roles("qux");
 
-    EXPECT_NONE(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_NONE(::framework::validate(frameworkInfo));
   }
 
   // Is MULTI_ROLE, has 'role' (error!), no 'roles'.
@@ -4602,7 +4638,7 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
     frameworkInfo.add_capabilities()->set_type(
         FrameworkInfo::Capability::MULTI_ROLE);
 
-    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_SOME(::framework::validate(frameworkInfo));
   }
 
   // Is MULTI_ROLE, has 'role' (error!), has 'roles'.
@@ -4614,7 +4650,7 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
     frameworkInfo.add_roles("bar");
     frameworkInfo.add_roles("qux");
 
-    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_SOME(::framework::validate(frameworkInfo));
   }
 
   // Duplicate items in 'roles'.
@@ -4626,7 +4662,7 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
     frameworkInfo.add_roles("qux");
     frameworkInfo.add_roles("bar");
 
-    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_SOME(::framework::validate(frameworkInfo));
   }
 
   // Check invalid character in 'roles'.
@@ -4637,8 +4673,36 @@ TEST_F(FrameworkInfoValidationTest, ValidateRoles)
     frameworkInfo.add_capabilities()->set_type(
         FrameworkInfo::Capability::MULTI_ROLE);
 
-    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+    EXPECT_SOME(::framework::validate(frameworkInfo));
   }
+}
+
+
+// This tests the validation of the `FrameworkID`.
+TEST_F(FrameworkInfoValidationTest, ValidateFrameworkID)
+{
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+
+  // Unset framework IDs are used in an initial subscription and are valid.
+  frameworkInfo.clear_id();
+  EXPECT_NONE(::framework::validate(frameworkInfo));
+
+  // We allow set but empty framework IDs, see MESOS-9481.
+  frameworkInfo.mutable_id()->set_value("");
+  EXPECT_NONE(::framework::validate(frameworkInfo));
+
+  // Typical IDs the master would assign are valid.
+  frameworkInfo.mutable_id()->set_value(id::UUID::random().toString());
+  frameworkInfo.mutable_id()->set_value(
+      strings::format("%s-4711", id::UUID::random().toString()).get());
+  EXPECT_NONE(::framework::validate(frameworkInfo));
+
+  // Framework IDs containing typical path separators are invalid.
+  frameworkInfo.mutable_id()->set_value("foo/bar");
+  EXPECT_SOME(::framework::validate(frameworkInfo));
+
+  frameworkInfo.mutable_id()->set_value("foo/..");
+  EXPECT_SOME(::framework::validate(frameworkInfo));
 }
 
 

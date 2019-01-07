@@ -30,8 +30,8 @@ wrapper around that functionality and stream-lined output.
 import argparse
 import multiprocessing
 import os
+import resource
 import shlex
-import signal
 import subprocess
 import sys
 
@@ -68,11 +68,9 @@ def run_test(opts):
     Perform an actual run of the test executable.
 
     Expects a list of parameters giving the number of the current
-    shard, the total number of shards, and the executable to run.
+    shard, the total number of shards, and the command line to run.
     """
-    shard, nshards, executable = opts
-
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    shard, nshards, args = opts
 
     env = os.environ.copy()
     env['GTEST_TOTAL_SHARDS'] = str(nshards)
@@ -80,17 +78,20 @@ def run_test(opts):
 
     try:
         output = subprocess.check_output(
-            executable.split(),
+            args,
             stderr=subprocess.STDOUT,
             env=env,
             universal_newlines=True)
         print(Bcolors.colorize('.', Bcolors.OKGREEN), end='')
         sys.stdout.flush()
         return True, output
+    except KeyboardInterrupt:
+        return False
     except subprocess.CalledProcessError as error:
         print(Bcolors.colorize('.', Bcolors.FAIL), end='')
         sys.stdout.flush()
         return False, error.output
+
 
 def parse_arguments():
     """Return the executable to work on, and a list of options."""
@@ -109,7 +110,7 @@ def parse_arguments():
 
     env_parser = argparse.ArgumentParser()
     env_parser.add_argument('-j', '--jobs', type=int,
-                            default=int(multiprocessing.cpu_count() * 1.5))
+                            default=int(multiprocessing.cpu_count()))
     env_parser.add_argument('-s', '--sequential', type=str, default='')
     env_parser.add_argument('-v', '--verbosity', type=int, default=1)
 
@@ -144,7 +145,6 @@ def parse_arguments():
         'command line always have precedence over these defaults.')
 
     args = parser.parse_args()
-
 
     if not args.executable:
         parser.print_usage()
@@ -201,8 +201,39 @@ def parse_arguments():
     return executable, args
 
 
+def validate_setup(options):
+    """Validate the execution environment and the used options."""
+
+    # Check the number of processes/threads a user is allowed to execute.
+    try:
+        # As a proxy for our requirements we assume that each test executable
+        # launches a thread for every available CPU times a factor of 16 to
+        # accommodate additional processes forked in parallel.
+        requirement = options.jobs * multiprocessing.cpu_count() * 16
+
+        nproc_limit = resource.getrlimit(resource.RLIMIT_NPROC)[0]
+
+        if nproc_limit != resource.RLIM_INFINITY and nproc_limit < requirement:
+            print(Bcolors.colorize(
+                "Detected low process count ulimit ({} vs {}). Increase "
+                "'ulimit -u' to avoid spurious test failures."
+                .format(nproc_limit, requirement),
+                Bcolors.WARNING),
+                  file=sys.stderr)
+            sys.exit(1)
+    except Exception as err:
+        print(Bcolors.colorize(
+            "Could not check compatibility of ulimit settings: {}".format(err),
+            Bcolors.WARNING),
+              file=sys.stderr)
+        sys.exit()
+
+
 if __name__ == '__main__':
     EXECUTABLE, OPTIONS = parse_arguments()
+    validate_setup(OPTIONS)
+
+    EXECUTABLE = os.path.abspath(EXECUTABLE)
 
     def options_gen(executable, filter_, jobs):
         """Generator for options for a certain shard.
@@ -212,17 +243,18 @@ if __name__ == '__main__':
         """
         opts = list(range(jobs))
 
+        args = [os.path.abspath(executable)]
+
         # If we run in a terminal, enable colored test output. We
         # still allow users to disable this themselves via extra args.
         if sys.stdout.isatty():
-            executable = '{exe} --gtest_color=yes'.format(exe=executable)
+            args.append('--gtest_color=yes')
 
         if filter_:
-            executable = '{exe} --gtest_filter={filter}'\
-                         .format(exe=executable, filter=filter_)
+            args.append('--gtest_filter={filter}'.format(filter=filter_))
 
         for opt in opts:
-            yield opt, jobs, executable
+            yield opt, jobs, args
 
     try:
         RESULTS = []

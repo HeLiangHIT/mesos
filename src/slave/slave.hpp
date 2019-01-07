@@ -65,6 +65,7 @@
 #include <stout/recordio.hpp>
 #include <stout/uuid.hpp>
 
+#include "common/heartbeater.hpp"
 #include "common/http.hpp"
 #include "common/protobuf_utils.hpp"
 #include "common/recordio.hpp"
@@ -87,6 +88,8 @@
 #include "slave/paths.hpp"
 #include "slave/state.hpp"
 
+#include "status_update_manager/operation.hpp"
+
 // `REGISTERING` is used as an enum value, but it's actually defined as a
 // constant in the Windows SDK.
 #ifdef __WINDOWS__
@@ -108,7 +111,6 @@ class TaskStatusUpdateManager;
 class Executor;
 class Framework;
 
-struct HttpConnection;
 struct ResourceProvider;
 
 
@@ -271,7 +273,7 @@ public:
   void reconcileOperations(const ReconcileOperationsMessage& message);
 
   void subscribe(
-      HttpConnection http,
+      StreamingHttpConnection<v1::executor::Event> http,
       const executor::Call::Subscribe& subscribe,
       Framework* framework,
       Executor* executor);
@@ -347,6 +349,10 @@ public:
   // update to the master. Note that the latest state of the task is
   // added to the update before forwarding.
   void forward(StatusUpdate update);
+
+  // This is called by the operation status update manager to forward operation
+  // status updates to the master.
+  void sendOperationStatusUpdate(const UpdateOperationStatusMessage& update);
 
   void statusUpdateAcknowledgement(
       const process::UPID& from,
@@ -608,9 +614,6 @@ private:
       const TaskInfo& task,
       const FrameworkInfo& frameworkInfo);
 
-  process::Future<bool> authorizeLogAccess(
-      const Option<process::http::authentication::Principal>& principal);
-
   process::Future<bool> authorizeSandboxAccess(
       const Option<process::http::authentication::Principal>& principal,
       const FrameworkID& frameworkId,
@@ -764,6 +767,8 @@ private:
 
   TaskStatusUpdateManager* taskStatusUpdateManager;
 
+  OperationStatusUpdateManager operationStatusUpdateManager;
+
   // Master detection future.
   process::Future<Option<MasterInfo>> detection;
 
@@ -842,40 +847,6 @@ private:
   //     unacknowledged status updates for resource provider
   //     provided resources.
   hashmap<UUID, Operation*> operations;
-};
-
-
-// Represents the streaming HTTP connection to an executor.
-struct HttpConnection
-{
-  HttpConnection(const process::http::Pipe::Writer& _writer,
-                 ContentType _contentType)
-    : writer(_writer),
-      contentType(_contentType),
-      encoder(lambda::bind(serialize, contentType, lambda::_1)) {}
-
-  // Converts the message to an Event before sending.
-  template <typename Message>
-  bool send(const Message& message)
-  {
-    // We need to evolve the internal 'message' into a
-    // 'v1::executor::Event'.
-    return writer.write(encoder.encode(evolve(message)));
-  }
-
-  bool close()
-  {
-    return writer.close();
-  }
-
-  process::Future<Nothing> closed() const
-  {
-    return writer.readerClosed();
-  }
-
-  process::http::Pipe::Writer writer;
-  ContentType contentType;
-  ::recordio::Encoder<v1::executor::Event> encoder;
 };
 
 
@@ -1015,7 +986,10 @@ public:
   //           *       REGISTERING       None       None   Not known yet
   //           *                 *       None       Some      Libprocess
   //           *                 *       Some       None            HTTP
-  Option<HttpConnection> http;
+  Option<StreamingHttpConnection<v1::executor::Event>> http;
+  process::Owned<ResponseHeartbeater<executor::Event, v1::executor::Event>>
+    heartbeater;
+
   Option<process::UPID> pid;
 
   // Tasks can be found in one of the following four data structures:

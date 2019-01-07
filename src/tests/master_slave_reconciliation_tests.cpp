@@ -497,6 +497,13 @@ TEST_F(
         updateOperationStatus->mutable_operation_uuid()->CopyFrom(
             operationUuid);
 
+        ASSERT_TRUE(resourceProvider->info.has_id())
+          << "Asked to reconcile before subscription was finished";
+
+        updateOperationStatus->mutable_status()
+          ->mutable_resource_provider_id()
+          ->CopyFrom(resourceProvider->info.id());
+
         resourceProvider->send(call);
       }
     };
@@ -577,7 +584,7 @@ TEST_F(
   operationId.set_value("operation");
 
   mesos.send(v1::createCallAccept(
-      frameworkId, offer, {v1::RESERVE(reserved, operationId.value())}));
+      frameworkId, offer, {v1::RESERVE(reserved, operationId)}));
 
   AWAIT_READY(applyOperationMessage);
 

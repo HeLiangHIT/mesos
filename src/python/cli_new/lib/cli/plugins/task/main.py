@@ -60,9 +60,11 @@ class Task(PluginBase):
         },
         "list": {
             "arguments": [],
-            "flags": {},
-            "short_help": "List all active tasks in a Mesos cluster",
-            "long_help": "List all active tasks in a Mesos cluster"
+            "flags": {
+                "-a --all": "list all tasks, not only running [default: False]"
+            },
+            "short_help": "List all running tasks in a Mesos cluster",
+            "long_help": "List all running tasks in a Mesos cluster"
         }
     }
 
@@ -78,8 +80,7 @@ class Task(PluginBase):
                                .format(error=exception))
 
         task_io = TaskIO(master, argv["<task-id>"])
-        task_io.attach(argv["--no-stdin"])
-        return 0
+        return task_io.attach(argv["--no-stdin"])
 
 
     def exec(self, argv):
@@ -93,14 +94,10 @@ class Task(PluginBase):
                                .format(error=exception))
 
         task_io = TaskIO(master, argv["<task-id>"])
-        task_io.exec(argv["<command>"],
-                     argv["<args>"],
-                     argv["--interactive"],
-                     argv["--tty"])
-
-        # TODO(ArmandGrillet): We should not return 0 here but
-        # whatever the result of `<command> [<args>...]` was.
-        return 0
+        return task_io.exec(argv["<command>"],
+                            argv["<args>"],
+                            argv["--interactive"],
+                            argv["--tty"])
 
     def list(self, argv):
         """
@@ -125,9 +122,17 @@ class Task(PluginBase):
             return
 
         try:
-            table = Table(["Task ID", "Framework ID", "Executor ID"])
+            table = Table(["ID", "State", "Framework ID", "Executor ID"])
             for task in tasks:
+                task_state = "UNKNOWN"
+                if task["statuses"]:
+                    task_state = task["statuses"][-1]["state"]
+
+                if not argv["--all"] and task_state != "TASK_RUNNING":
+                    continue
+
                 table.add_row([task["id"],
+                               task_state,
                                task["framework_id"],
                                task["executor_id"]])
         except Exception as exception:

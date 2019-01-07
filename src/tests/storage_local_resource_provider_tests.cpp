@@ -67,6 +67,7 @@ using process::post;
 using process::reap;
 
 using testing::AtMost;
+using testing::Between;
 using testing::DoAll;
 using testing::Not;
 using testing::Sequence;
@@ -80,6 +81,9 @@ constexpr char URI_DISK_PROFILE_ADAPTOR_NAME[] =
 
 constexpr char TEST_SLRP_TYPE[] = "org.apache.mesos.rp.local.storage";
 constexpr char TEST_SLRP_NAME[] = "test";
+constexpr char TEST_CSI_PLUGIN_TYPE[] = "org.apache.mesos.csi.test";
+constexpr char TEST_CSI_PLUGIN_NAME[] = "local";
+constexpr char TEST_CSI_VENDOR[] = "org.apache.mesos.csi.test.local";
 
 
 class StorageLocalResourceProviderTest
@@ -192,15 +196,13 @@ public:
 
   void setupResourceProviderConfig(
       const Bytes& capacity,
-      const Option<string> volumes = None())
+      const Option<string> volumes = None(),
+      const Option<string> createParameters = None())
   {
-    const string testCsiPluginName = "test_csi_plugin";
-
     const string testCsiPluginPath =
       path::join(tests::flags.build_dir, "src", "test-csi-plugin");
 
-    const string testCsiPluginWorkDir =
-      path::join(sandbox.get(), testCsiPluginName);
+    const string testCsiPluginWorkDir = path::join(sandbox.get(), "storage");
     ASSERT_SOME(os::mkdir(testCsiPluginWorkDir));
 
     Try<string> resourceProviderConfig = strings::format(
@@ -216,7 +218,7 @@ public:
           ],
           "storage": {
             "plugin": {
-              "type": "org.apache.mesos.csi.test",
+              "type": "%s",
               "name": "%s",
               "containers": [
                 {
@@ -230,6 +232,7 @@ public:
                     "arguments": [
                       "%s",
                       "--available_capacity=%s",
+                      "--create_parameters=%s",
                       "--volumes=%s",
                       "--work_dir=%s"
                     ]
@@ -258,10 +261,12 @@ public:
         )~",
         TEST_SLRP_TYPE,
         TEST_SLRP_NAME,
-        testCsiPluginName,
+        TEST_CSI_PLUGIN_TYPE,
+        TEST_CSI_PLUGIN_NAME,
         testCsiPluginPath,
         testCsiPluginPath,
         stringify(capacity),
+        createParameters.getOrElse(""),
         volumes.getOrElse(""),
         testCsiPluginWorkDir);
 
@@ -273,34 +278,41 @@ public:
   }
 
   // Create a JSON string representing a disk profile mapping containing the
-  // given profile.
-  static string createDiskProfileMapping(const string& profile)
+  // given profile-parameter pairs.
+  static string createDiskProfileMapping(
+      const hashmap<string, Option<JSON::Object>>& profiles)
   {
-    Try<string> diskProfileMapping = strings::format(
-        R"~(
-        {
-          "profile_matrix": {
-            "%s": {
-              "csi_plugin_type_selector": {
-                "plugin_type": "org.apache.mesos.csi.test"
-              },
-              "volume_capabilities": {
-                "mount": {},
-                "access_mode": {
-                  "mode": "SINGLE_NODE_WRITER"
-                }
-              }
-            }
-          }
-        }
-        )~",
-        profile);
+    JSON::Object diskProfileMapping{
+      {"profile_matrix", JSON::Object{}}
+    };
 
-    // This extra closure is necessary in order to use `ASSERT_*`, as
-    // these macros require a void return type.
-    [&] { ASSERT_SOME(diskProfileMapping); }();
+    foreachpair (const string& profile,
+                 const Option<JSON::Object>& parameters,
+                 profiles) {
+      JSON::Object profileInfo{
+        {"csi_plugin_type_selector", JSON::Object{
+          {"plugin_type", "org.apache.mesos.csi.test"}
+        }},
+        {"volume_capabilities", JSON::Object{
+          {"mount", JSON::Object{}},
+          {"access_mode", JSON::Object{
+            {"mode", "SINGLE_NODE_WRITER"}
+          }}
+        }}};
 
-    return diskProfileMapping.get();
+      diskProfileMapping
+        .values.at("profile_matrix").as<JSON::Object>()
+        .values.emplace(profile, profileInfo);
+
+      if (parameters.isSome()) {
+        diskProfileMapping
+          .values.at("profile_matrix").as<JSON::Object>()
+          .values.at(profile).as<JSON::Object>()
+          .values.emplace("create_parameters", parameters.get());
+      }
+    }
+
+    return stringify(diskProfileMapping);
   }
 
   string metricName(const string& basename)
@@ -454,7 +466,10 @@ TEST_F(StorageLocalResourceProviderTest, DISABLED_ZeroSizedDisk)
 TEST_F(StorageLocalResourceProviderTest, DISABLED_SmallDisk)
 {
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Kilobytes(512), "volume0:512KB");
@@ -502,6 +517,8 @@ TEST_F(StorageLocalResourceProviderTest, DISABLED_SmallDisk)
     return r.has_disk() &&
       r.disk().has_source() &&
       r.disk().source().type() == Resource::DiskInfo::Source::RAW &&
+      r.disk().source().has_vendor() &&
+      r.disk().source().vendor() == TEST_CSI_VENDOR &&
       !r.disk().source().has_id() &&
       r.disk().source().has_profile();
   };
@@ -509,6 +526,8 @@ TEST_F(StorageLocalResourceProviderTest, DISABLED_SmallDisk)
   auto isPreExistingVolume = [](const Resource& r) {
     return r.has_disk() &&
       r.disk().has_source() &&
+      r.disk().source().has_vendor() &&
+      r.disk().source().vendor() == TEST_CSI_VENDOR &&
       r.disk().source().has_id() &&
       !r.disk().source().has_profile();
   };
@@ -649,7 +668,8 @@ TEST_F(StorageLocalResourceProviderTest, ProfileAppeared)
   Clock::settle();
 
   // Update the disk profile mapping.
-  updatedProfileMapping.set(http::OK(createDiskProfileMapping("test")));
+  updatedProfileMapping.set(
+      http::OK(createDiskProfileMapping({{"test", None()}})));
 
   // Advance the clock to make sure another allocation is triggered.
   Clock::advance(masterFlags.allocation_interval);
@@ -662,6 +682,8 @@ TEST_F(StorageLocalResourceProviderTest, ProfileAppeared)
     return r.has_disk() &&
       r.disk().has_source() &&
       r.disk().source().type() == Resource::DiskInfo::Source::RAW &&
+      r.disk().source().has_vendor() &&
+      r.disk().source().vendor() == TEST_CSI_VENDOR &&
       !r.disk().source().has_id() &&
       r.disk().source().has_profile() &&
       r.disk().source().profile() == profile;
@@ -681,7 +703,10 @@ TEST_F(StorageLocalResourceProviderTest, ProfileAppeared)
 TEST_F(StorageLocalResourceProviderTest, CreateDestroyDisk)
 {
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -794,6 +819,8 @@ TEST_F(StorageLocalResourceProviderTest, CreateDestroyDisk)
   }
 
   ASSERT_SOME(volume);
+  ASSERT_TRUE(volume->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, volume->disk().source().vendor());
   ASSERT_TRUE(volume->disk().source().has_id());
   ASSERT_TRUE(volume->disk().source().has_metadata());
   ASSERT_TRUE(volume->disk().source().has_mount());
@@ -837,6 +864,8 @@ TEST_F(StorageLocalResourceProviderTest, CreateDestroyDisk)
   }
 
   ASSERT_SOME(destroyed);
+  ASSERT_TRUE(destroyed->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, destroyed->disk().source().vendor());
   ASSERT_FALSE(destroyed->disk().source().has_id());
   ASSERT_FALSE(destroyed->disk().source().has_metadata());
   ASSERT_FALSE(destroyed->disk().source().has_mount());
@@ -856,8 +885,9 @@ TEST_F(StorageLocalResourceProviderTest, CreateDestroyDiskRecovery)
 
   Promise<http::Response> recoveredProfileMapping;
   EXPECT_CALL(*server.get()->process, profiles(_))
-    .WillOnce(Return(http::OK(createDiskProfileMapping("test"))))
+    .WillOnce(Return(http::OK(createDiskProfileMapping({{"test", None()}}))))
     .WillOnce(Return(recoveredProfileMapping.future()));
+
   loadUriDiskProfileAdaptorModule(stringify(server.get()->process->url()));
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -973,6 +1003,8 @@ TEST_F(StorageLocalResourceProviderTest, CreateDestroyDiskRecovery)
   }
 
   ASSERT_SOME(volume);
+  ASSERT_TRUE(volume->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, volume->disk().source().vendor());
   ASSERT_TRUE(volume->disk().source().has_id());
   ASSERT_TRUE(volume->disk().source().has_metadata());
   ASSERT_TRUE(volume->disk().source().has_mount());
@@ -1027,7 +1059,8 @@ TEST_F(StorageLocalResourceProviderTest, CreateDestroyDiskRecovery)
 
   // NOTE: We update the disk profile mapping after the `DESTROY_DISK` operation
   // is applied, otherwise it could be dropped due to reconciling storage pools.
-  recoveredProfileMapping.set(http::OK(createDiskProfileMapping("test")));
+  recoveredProfileMapping.set(
+      http::OK(createDiskProfileMapping({{"test", None()}})));
 
   AWAIT_READY(volumeDestroyedOffers);
   ASSERT_FALSE(volumeDestroyedOffers->empty());
@@ -1042,6 +1075,8 @@ TEST_F(StorageLocalResourceProviderTest, CreateDestroyDiskRecovery)
   }
 
   ASSERT_SOME(destroyed);
+  ASSERT_TRUE(destroyed->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, destroyed->disk().source().vendor());
   ASSERT_FALSE(destroyed->disk().source().has_id());
   ASSERT_FALSE(destroyed->disk().source().has_metadata());
   ASSERT_FALSE(destroyed->disk().source().has_mount());
@@ -1064,7 +1099,7 @@ TEST_F(StorageLocalResourceProviderTest, ProfileDisappeared)
 
   Promise<http::Response> updatedProfileMapping;
   EXPECT_CALL(*server.get()->process, profiles(_))
-    .WillOnce(Return(http::OK(createDiskProfileMapping("test1"))))
+    .WillOnce(Return(http::OK(createDiskProfileMapping({{"test1", None()}}))))
     .WillOnce(Return(updatedProfileMapping.future()));
 
   const Duration pollInterval = Seconds(10);
@@ -1230,7 +1265,8 @@ TEST_F(StorageLocalResourceProviderTest, ProfileDisappeared)
   Clock::advance(pollInterval);
 
   // Update the disk profile mapping.
-  updatedProfileMapping.set(http::OK(createDiskProfileMapping("test2")));
+  updatedProfileMapping.set(
+      http::OK(createDiskProfileMapping({{"test2", None()}})));
 
   AWAIT_READY(updateSlave3);
 
@@ -1413,14 +1449,18 @@ TEST_F(StorageLocalResourceProviderTest, AgentFailoverPluginKilled)
 
 // This test verifies that if an agent is registered with a new ID,
 // the ID of the resource provider would be changed as well, and any
-// created volume becomes a pre-existing volume.
+// created volume becomes a preprovisioned volume.
 TEST_F(StorageLocalResourceProviderTest, AgentRegisteredWithNewId)
 {
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping(
+      {{"test1", JSON::Object{{"label", "foo"}}},
+       {"test2", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
-  setupResourceProviderConfig(Gigabytes(4));
+  setupResourceProviderConfig(Gigabytes(2), None(), "label=foo");
 
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -1449,17 +1489,21 @@ TEST_F(StorageLocalResourceProviderTest, AgentRegisteredWithNewId)
   EXPECT_CALL(sched, registered(&driver, _, _));
 
   // The framework is expected to see the following offers in sequence:
-  //   1. One containing a RAW disk resource before `CREATE_DISK`.
-  //   2. One containing a MOUNT disk resource after `CREATE_DISK`.
-  //   3. One containing a RAW pre-existing volume after the agent
-  //      is registered with a new ID.
+  //   1. One containing a RAW disk resource before the 1st `CREATE_DISK`.
+  //   2. One containing a MOUNT disk resource after the 1st `CREATE_DISK`.
+  //   3. One containing a RAW preprovisioned volume after the agent is
+  //      registered with a new ID.
+  //   4. One containing the same preprovisioned volume after the 2nd
+  //      `CREATE_DISK` that specifies a wrong profile.
+  //   5. One containing a MOUNT disk resource after the 3rd `CREATE_DISK` that
+  //      specifies the correct profile.
   //
   // We set up the expectations for these offers as the test progresses.
   Future<vector<Offer>> rawDiskOffers;
-  Future<vector<Offer>> volumeCreatedOffers;
+  Future<vector<Offer>> diskCreatedOffers;
   Future<vector<Offer>> slaveRecoveredOffers;
-
-  Sequence offers;
+  Future<vector<Offer>> operationFailedOffers;
+  Future<vector<Offer>> diskRecoveredOffers;
 
   // We use the following filter to filter offers that do not have
   // wanted resources for 365 days (the maximum).
@@ -1470,44 +1514,46 @@ TEST_F(StorageLocalResourceProviderTest, AgentRegisteredWithNewId)
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillRepeatedly(DeclineOffers(declineFilters));
 
-  // Before the agent fails over, we are interested in any storage pool or
-  // volume with a "test" profile.
-  auto hasSourceType = [](
-      const Resource& r,
-      const Resource::DiskInfo::Source::Type& type) {
+  // Before the agent fails over, we are interested in the 'test1' storage pool.
+  auto isStoragePool = [](const Resource& r, const string& profile) {
     return r.has_disk() &&
       r.disk().has_source() &&
+      r.disk().source().type() == Resource::DiskInfo::Source::RAW &&
+      r.disk().source().has_vendor() &&
+      r.disk().source().vendor() == TEST_CSI_VENDOR &&
+      !r.disk().source().has_id() &&
       r.disk().source().has_profile() &&
-      r.disk().source().profile() == "test" &&
-      r.disk().source().type() == type;
+      r.disk().source().profile() == profile;
   };
 
   EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
-      std::bind(hasSourceType, lambda::_1, Resource::DiskInfo::Source::RAW))))
-    .InSequence(offers)
+      std::bind(isStoragePool, lambda::_1, "test1"))))
     .WillOnce(FutureArg<1>(&rawDiskOffers));
 
   driver.start();
 
   AWAIT_READY(rawDiskOffers);
-  ASSERT_FALSE(rawDiskOffers->empty());
+  ASSERT_EQ(1u, rawDiskOffers->size());
 
-  Option<Resource> source;
+  Resource raw = *Resources(rawDiskOffers->at(0).resources())
+    .filter(std::bind(isStoragePool, lambda::_1, "test1"))
+    .begin();
 
-  foreach (const Resource& resource, rawDiskOffers->at(0).resources()) {
-    if (hasSourceType(resource, Resource::DiskInfo::Source::RAW)) {
-      source = resource;
-      break;
-    }
-  }
+  auto isMountDisk = [](const Resource& r, const string& profile) {
+    return r.has_disk() &&
+      r.disk().has_source() &&
+      r.disk().source().type() == Resource::DiskInfo::Source::MOUNT &&
+      r.disk().source().has_vendor() &&
+      r.disk().source().vendor() == TEST_CSI_VENDOR &&
+      r.disk().source().has_id() &&
+      r.disk().source().has_profile() &&
+      r.disk().source().profile() == profile;
+  };
 
-  ASSERT_SOME(source);
-
-  // Create a volume.
+  // Create a MOUNT disk of profile 'test1'.
   EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
-      std::bind(hasSourceType, lambda::_1, Resource::DiskInfo::Source::MOUNT))))
-    .InSequence(offers)
-    .WillOnce(FutureArg<1>(&volumeCreatedOffers));
+      std::bind(isMountDisk, lambda::_1, "test1"))))
+    .WillOnce(FutureArg<1>(&diskCreatedOffers));
 
   // We use the following filter so that the resources will not be
   // filtered for 5 seconds (the default).
@@ -1516,34 +1562,29 @@ TEST_F(StorageLocalResourceProviderTest, AgentRegisteredWithNewId)
 
   driver.acceptOffers(
       {rawDiskOffers->at(0).id()},
-      {CREATE_DISK(source.get(), Resource::DiskInfo::Source::MOUNT)},
+      {CREATE_DISK(raw, Resource::DiskInfo::Source::MOUNT)},
       acceptFilters);
 
-  AWAIT_READY(volumeCreatedOffers);
-  ASSERT_FALSE(volumeCreatedOffers->empty());
+  AWAIT_READY(diskCreatedOffers);
+  ASSERT_EQ(1u, diskCreatedOffers->size());
 
-  Option<Resource> createdVolume;
+  Resource created = *Resources(diskCreatedOffers->at(0).resources())
+    .filter(std::bind(isMountDisk, lambda::_1, "test1"))
+    .begin();
 
-  foreach (const Resource& resource, volumeCreatedOffers->at(0).resources()) {
-    if (hasSourceType(resource, Resource::DiskInfo::Source::MOUNT)) {
-      createdVolume = resource;
-      break;
-    }
-  }
-
-  ASSERT_SOME(createdVolume);
-  ASSERT_TRUE(createdVolume->has_provider_id());
-  ASSERT_TRUE(createdVolume->disk().source().has_id());
-  ASSERT_TRUE(createdVolume->disk().source().has_metadata());
-  ASSERT_TRUE(createdVolume->disk().source().has_mount());
-  ASSERT_TRUE(createdVolume->disk().source().mount().has_root());
-  EXPECT_FALSE(path::absolute(createdVolume->disk().source().mount().root()));
+  ASSERT_TRUE(created.has_provider_id());
+  ASSERT_TRUE(created.disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, created.disk().source().vendor());
+  ASSERT_TRUE(created.disk().source().has_id());
+  ASSERT_TRUE(created.disk().source().has_metadata());
+  ASSERT_TRUE(created.disk().source().has_mount());
+  ASSERT_TRUE(created.disk().source().mount().has_root());
+  EXPECT_FALSE(path::absolute(created.disk().source().mount().root()));
 
   // Check if the volume is actually created by the test CSI plugin.
   Option<string> volumePath;
 
-  foreach (const Label& label,
-           createdVolume->disk().source().metadata().labels()) {
+  foreach (const Label& label, created.disk().source().metadata().labels()) {
     if (label.key() == "path") {
       volumePath = label.value();
       break;
@@ -1554,7 +1595,14 @@ TEST_F(StorageLocalResourceProviderTest, AgentRegisteredWithNewId)
   EXPECT_TRUE(os::exists(volumePath.get()));
 
   // Shut down the agent.
-  EXPECT_CALL(sched, offerRescinded(_, _));
+  //
+  // NOTE: In addition to the last offer being rescinded, the master may send
+  // an offer after receiving an `UpdateSlaveMessage` containing only the
+  // preprovisioned volume, and then receive another `UpdateSlaveMessage`
+  // containing both the volume and a 'test1' storage pool of before the offer
+  // gets declined. In this case, the offer will be rescinded as well.
+  EXPECT_CALL(sched, offerRescinded(&driver, _))
+    .Times(Between(1, 2));
 
   slave.get()->terminate();
 
@@ -1562,23 +1610,36 @@ TEST_F(StorageLocalResourceProviderTest, AgentRegisteredWithNewId)
   const string metaDir = slave::paths::getMetaRootDir(slaveFlags.work_dir);
   ASSERT_SOME(os::rm(slave::paths::getLatestSlavePath(metaDir)));
 
+  // NOTE: We setup up the resource provider with an extra storage pool, so that
+  // when the storage pool is offered, we know that the corresponding profile is
+  // known to the resource provider.
+  setupResourceProviderConfig(Gigabytes(4), None(), "label=foo");
+
   // A new registration would trigger another `SlaveRegisteredMessage`.
   slaveRegisteredMessage =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, Not(slave.get()->pid));
 
   // After the agent fails over, any volume created before becomes a
-  // pre-existing volume, which has an ID but no profile.
-  auto isPreExistingVolume = [](const Resource& r) {
+  // preprovisioned volume, which has an ID but no profile.
+  auto isPreprovisionedVolume = [](const Resource& r) {
     return r.has_disk() &&
       r.disk().has_source() &&
+      r.disk().source().type() == Resource::DiskInfo::Source::RAW &&
+      r.disk().source().has_vendor() &&
+      r.disk().source().vendor() == TEST_CSI_VENDOR &&
       r.disk().source().has_id() &&
       !r.disk().source().has_profile();
   };
 
+  // NOTE: Instead of expecting a preprovisioned volume, we expect an offer with
+  // a 'test1' storage pool as an indication that the profile is known to the
+  // resource provider. The offer should also have the preprovisioned volume.
+  // But, an extra offer with the storage pool may be received as a side effect
+  // of this workaround, so we decline it if this happens.
   EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
-      isPreExistingVolume)))
-    .InSequence(offers)
-    .WillOnce(FutureArg<1>(&slaveRecoveredOffers));
+      std::bind(isStoragePool, lambda::_1, "test1"))))
+    .WillOnce(FutureArg<1>(&slaveRecoveredOffers))
+    .WillRepeatedly(DeclineOffers(declineFilters));
 
   slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
@@ -1586,23 +1647,65 @@ TEST_F(StorageLocalResourceProviderTest, AgentRegisteredWithNewId)
   AWAIT_READY(slaveRegisteredMessage);
 
   AWAIT_READY(slaveRecoveredOffers);
-  ASSERT_FALSE(slaveRecoveredOffers->empty());
+  ASSERT_EQ(1u, slaveRecoveredOffers->size());
 
-  Option<Resource> preExistingVolume;
+  Resources _preprovisioned = Resources(slaveRecoveredOffers->at(0).resources())
+    .filter(isPreprovisionedVolume);
 
-  foreach (const Resource& resource, slaveRecoveredOffers->at(0).resources()) {
-    if (isPreExistingVolume(resource) &&
-        resource.disk().source().type() == Resource::DiskInfo::Source::RAW) {
-      preExistingVolume = resource;
-    }
-  }
+  ASSERT_SOME_EQ(Gigabytes(2), _preprovisioned.disk());
 
-  ASSERT_SOME(preExistingVolume);
-  ASSERT_TRUE(preExistingVolume->has_provider_id());
-  ASSERT_NE(createdVolume->provider_id(), preExistingVolume->provider_id());
+  Resource preprovisioned = *_preprovisioned.begin();
+  ASSERT_TRUE(preprovisioned.has_provider_id());
+  ASSERT_NE(created.provider_id(), preprovisioned.provider_id());
+  ASSERT_EQ(created.disk().source().id(), preprovisioned.disk().source().id());
   ASSERT_EQ(
-      createdVolume->disk().source().id(),
-      preExistingVolume->disk().source().id());
+      created.disk().source().metadata(),
+      preprovisioned.disk().source().metadata());
+
+  // Apply profile 'test2' to the preprovisioned volume, which will fail.
+  EXPECT_CALL(
+      sched, resourceOffers(&driver, OffersHaveResource(preprovisioned)))
+    .WillOnce(FutureArg<1>(&operationFailedOffers));
+
+  Future<UpdateOperationStatusMessage> operationFailedStatus =
+    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
+
+  driver.acceptOffers(
+      {slaveRecoveredOffers->at(0).id()},
+      {CREATE_DISK(preprovisioned, Resource::DiskInfo::Source::MOUNT, "test2")},
+      acceptFilters);
+
+  AWAIT_READY(operationFailedStatus);
+  EXPECT_EQ(OPERATION_FAILED, operationFailedStatus->status().state());
+
+  AWAIT_READY(operationFailedOffers);
+  ASSERT_EQ(1u, operationFailedOffers->size());
+
+  // Apply profile 'test1' to the preprovisioned volume, which will succeed.
+  EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
+      std::bind(isMountDisk, lambda::_1, "test1"))))
+    .WillOnce(FutureArg<1>(&diskRecoveredOffers));
+
+  driver.acceptOffers(
+      {operationFailedOffers->at(0).id()},
+      {CREATE_DISK(preprovisioned, Resource::DiskInfo::Source::MOUNT, "test1")},
+      acceptFilters);
+
+  AWAIT_READY(diskRecoveredOffers);
+  ASSERT_EQ(1u, diskRecoveredOffers->size());
+
+  Resource recovered = *Resources(diskRecoveredOffers->at(0).resources())
+    .filter(std::bind(isMountDisk, lambda::_1, "test1"))
+    .begin();
+
+  ASSERT_EQ(preprovisioned.provider_id(), recovered.provider_id());
+
+  ASSERT_EQ(
+      preprovisioned.disk().source().id(), recovered.disk().source().id());
+
+  ASSERT_EQ(
+      preprovisioned.disk().source().metadata(),
+      recovered.disk().source().metadata());
 }
 
 
@@ -1612,7 +1715,10 @@ TEST_F(StorageLocalResourceProviderTest, AgentRegisteredWithNewId)
 TEST_F(StorageLocalResourceProviderTest, ROOT_PublishResources)
 {
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -1730,6 +1836,8 @@ TEST_F(StorageLocalResourceProviderTest, ROOT_PublishResources)
   }
 
   ASSERT_SOME(volume);
+  ASSERT_TRUE(volume->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, volume->disk().source().vendor());
   ASSERT_TRUE(volume->disk().source().has_id());
   ASSERT_TRUE(volume->disk().source().has_metadata());
   ASSERT_TRUE(volume->disk().source().has_mount());
@@ -1821,7 +1929,10 @@ TEST_F(StorageLocalResourceProviderTest, ROOT_PublishResources)
 TEST_F(StorageLocalResourceProviderTest, ROOT_PublishResourcesRecovery)
 {
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -1944,6 +2055,8 @@ TEST_F(StorageLocalResourceProviderTest, ROOT_PublishResourcesRecovery)
   }
 
   ASSERT_SOME(volume);
+  ASSERT_TRUE(volume->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, volume->disk().source().vendor());
   ASSERT_TRUE(volume->disk().source().has_id());
   ASSERT_TRUE(volume->disk().source().has_metadata());
   ASSERT_TRUE(volume->disk().source().has_mount());
@@ -2087,7 +2200,10 @@ TEST_F(StorageLocalResourceProviderTest, ROOT_PublishResourcesRecovery)
 TEST_F(StorageLocalResourceProviderTest, ROOT_PublishResourcesReboot)
 {
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -2210,6 +2326,8 @@ TEST_F(StorageLocalResourceProviderTest, ROOT_PublishResourcesReboot)
   }
 
   ASSERT_SOME(volume);
+  ASSERT_TRUE(volume->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, volume->disk().source().vendor());
   ASSERT_TRUE(volume->disk().source().has_id());
   ASSERT_TRUE(volume->disk().source().has_metadata());
   ASSERT_TRUE(volume->disk().source().has_mount());
@@ -2394,7 +2512,10 @@ TEST_F(
     ROOT_PublishUnpublishResourcesPluginKilled)
 {
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -2541,6 +2662,8 @@ TEST_F(
   }
 
   ASSERT_SOME(volume);
+  ASSERT_TRUE(volume->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, volume->disk().source().vendor());
   ASSERT_TRUE(volume->disk().source().has_id());
   ASSERT_TRUE(volume->disk().source().has_metadata());
   ASSERT_TRUE(volume->disk().source().has_mount());
@@ -2651,50 +2774,36 @@ TEST_F(
 }
 
 
-// This test verifies that the storage local resource provider can
-// convert pre-existing CSI volumes into mount or block volumes.
-TEST_F(StorageLocalResourceProviderTest, ConvertPreExistingVolume)
+// This test verifies that the storage local resource provider can import a
+// preprovisioned CSI volume as a MOUNT disk of a given profile, and return the
+// space back to the storage pool after destroying the volume.
+TEST_F(StorageLocalResourceProviderTest, ImportPreprovisionedVolume)
 {
-  Clock::pause();
+  const string profilesPath = path::join(sandbox.get(), "profiles.json");
 
-  setupResourceProviderConfig(Bytes(0), "volume1:2GB;volume2:2GB");
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
 
-  master::Flags masterFlags = CreateMasterFlags();
-  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  loadUriDiskProfileAdaptorModule(profilesPath);
+
+  // NOTE: We setup up the resource provider with an extra storage pool, so that
+  // when the storage pool is offered, we know that the corresponding profile is
+  // known to the resource provider.
+  setupResourceProviderConfig(Gigabytes(2), "volume1:2GB");
+
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   Owned<MasterDetector> detector = master.get()->createDetector();
 
   slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.disk_profile_adaptor = URI_DISK_PROFILE_ADAPTOR_NAME;
 
-  // Since the local resource provider daemon is started after the agent
-  // is registered, it is guaranteed that the slave will send two
-  // `UpdateSlaveMessage`s, where the latter one contains resources from
-  // the storage local resource provider.
-  // NOTE: The order of the two `FUTURE_PROTOBUF`s is reversed because
-  // Google Mock will search the expectations in reverse order.
-  Future<UpdateSlaveMessage> updateSlave2 =
-    FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
-  Future<UpdateSlaveMessage> updateSlave1 =
-    FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
-
-  // Advance the clock to trigger agent registration and prevent retry.
-  Clock::advance(slaveFlags.registration_backoff_factor);
-
-  AWAIT_READY(updateSlave1);
-
-  // NOTE: We need to resume the clock so that the resource provider can
-  // periodically check if the CSI endpoint socket has been created by
-  // the plugin container, which runs in another Linux process.
-  Clock::resume();
-
-  AWAIT_READY(updateSlave2);
-  ASSERT_TRUE(updateSlave2->has_resource_providers());
-
-  Clock::pause();
 
   // Register a framework to exercise operations.
   FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
@@ -2707,147 +2816,134 @@ TEST_F(StorageLocalResourceProviderTest, ConvertPreExistingVolume)
   EXPECT_CALL(sched, registered(&driver, _, _));
 
   // The framework is expected to see the following offers in sequence:
-  //   1. One containing two RAW pre-existing volumes before `CREATE_DISK`s.
-  //   2. One containing a MOUNT and a BLOCK disk resources after
-  //      `CREATE_DISK`s.
-  //   3. One containing two RAW pre-existing volumes after `DESTROY_DISK`s.
+  //   1. One containing a RAW preprovisioned volumes before `CREATE_DISK`.
+  //   2. One containing a MOUNT disk resources after `CREATE_DISK`.
+  //   3. One containing a RAW storage pool after `DESTROY_DISK`.
   //
   // We set up the expectations for these offers as the test progresses.
-  Future<vector<Offer>> rawDisksOffers;
-  Future<vector<Offer>> disksConvertedOffers;
-  Future<vector<Offer>> disksRevertedOffers;
+  Future<vector<Offer>> rawDiskOffers;
+  Future<vector<Offer>> diskCreatedOffers;
+  Future<vector<Offer>> diskDestroyedOffers;
 
-  // We are only interested in any pre-existing volume, which has an ID
-  // but no profile.
-  auto isPreExistingVolume = [](const Resource& r) {
+  // We use the following filter to filter offers that do not have
+  // wanted resources for 365 days (the maximum).
+  Filters declineFilters;
+  declineFilters.set_refuse_seconds(Days(365).secs());
+
+  // Decline offers that contain only the agent's default resources.
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillRepeatedly(DeclineOffers(declineFilters));
+
+  auto isStoragePool = [](const Resource& r, const string& profile) {
     return r.has_disk() &&
       r.disk().has_source() &&
+      r.disk().source().type() == Resource::DiskInfo::Source::RAW &&
+      r.disk().source().has_vendor() &&
+      r.disk().source().vendor() == TEST_CSI_VENDOR &&
+      !r.disk().source().has_id() &&
+      r.disk().source().has_profile() &&
+      r.disk().source().profile() == profile;
+  };
+
+  // NOTE: Instead of expecting a preprovisioned volume, we expect an offer with
+  // a 'test1' storage pool as an indication that the profile is known to the
+  // resource provider. The offer should also have the preprovisioned volume.
+  // But, an extra offer with the storage pool may be received as a side effect
+  // of this workaround, so we decline it if this happens.
+  EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
+      std::bind(isStoragePool, lambda::_1, "test"))))
+    .WillOnce(FutureArg<1>(&rawDiskOffers))
+    .WillRepeatedly(DeclineOffers(declineFilters));
+
+  driver.start();
+
+  AWAIT_READY(rawDiskOffers);
+  ASSERT_EQ(1u, rawDiskOffers->size());
+
+  auto isPreprovisionedVolume = [](const Resource& r) {
+    return r.has_disk() &&
+      r.disk().has_source() &&
+      r.disk().source().type() == Resource::DiskInfo::Source::RAW &&
+      r.disk().source().has_vendor() &&
+      r.disk().source().vendor() == TEST_CSI_VENDOR &&
       r.disk().source().has_id() &&
       !r.disk().source().has_profile();
   };
 
-  EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
-      isPreExistingVolume)))
-    .WillOnce(FutureArg<1>(&rawDisksOffers));
+  Resources _preprovisioned = Resources(rawDiskOffers->at(0).resources())
+    .filter(isPreprovisionedVolume);
 
-  driver.start();
+  ASSERT_SOME_EQ(Gigabytes(2), _preprovisioned.disk());
 
-  AWAIT_READY(rawDisksOffers);
-  ASSERT_FALSE(rawDisksOffers->empty());
+  Resource preprovisioned = *_preprovisioned.begin();
 
-  vector<Resource> sources;
+  // Get the volume path of the preprovisioned volume.
+  Option<string> volumePath;
 
-  foreach (const Resource& resource, rawDisksOffers->at(0).resources()) {
-    if (isPreExistingVolume(resource) &&
-        resource.disk().source().type() == Resource::DiskInfo::Source::RAW) {
-      sources.push_back(resource);
+  foreach (const Label& label,
+           preprovisioned.disk().source().metadata().labels()) {
+    if (label.key() == "path") {
+      volumePath = label.value();
+      break;
     }
   }
 
-  ASSERT_EQ(2u, sources.size());
+  ASSERT_SOME(volumePath);
+  ASSERT_TRUE(os::exists(volumePath.get()));
 
-  // Create a volume and a block.
+  auto isMountDisk = [](const Resource& r, const string& profile) {
+    return r.has_disk() &&
+      r.disk().has_source() &&
+      r.disk().source().type() == Resource::DiskInfo::Source::MOUNT &&
+      r.disk().source().has_vendor() &&
+      r.disk().source().vendor() == TEST_CSI_VENDOR &&
+      r.disk().source().has_id() &&
+      r.disk().source().has_profile() &&
+      r.disk().source().profile() == profile;
+  };
+
+  // Apply profile 'test' to the preprovisioned volume.
   EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
-      isPreExistingVolume)))
-    .WillOnce(FutureArg<1>(&disksConvertedOffers));
+      std::bind(isMountDisk, lambda::_1, "test"))))
+    .WillOnce(FutureArg<1>(&diskCreatedOffers));
 
-  // NOTE: The order of the two `FUTURE_PROTOBUF`s is reversed because
-  // Google Mock will search the expectations in reverse order.
-  Future<UpdateOperationStatusMessage> createBlockStatusUpdate =
-    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
-  Future<UpdateOperationStatusMessage> createVolumeStatusUpdate =
-    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
+  // We use the following filter so that the resources will not be
+  // filtered for 5 seconds (the default).
+  Filters acceptFilters;
+  acceptFilters.set_refuse_seconds(0);
 
   driver.acceptOffers(
-      {rawDisksOffers->at(0).id()},
-      {CREATE_DISK(sources.at(0), Resource::DiskInfo::Source::MOUNT),
-       CREATE_DISK(sources.at(1), Resource::DiskInfo::Source::BLOCK)});
+      {rawDiskOffers->at(0).id()},
+      {CREATE_DISK(preprovisioned, Resource::DiskInfo::Source::MOUNT, "test")},
+      acceptFilters);
 
-  AWAIT_READY(createVolumeStatusUpdate);
-  AWAIT_READY(createBlockStatusUpdate);
+  AWAIT_READY(diskCreatedOffers);
+  ASSERT_EQ(1u, diskCreatedOffers->size());
 
-  // Advance the clock to trigger another allocation.
-  Clock::advance(masterFlags.allocation_interval);
+  Resource created = *Resources(diskCreatedOffers->at(0).resources())
+    .filter(std::bind(isMountDisk, lambda::_1, "test"))
+    .begin();
 
-  AWAIT_READY(disksConvertedOffers);
-  ASSERT_FALSE(disksConvertedOffers->empty());
-
-  Option<Resource> volume;
-  Option<Resource> block;
-
-  foreach (const Resource& resource, disksConvertedOffers->at(0).resources()) {
-    if (isPreExistingVolume(resource)) {
-      if (resource.disk().source().type() ==
-            Resource::DiskInfo::Source::MOUNT) {
-        volume = resource;
-      } else if (resource.disk().source().type() ==
-                   Resource::DiskInfo::Source::BLOCK) {
-        block = resource;
-      }
-    }
-  }
-
-  ASSERT_SOME(volume);
-  ASSERT_TRUE(volume->disk().source().has_mount());
-  ASSERT_TRUE(volume->disk().source().mount().has_root());
-  EXPECT_FALSE(path::absolute(volume->disk().source().mount().root()));
-
-  ASSERT_SOME(block);
-
-  // Destroy the created volume.
+  // Destroy the created disk.
   EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
-      isPreExistingVolume)))
-    .WillOnce(FutureArg<1>(&disksRevertedOffers));
-
-  // NOTE: The order of the two `FUTURE_PROTOBUF`s is reversed because
-  // Google Mock will search the expectations in reverse order.
-  Future<UpdateOperationStatusMessage> destroyBlockStatusUpdate =
-    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
-  Future<UpdateOperationStatusMessage> destroyVolumeStatusUpdate =
-    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
+      std::bind(isStoragePool, lambda::_1, "test"))))
+    .WillOnce(FutureArg<1>(&diskDestroyedOffers));
 
   driver.acceptOffers(
-      {disksConvertedOffers->at(0).id()},
-      {DESTROY_DISK(volume.get()),
-       DESTROY_DISK(block.get())});
+      {diskCreatedOffers->at(0).id()},
+      {DESTROY_DISK(created)},
+      acceptFilters);
 
-  AWAIT_READY(destroyVolumeStatusUpdate);
-  AWAIT_READY(destroyBlockStatusUpdate);
+  AWAIT_READY(diskDestroyedOffers);
+  ASSERT_EQ(1u, diskDestroyedOffers->size());
 
-  // Advance the clock to trigger another allocation.
-  Clock::advance(masterFlags.allocation_interval);
+  Resources raw = Resources(diskDestroyedOffers->at(0).resources())
+    .filter(std::bind(isStoragePool, lambda::_1, "test"));
 
-  AWAIT_READY(disksRevertedOffers);
-  ASSERT_FALSE(disksRevertedOffers->empty());
+  EXPECT_SOME_EQ(Gigabytes(4), raw.disk());
 
-  vector<Resource> destroyed;
-
-  foreach (const Resource& resource, disksRevertedOffers->at(0).resources()) {
-    if (isPreExistingVolume(resource) &&
-        resource.disk().source().type() == Resource::DiskInfo::Source::RAW) {
-      destroyed.push_back(resource);
-    }
-  }
-
-  ASSERT_EQ(2u, destroyed.size());
-
-  foreach (const Resource& resource, destroyed) {
-    ASSERT_FALSE(resource.disk().source().has_mount());
-    ASSERT_TRUE(resource.disk().source().has_metadata());
-
-    // Check if the volume is not deleted by the test CSI plugin.
-    Option<string> volumePath;
-
-    foreach (const Label& label, resource.disk().source().metadata().labels()) {
-      if (label.key() == "path") {
-        volumePath = label.value();
-        break;
-      }
-    }
-
-    ASSERT_SOME(volumePath);
-    EXPECT_TRUE(os::exists(volumePath.get()));
-  }
+  // Check if the volume is deleted by the test CSI plugin.
+  EXPECT_FALSE(os::exists(volumePath.get()));
 }
 
 
@@ -2865,7 +2961,10 @@ TEST_F(StorageLocalResourceProviderTest, RetryOperationStatusUpdate)
   Clock::pause();
 
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -3020,7 +3119,10 @@ TEST_F(
   Clock::pause();
 
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -3260,6 +3362,169 @@ TEST_F(
 }
 
 
+// This test verifies that operation status updates contain the
+// agent ID and resource provider ID of originating providers.
+TEST_F(StorageLocalResourceProviderTest, OperationUpdate)
+{
+  Clock::pause();
+
+  const string profilesPath = path::join(sandbox.get(), "profiles.json");
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
+  loadUriDiskProfileAdaptorModule(profilesPath);
+
+  setupResourceProviderConfig(Gigabytes(4));
+
+  master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.disk_profile_adaptor = URI_DISK_PROFILE_ADAPTOR_NAME;
+
+  // Since the local resource provider daemon is started after the agent
+  // is registered, it is guaranteed that the slave will send two
+  // `UpdateSlaveMessage`s, where the latter one contains resources from
+  // the storage local resource provider.
+  //
+  // NOTE: The order of the two `FUTURE_PROTOBUF`s is reversed because
+  // Google Mock will search the expectations in reverse order.
+  Future<UpdateSlaveMessage> updateSlave2 =
+    FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
+  Future<UpdateSlaveMessage> updateSlave1 =
+    FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), flags);
+  ASSERT_SOME(slave);
+
+  // Advance the clock to trigger agent registration.
+  Clock::advance(flags.registration_backoff_factor);
+
+  AWAIT_READY(updateSlave1);
+
+  // NOTE: We need to resume the clock so that the resource provider can
+  // periodically check if the CSI endpoint socket has been created by
+  // the plugin container, which runs in another Linux process.
+  Clock::resume();
+
+  AWAIT_READY(updateSlave2);
+  ASSERT_TRUE(updateSlave2->has_resource_providers());
+  ASSERT_EQ(1, updateSlave2->resource_providers().providers_size());
+
+  Clock::pause();
+
+  // Register a framework to exercise an operation.
+  v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_roles(0, "storage");
+
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(v1::scheduler::SendSubscribe(frameworkInfo));
+
+  Future<v1::scheduler::Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  // Decline offers that do not contain wanted resources.
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillRepeatedly(v1::scheduler::DeclineOffers());
+
+  Future<v1::scheduler::Event::Offers> offers;
+
+  auto isRaw = [](const v1::Resource& r) {
+    return r.has_disk() &&
+      r.disk().has_source() &&
+      r.disk().source().has_profile() &&
+      r.disk().source().type() == v1::Resource::DiskInfo::Source::RAW;
+  };
+
+  EXPECT_CALL(
+      *scheduler, offers(_, v1::scheduler::OffersHaveAnyResource(isRaw)))
+    .WillOnce(FutureArg<1>(&offers));
+
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid,
+      ContentType::PROTOBUF,
+      scheduler);
+
+  AWAIT_READY(subscribed);
+
+  const v1::FrameworkID& frameworkId = subscribed->framework_id();
+
+  // NOTE: If the framework has not declined an unwanted offer yet when
+  // the master updates the agent with the RAW disk resource, the new
+  // allocation triggered by this update won't generate an allocatable
+  // offer due to no CPU and memory resources. So here we first settle
+  // the clock to ensure that the unwanted offer has been declined, then
+  // advance the clock to trigger another allocation.
+  Clock::settle();
+  Clock::advance(masterFlags.allocation_interval);
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->offers().empty());
+
+  const v1::Offer& offer = offers->offers(0);
+
+  const v1::AgentID& agentId = offer.agent_id();
+
+  Option<v1::Resource> source;
+  Option<mesos::v1::ResourceProviderID> resourceProviderId;
+  foreach (const v1::Resource& resource, offer.resources()) {
+    if (isRaw(resource)) {
+      source = resource;
+
+      ASSERT_TRUE(resource.has_provider_id());
+      resourceProviderId = resource.provider_id();
+
+      break;
+    }
+  }
+
+  ASSERT_SOME(source);
+  ASSERT_SOME(resourceProviderId);
+
+  Future<v1::scheduler::Event::UpdateOperationStatus> update;
+
+  EXPECT_CALL(*scheduler, updateOperationStatus(_, _))
+    .WillOnce(FutureArg<1>(&update))
+    .WillRepeatedly(Return()); // Ignore subsequent updates.
+
+  // Create a volume.
+  v1::OperationID operationId;
+  operationId.set_value("operation");
+
+  mesos.send(v1::createCallAccept(
+      frameworkId,
+      offer,
+      {v1::CREATE_DISK(
+           source.get(),
+           v1::Resource::DiskInfo::Source::MOUNT,
+           None(),
+           operationId)}));
+
+  AWAIT_READY(update);
+
+  ASSERT_EQ(operationId, update->status().operation_id());
+  ASSERT_EQ(
+      mesos::v1::OperationState::OPERATION_FINISHED, update->status().state());
+  ASSERT_TRUE(update->status().has_uuid());
+
+  ASSERT_TRUE(update->status().has_agent_id());
+  EXPECT_EQ(agentId, update->status().agent_id());
+
+  ASSERT_TRUE(update->status().has_resource_provider_id());
+  EXPECT_EQ(resourceProviderId.get(), update->status().resource_provider_id());
+}
+
+
 // This test verifies that storage local resource provider properly
 // reports metrics related to operation states.
 // TODO(chhsiao): Currently there is no way to test the `pending` metric for
@@ -3269,7 +3534,10 @@ TEST_F(
 TEST_F(StorageLocalResourceProviderTest, OperationStateMetrics)
 {
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -3398,6 +3666,8 @@ TEST_F(StorageLocalResourceProviderTest, OperationStateMetrics)
   }
 
   ASSERT_SOME(volume);
+  ASSERT_TRUE(volume->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, volume->disk().source().vendor());
   ASSERT_TRUE(volume->disk().source().has_id());
   ASSERT_TRUE(volume->disk().source().has_metadata());
   ASSERT_TRUE(volume->disk().source().has_mount());
@@ -3514,7 +3784,10 @@ TEST_F(StorageLocalResourceProviderTest, OperationStateMetrics)
 TEST_F(StorageLocalResourceProviderTest, CsiPluginRpcMetrics)
 {
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -3671,6 +3944,8 @@ TEST_F(StorageLocalResourceProviderTest, CsiPluginRpcMetrics)
   }
 
   ASSERT_SOME(volume);
+  ASSERT_TRUE(volume->disk().source().has_vendor());
+  EXPECT_EQ(TEST_CSI_VENDOR, volume->disk().source().vendor());
   ASSERT_TRUE(volume->disk().source().has_id());
   ASSERT_TRUE(volume->disk().source().has_metadata());
   ASSERT_TRUE(volume->disk().source().has_mount());
@@ -3793,15 +4068,23 @@ TEST_F(StorageLocalResourceProviderTest, CsiPluginRpcMetrics)
 
 
 // Master reconciles operations that are missing from a reregistering slave.
-// In this case, the `ApplyOperationMessage` is dropped, so the resource
-// provider should send OPERATION_DROPPED. Operations on agent default
-// resources are also tested here; for such operations, the agent generates the
-// dropped status.
+// In this case, one of the two `ApplyOperationMessage`s is dropped, so the
+// resource provider should send only one OPERATION_DROPPED.
+//
+// TODO(greggomann): Test operations on agent default resources: for such
+// operations, the agent generates the dropped status.
 TEST_F(StorageLocalResourceProviderTest, ReconcileDroppedOperation)
 {
   Clock::pause();
 
-  setupResourceProviderConfig(Bytes(0), "volume1:2GB;volume2:2GB");
+  const string profilesPath = path::join(sandbox.get(), "profiles.json");
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
+  loadUriDiskProfileAdaptorModule(profilesPath);
+
+  setupResourceProviderConfig(Gigabytes(4));
 
   master::Flags masterFlags = CreateMasterFlags();
   Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
@@ -3810,6 +4093,7 @@ TEST_F(StorageLocalResourceProviderTest, ReconcileDroppedOperation)
   StandaloneMasterDetector detector(master.get()->pid);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.disk_profile_adaptor = URI_DISK_PROFILE_ADAPTOR_NAME;
 
   Future<SlaveRegisteredMessage> slaveRegisteredMessage =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
@@ -3865,40 +4149,33 @@ TEST_F(StorageLocalResourceProviderTest, ReconcileDroppedOperation)
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillRepeatedly(DeclineOffers(declineFilters));
 
-  // We are only interested in pre-existing volumes, which have IDs but no
-  // profile. We use pre-existing volumes to make it easy to send multiple
-  // operations on multiple resources.
-  auto isPreExistingVolume = [](const Resource& r) {
+  auto isRaw = [](const Resource& r) {
     return r.has_disk() &&
       r.disk().has_source() &&
-      r.disk().source().has_id() &&
-      !r.disk().source().has_profile();
+      r.disk().source().has_profile() &&
+      r.disk().source().type() == Resource::DiskInfo::Source::RAW;
   };
 
   Future<vector<Offer>> offersBeforeOperations;
 
-  EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
-      isPreExistingVolume)))
+  EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(isRaw)))
     .WillOnce(FutureArg<1>(&offersBeforeOperations))
     .WillRepeatedly(DeclineOffers(declineFilters)); // Decline further offers.
 
   driver.start();
 
   AWAIT_READY(offersBeforeOperations);
-  ASSERT_FALSE(offersBeforeOperations->empty());
+  ASSERT_EQ(1u, offersBeforeOperations->size());
 
-  vector<Resource> sources;
+  Resources raw =
+    Resources(offersBeforeOperations->at(0).resources()).filter(isRaw);
 
-  foreach (
-      const Resource& resource,
-      offersBeforeOperations->at(0).resources()) {
-    if (isPreExistingVolume(resource) &&
-        resource.disk().source().type() == Resource::DiskInfo::Source::RAW) {
-      sources.push_back(resource);
-    }
-  }
-
-  ASSERT_EQ(2u, sources.size());
+  // Create two MOUNT disks of 2GB each.
+  ASSERT_SOME_EQ(Gigabytes(4), raw.disk());
+  Resource source1 = *raw.begin();
+  source1.mutable_scalar()->set_value(
+      static_cast<double>(Gigabytes(2).bytes()) / Bytes::MEGABYTES);
+  Resource source2 = *(raw - source1).begin();
 
   // Drop one of the operations on the way to the agent.
   Future<ApplyOperationMessage> applyOperationMessage =
@@ -3916,8 +4193,8 @@ TEST_F(StorageLocalResourceProviderTest, ReconcileDroppedOperation)
   // Attempt the creation of two volumes.
   driver.acceptOffers(
       {offersBeforeOperations->at(0).id()},
-      {CREATE_DISK(sources.at(0), Resource::DiskInfo::Source::MOUNT),
-       CREATE_DISK(sources.at(1), Resource::DiskInfo::Source::MOUNT)},
+      {CREATE_DISK(source1, Resource::DiskInfo::Source::MOUNT),
+       CREATE_DISK(source2, Resource::DiskInfo::Source::MOUNT)},
       acceptFilters);
 
   // Ensure that the operations are processed.
@@ -3964,8 +4241,15 @@ TEST_F(StorageLocalResourceProviderTest, ReconcileDroppedOperation)
 
   Future<vector<Offer>> offersAfterOperations;
 
-  EXPECT_CALL(sched, resourceOffers(&driver, OffersHaveAnyResource(
-      isPreExistingVolume)))
+  auto isMountDisk = [](const Resource& r) {
+    return r.has_disk() &&
+      r.disk().has_source() &&
+      r.disk().source().has_profile() &&
+      r.disk().source().type() == Resource::DiskInfo::Source::MOUNT;
+  };
+
+  EXPECT_CALL(
+      sched, resourceOffers(&driver, OffersHaveAnyResource(isMountDisk)))
     .WillOnce(FutureArg<1>(&offersAfterOperations));
 
   // Advance the clock to trigger a batch allocation.
@@ -3974,14 +4258,8 @@ TEST_F(StorageLocalResourceProviderTest, ReconcileDroppedOperation)
   AWAIT_READY(offersAfterOperations);
   ASSERT_FALSE(offersAfterOperations->empty());
 
-  vector<Resource> converted;
-
-  foreach (const Resource& resource, offersAfterOperations->at(0).resources()) {
-    if (isPreExistingVolume(resource) &&
-        resource.disk().source().type() == Resource::DiskInfo::Source::MOUNT) {
-      converted.push_back(resource);
-    }
-  }
+  Resources converted =
+    Resources(offersAfterOperations->at(0).resources()).filter(isMountDisk);
 
   ASSERT_EQ(1u, converted.size());
 
@@ -3998,14 +4276,15 @@ TEST_F(StorageLocalResourceProviderTest, ReconcileDroppedOperation)
 
 // This test verifies that if an operation ID is specified, operation status
 // updates are resent to the scheduler until acknowledged.
-TEST_F(
-    StorageLocalResourceProviderTest,
-    RetryOperationStatusUpdateToScheduler)
+TEST_F(StorageLocalResourceProviderTest, RetryOperationStatusUpdateToScheduler)
 {
   Clock::pause();
 
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -4129,16 +4408,21 @@ TEST_F(
     .WillOnce(FutureArg<1>(&retriedUpdate));
 
   // Create a volume.
-  const string operationId = "operation";
+  v1::OperationID operationId;
+  operationId.set_value("operation");
+
   mesos.send(v1::createCallAccept(
       frameworkId,
       offer,
       {v1::CREATE_DISK(
-          source.get(), v1::Resource::DiskInfo::Source::MOUNT, operationId)}));
+           source.get(),
+           v1::Resource::DiskInfo::Source::MOUNT,
+           None(),
+           operationId)}));
 
   AWAIT_READY(update);
 
-  ASSERT_EQ(operationId, update->status().operation_id().value());
+  ASSERT_EQ(operationId, update->status().operation_id());
   ASSERT_EQ(
       mesos::v1::OperationState::OPERATION_FINISHED, update->status().state());
   ASSERT_TRUE(update->status().has_uuid());
@@ -4152,7 +4436,7 @@ TEST_F(
   // should resend it after the status update retry interval minimum.
   AWAIT_READY(retriedUpdate);
 
-  ASSERT_EQ(operationId, retriedUpdate->status().operation_id().value());
+  ASSERT_EQ(operationId, retriedUpdate->status().operation_id());
   ASSERT_EQ(
       mesos::v1::OperationState::OPERATION_FINISHED,
       retriedUpdate->status().state());
@@ -4188,7 +4472,10 @@ TEST_F(
   Clock::pause();
 
   const string profilesPath = path::join(sandbox.get(), "profiles.json");
-  ASSERT_SOME(os::write(profilesPath, createDiskProfileMapping("test")));
+
+  ASSERT_SOME(
+      os::write(profilesPath, createDiskProfileMapping({{"test", None()}})));
+
   loadUriDiskProfileAdaptorModule(profilesPath);
 
   setupResourceProviderConfig(Gigabytes(4));
@@ -4316,9 +4603,10 @@ TEST_F(
       frameworkId,
       offer,
       {v1::CREATE_DISK(
-          source.get(),
-          v1::Resource::DiskInfo::Source::MOUNT,
-          operationId.value())}));
+           source.get(),
+           v1::Resource::DiskInfo::Source::MOUNT,
+           None(),
+           operationId)}));
 
   AWAIT_READY(update);
 

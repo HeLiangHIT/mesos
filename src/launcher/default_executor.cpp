@@ -295,6 +295,10 @@ public:
         break;
       }
 
+      case Event::HEARTBEAT: {
+        break;
+      }
+
       case Event::UNKNOWN: {
         LOG(WARNING) << "Received an UNKNOWN event and ignored";
         break;
@@ -953,9 +957,9 @@ protected:
     forward(taskStatus);
 
     LOG(INFO)
-      << "Child container " << container->containerId << " of task '" << taskId
-      << "' completed in state " << stringify(taskState)
-      << ": " << message.get();
+      << "Child container " << container->containerId << " of task '"
+      << taskId << "' completed in state " << stringify(taskState)
+      << (message.isSome() ? ": " + message.get() : "");
 
     // The default restart policy for a task group is to kill all the
     // remaining child containers if one of them terminated with a
