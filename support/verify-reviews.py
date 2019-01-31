@@ -93,12 +93,13 @@ class ReviewError(Exception):
 
 def shell(command):
     """Run a shell command."""
-    print(command)
-    out = subprocess.check_output(command, stderr=subprocess.STDOUT, shell=True)
+    try:
+        out = subprocess.check_output(
+            command, stderr=subprocess.STDOUT, shell=True)
+    except subprocess.CalledProcessError as err:
+        print("Error running command '%s': %s" % (command, err.output))
+        exit(1)
     return out.decode(sys.stdout.encoding)
-
-
-HEAD = shell("git rev-parse HEAD")
 
 
 def api(url, data=None):
@@ -116,7 +117,8 @@ def api(url, data=None):
 
         if isinstance(data, str):
             data = str.encode(data)
-        return json.loads(urllib.request.urlopen(url, data=data).read())
+        f = urllib.request.urlopen(url, data=data)
+        return json.loads(f.read().decode("utf-8"))
     except urllib.error.HTTPError as err:
         print("Error handling URL %s: %s (%s)" % (url, err.reason, err.read()))
         exit(1)
@@ -171,7 +173,9 @@ def cleanup():
     """Clean the git repository."""
     try:
         shell("git clean -fd")
-        shell("git reset --hard %s" % HEAD)
+        HEAD = shell("git rev-parse HEAD")
+        print(HEAD)
+        shell("git checkout HEAD -- %s" % HEAD)
     except subprocess.CalledProcessError as err:
         print("Failed command: %s\n\nError: %s" % (err.cmd, err.output))
 
@@ -205,7 +209,8 @@ def verify_review(review_request):
                              "BUILDTOOL='autotools' "
                              "COMPILER='gcc' "
                              "CONFIGURATION='--verbose "
-                             "--disable-libtool-wrappers' "
+                             "--disable-libtool-wrappers "
+                             "--disable-parallel-test-execution' "
                              "ENVIRONMENT='GLOG_v=1 MESOS_VERBOSE=1'")
 
             command = "%s; ./support/docker-build.sh" % configuration

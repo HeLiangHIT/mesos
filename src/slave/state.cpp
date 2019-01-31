@@ -50,6 +50,7 @@
 
 #include "slave/paths.hpp"
 #include "slave/state.hpp"
+#include "slave/state.pb.h"
 
 namespace mesos {
 namespace internal {
@@ -123,7 +124,9 @@ Try<State> recover(const string& rootDir, bool strict)
   SlaveID slaveId;
   slaveId.set_value(Path(directory.get()).basename());
 
-  Try<SlaveState> slave = SlaveState::recover(rootDir, slaveId, strict);
+  Try<SlaveState> slave =
+    SlaveState::recover(rootDir, slaveId, strict, state.rebooted);
+
   if (slave.isError()) {
     return Error(slave.error());
   }
@@ -137,7 +140,8 @@ Try<State> recover(const string& rootDir, bool strict)
 Try<SlaveState> SlaveState::recover(
     const string& rootDir,
     const SlaveID& slaveId,
-    bool strict)
+    bool strict,
+    bool rebooted)
 {
   SlaveState state;
   state.id = slaveId;
@@ -188,7 +192,7 @@ Try<SlaveState> SlaveState::recover(
     frameworkId.set_value(Path(path).basename());
 
     Try<FrameworkState> framework =
-      FrameworkState::recover(rootDir, slaveId, frameworkId, strict);
+      FrameworkState::recover(rootDir, slaveId, frameworkId, strict, rebooted);
 
     if (framework.isError()) {
       return Error("Failed to recover framework " + frameworkId.value() +
@@ -199,6 +203,31 @@ Try<SlaveState> SlaveState::recover(
     state.errors += framework->errors;
   }
 
+  const string& resourceStatePath = paths::getResourceStatePath(rootDir);
+  if (os::exists(resourceStatePath)) {
+    Result<ResourceState> resourceState =
+      state::read<ResourceState>(resourceStatePath);
+    if (resourceState.isError()) {
+      string message = "Failed to read resource and operations file '" +
+                       resourceStatePath + "': " + resourceState.error();
+
+      if (strict) {
+        return Error(message);
+      } else {
+        LOG(WARNING) << message;
+        state.errors++;
+        return state;
+      }
+    }
+
+    if (resourceState.isSome()) {
+      state.operations = std::vector<Operation>();
+      foreach (const Operation& operation, resourceState->operations()) {
+        state.operations->push_back(operation);
+      }
+    }
+  }
+
   return state;
 }
 
@@ -207,7 +236,8 @@ Try<FrameworkState> FrameworkState::recover(
     const string& rootDir,
     const SlaveID& slaveId,
     const FrameworkID& frameworkId,
-    bool strict)
+    bool strict,
+    bool rebooted)
 {
   FrameworkState state;
   state.id = frameworkId;
@@ -295,8 +325,8 @@ Try<FrameworkState> FrameworkState::recover(
     ExecutorID executorId;
     executorId.set_value(Path(path).basename());
 
-    Try<ExecutorState> executor =
-      ExecutorState::recover(rootDir, slaveId, frameworkId, executorId, strict);
+    Try<ExecutorState> executor = ExecutorState::recover(
+        rootDir, slaveId, frameworkId, executorId, strict, rebooted);
 
     if (executor.isError()) {
       return Error("Failed to recover executor '" + executorId.value() +
@@ -316,7 +346,8 @@ Try<ExecutorState> ExecutorState::recover(
     const SlaveID& slaveId,
     const FrameworkID& frameworkId,
     const ExecutorID& executorId,
-    bool strict)
+    bool strict,
+    bool rebooted)
 {
   ExecutorState state;
   state.id = executorId;
@@ -356,7 +387,13 @@ Try<ExecutorState> ExecutorState::recover(
       containerId.set_value(Path(path).basename());
 
       Try<RunState> run = RunState::recover(
-          rootDir, slaveId, frameworkId, executorId, containerId, strict);
+          rootDir,
+          slaveId,
+          frameworkId,
+          executorId,
+          containerId,
+          strict,
+          rebooted);
 
       if (run.isError()) {
         return Error(
@@ -423,7 +460,8 @@ Try<RunState> RunState::recover(
     const FrameworkID& frameworkId,
     const ExecutorID& executorId,
     const ContainerID& containerId,
-    bool strict)
+    bool strict,
+    bool rebooted)
 {
   RunState state;
   state.id = containerId;
@@ -469,18 +507,37 @@ Try<RunState> RunState::recover(
     state.errors += task->errors;
   }
 
-  // Read the forked pid.
   path = paths::getForkedPidPath(
       rootDir, slaveId, frameworkId, executorId, containerId);
+
+  // If agent host is rebooted, we do not read the forked pid and libprocess pid
+  // since those two pids are obsolete after reboot. And we remove the forked
+  // pid file to make sure we will not read it in the case the agent process is
+  // restarted after we checkpoint the new boot ID in `Slave::__recover` (i.e.,
+  // agent recovery is done after the reboot).
+  if (rebooted) {
+    if (os::exists(path)) {
+      Try<Nothing> rm = os::rm(path);
+      if (rm.isError()) {
+        return Error(
+            "Failed to remove executor forked pid file '" + path + "': " +
+            rm.error());
+      }
+    }
+
+    return state;
+  }
+
   if (!os::exists(path)) {
-    // This could happen if the slave died before the isolator
-    // checkpointed the forked pid.
+    // This could happen if the slave died before the containerizer checkpointed
+    // the forked pid or agent process is restarted after agent host is rebooted
+    // since we remove this file in the above code.
     LOG(WARNING) << "Failed to find executor forked pid file '" << path << "'";
     return state;
   }
 
+  // Read the forked pid.
   Result<string> pid = state::read<string>(path);
-
   if (pid.isError()) {
     message = "Failed to read executor forked pid from '" + path +
               "': " + pid.error();
@@ -704,6 +761,33 @@ Try<ResourcesState> ResourcesState::recover(
     bool strict)
 {
   ResourcesState state;
+
+  const string& resourceStatePath = paths::getResourceStatePath(rootDir);
+  if (os::exists(resourceStatePath)) {
+    Result<ResourceState> resourceState =
+      state::read<ResourceState>(resourceStatePath);
+    if (resourceState.isError()) {
+      string message = "Failed to read resource and operations file '" +
+                       resourceStatePath + "': " + resourceState.error();
+
+      if (strict) {
+        return Error(message);
+      } else {
+        LOG(WARNING) << message;
+        state.errors++;
+        return state;
+      }
+    }
+
+    if (resourceState.isSome()) {
+      state.resources = resourceState->resources();
+    }
+
+    return state;
+  }
+
+  LOG(INFO) << "No committed checkpointed resources and operations found at '"
+            << resourceStatePath << "'";
 
   // Process the committed resources.
   const string& infoPath = paths::getResourcesInfoPath(rootDir);

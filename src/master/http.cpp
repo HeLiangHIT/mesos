@@ -1259,9 +1259,12 @@ Future<Response> Master::Http::frameworks(
       {VIEW_FRAMEWORK, VIEW_TASK, VIEW_EXECUTOR})
     .then(defer(
         master->self(),
-        [this, request](const Owned<ObjectApprovers>& approvers) {
+        [this, request, principal](const Owned<ObjectApprovers>& approvers) {
           return deferBatchedRequest(
-            &Master::ReadOnlyHandler::frameworks, request, approvers);
+              &Master::ReadOnlyHandler::frameworks,
+              principal,
+              request.url.query,
+              approvers);
         }));
 }
 
@@ -2059,9 +2062,12 @@ Future<Response> Master::Http::slaves(
   return ObjectApprovers::create(master->authorizer, principal, {VIEW_ROLE})
     .then(defer(
         master->self(),
-        [this, request](const Owned<ObjectApprovers>& approvers) {
+        [this, request, principal](const Owned<ObjectApprovers>& approvers) {
           return deferBatchedRequest(
-              &Master::ReadOnlyHandler::slaves, request, approvers);
+              &Master::ReadOnlyHandler::slaves,
+              principal,
+              request.url.query,
+              approvers);
         }));
 }
 
@@ -2355,20 +2361,17 @@ Future<Response> Master::Http::state(
     return redirect(request);
   }
 
-  // TODO(alexr): De-duplicate response processing when the principal is
-  // identical, e.g., if "bob" asks for state three times in one batch,
-  // ideally we only compute the response for "bob" once since they're all
-  // identical within a principal.
   return ObjectApprovers::create(
       master->authorizer,
       principal,
       {VIEW_ROLE, VIEW_FRAMEWORK, VIEW_TASK, VIEW_EXECUTOR, VIEW_FLAGS})
     .then(defer(
         master->self(),
-        [this, request](const Owned<ObjectApprovers>& approvers) {
+        [this, request, principal](const Owned<ObjectApprovers>& approvers) {
           return deferBatchedRequest(
               &Master::ReadOnlyHandler::state,
-              request,
+              principal,
+              request.url.query,
               approvers);
         }));
 }
@@ -2376,16 +2379,45 @@ Future<Response> Master::Http::state(
 
 Future<Response> Master::Http::deferBatchedRequest(
     ReadOnlyRequestHandler handler,
-    const Request& request,
+    const Option<Principal>& principal,
+    const hashmap<std::string, std::string>& queryParameters,
     const Owned<ObjectApprovers>& approvers) const
 {
   bool scheduleBatch = batchedRequests.empty();
 
-  // Add an element to the batched state requests.
-  Promise<Response> promise;
-  Future<Response> future = promise.future();
-  batchedRequests.push_back(
-      BatchedRequest{handler, request, approvers, std::move(promise)});
+  auto it = std::find_if(batchedRequests.begin(), batchedRequests.end(),
+      [handler, &principal, &queryParameters](
+          const BatchedRequest& batchedRequest) {
+        // NOTE: This is not a general-purpose request comparison, but
+        // specific to the batched requests which are always members of
+        // `ReadOnlyHandler`, since we rely on the response only depending
+        // on query parameters and the current master state.
+        return handler == batchedRequest.handler &&
+               principal == batchedRequest.principal &&
+               queryParameters == batchedRequest.queryParameters;
+      });
+
+  Future<Response> future;
+  if (it != batchedRequests.end()) {
+    // Return the existing future if we have a matching request.
+    // NOTE: This is effectively adding a layer of authorization permissions
+    // caching since we only checked the equality of principals, not the
+    // equality of the approvers themselves.
+    // On heavily-loaded masters, this could lead to a delay of several seconds
+    // before permission changes for a principal take effect.
+    future = it->promise.future();
+    ++master->metrics->http_cache_hits;
+  } else {
+    // Add an element to the batched state requests.
+    Promise<Response> promise;
+    future = promise.future();
+    batchedRequests.push_back(BatchedRequest{
+        handler,
+        queryParameters,
+        principal,
+        approvers,
+        std::move(promise)});
+  }
 
   // Schedule processing of batched requests if not yet scheduled.
   if (scheduleBatch) {
@@ -2413,12 +2445,12 @@ void Master::Http::processRequestsBatch() const
   foreach (BatchedRequest& request, batchedRequests) {
     request.promise.associate(process::async(
         [this](ReadOnlyRequestHandler handler,
-               const process::http::Request& request,
+               const hashmap<std::string, std::string>& queryParameters,
                const process::Owned<ObjectApprovers>& approvers) {
-          return (readonlyHandler.*handler)(request, approvers);
+          return (readonlyHandler.*handler)(queryParameters, approvers);
         },
         request.handler,
-        request.request,
+        request.queryParameters,
         request.approvers));
   }
 
@@ -2540,9 +2572,12 @@ Future<Response> Master::Http::stateSummary(
       {VIEW_ROLE, VIEW_FRAMEWORK})
     .then(defer(
         master->self(),
-        [this, request](const Owned<ObjectApprovers>& approvers) {
+        [this, request, principal](const Owned<ObjectApprovers>& approvers) {
           return deferBatchedRequest(
-              &Master::ReadOnlyHandler::stateSummary, request, approvers);
+              &Master::ReadOnlyHandler::stateSummary,
+              principal,
+              request.url.query,
+              approvers);
         }));
 }
 
@@ -2590,10 +2625,11 @@ Future<Response> Master::Http::roles(
 
   return ObjectApprovers::create(master->authorizer, principal, {VIEW_ROLE})
     .then(defer(master->self(),
-        [this, request](const Owned<ObjectApprovers>& approvers) {
+        [this, request, principal](const Owned<ObjectApprovers>& approvers) {
             return deferBatchedRequest(
                 &Master::ReadOnlyHandler::roles,
-                request,
+                principal,
+                request.url.query,
                 approvers);
           }));
 }
@@ -2966,9 +3002,12 @@ Future<Response> Master::Http::tasks(
       {VIEW_FRAMEWORK, VIEW_TASK})
     .then(defer(
         master->self(),
-        [this, request](const Owned<ObjectApprovers>& approvers) {
+        [this, request, principal](const Owned<ObjectApprovers>& approvers) {
           return deferBatchedRequest(
-              &Master::ReadOnlyHandler::tasks, request, approvers);
+              &Master::ReadOnlyHandler::tasks,
+              principal,
+              request.url.query,
+              approvers);
         }));
 }
 

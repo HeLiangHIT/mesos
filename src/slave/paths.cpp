@@ -64,6 +64,7 @@ const char HTTP_MARKER_FILE[] = "http.marker";
 const char FORKED_PID_FILE[] = "forked.pid";
 const char TASK_INFO_FILE[] = "task.info";
 const char TASK_UPDATES_FILE[] = "task.updates";
+const char RESOURCE_STATE_FILE[] = "resources_and_operations.state";
 const char RESOURCES_INFO_FILE[] = "resources.info";
 const char RESOURCES_TARGET_FILE[] = "resources.target";
 const char RESOURCE_PROVIDER_STATE_FILE[] = "resource_provider.state";
@@ -601,6 +602,12 @@ string getOperationUpdatesPath(
 }
 
 
+string getResourceStatePath(const string& rootDir)
+{
+  return path::join(rootDir, "resources", RESOURCE_STATE_FILE);
+}
+
+
 string getResourcesInfoPath(
     const string& rootDir)
 {
@@ -799,7 +806,7 @@ Try<Nothing> createSandboxDirectory(
   // Since this is a sandbox directory containing private task data,
   // we want to ensure that it is not accessible to "others".
   Try<Nothing> chmod = os::chmod(directory, 0750);
-  if (mkdir.isError()) {
+  if (chmod.isError()) {
     return Error("Failed to chmod directory: " + chmod.error());
   }
 

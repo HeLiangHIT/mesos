@@ -41,6 +41,7 @@
 #include <stout/stringify.hpp>
 
 #include "common/protobuf_utils.hpp"
+#include "common/resource_quantities.hpp"
 
 using std::set;
 using std::string;
@@ -754,23 +755,14 @@ void HierarchicalAllocatorProcess::removeFilters(const SlaveID& slaveId)
 {
   CHECK(initialized);
 
-  foreachpair (const FrameworkID& id,
-               Framework& framework,
-               frameworks) {
+  foreachvalue (Framework& framework, frameworks) {
     framework.inverseOfferFilters.erase(slaveId);
 
     // Need a typedef here, otherwise the preprocessor gets confused
     // by the comma in the template argument list.
     typedef hashmap<SlaveID, hashset<OfferFilter*>> Filters;
-    foreachpair(const string& role,
-                Filters& filters,
-                framework.offerFilters) {
-      size_t erased = filters.erase(slaveId);
-      if (erased) {
-        frameworkSorters.at(role)->activate(id.value());
-        framework.suppressedRoles.erase(role);
-        framework.metrics->reviveRole(role);
-      }
+    foreachvalue (Filters& filters, framework.offerFilters) {
+      filters.erase(slaveId);
     }
   }
 
@@ -2430,11 +2422,10 @@ bool HierarchicalAllocatorProcess::allocatable(const Resources& resources)
     return true;
   }
 
-  Resources quantity = resources.createStrippedScalarQuantity();
   foreach (
-      const Resources& minResources,
+      const ResourceQuantities& resourceQuantities,
       CHECK_NOTNONE(options.minAllocatableResources)) {
-    if (quantity.contains(minResources)) {
+    if (resources.contains(resourceQuantities)) {
       return true;
     }
   }

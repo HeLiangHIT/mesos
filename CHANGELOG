@@ -1,3 +1,14 @@
+Release Notes - Mesos - Version 1.7.2 (WIP)
+-------------------------------------------
+* This is a bug fix release.
+
+** Bug
+  * [MESOS-9210] - Mesos v1 scheduler library does not properly handle SUBSCRIBE retries.
+  * [MESOS-9517] - SLRP should treat gRPC timeouts as non-terminal errors, instead of reporting OPERATION_FAILED.
+  * [MESOS-9531] - chown error handling is incorrect in createSandboxDirectory.
+  * [MESOS-9532] - ResourceOffersTest.ResourceOfferWithMultipleSlaves is flaky.
+  * [MESOS-9533] - CniIsolatorTest.ROOT_CleanupAfterReboot is flaky.
+
 Release Notes - Mesos - Version 1.7.1
 -------------------------------------
 * This is a bug fix release. Also includes performance and API
@@ -17,6 +28,7 @@ Release Notes - Mesos - Version 1.7.1
     IDs and resource provider IDs (see MESOS-9293).
 
 ** Bug
+  * [MESOS-7042] - Send SIGKILL after SIGTERM to IOSwitchboard after container termination.
   * [MESOS-7474] - Mesos fetcher cache doesn't retry when missed.
   * [MESOS-8545] - AgentAPIStreamingTest.AttachInputToNestedContainerSession is flaky.
   * [MESOS-8907] - Docker image fetcher fails with HTTP/2.
@@ -37,6 +49,7 @@ Release Notes - Mesos - Version 1.7.1
   * [MESOS-9295] - Nested container launch could fail if the agent upgrade with new cgroup subsystems.
   * [MESOS-9308] - URI disk profile adaptor could deadlock.
   * [MESOS-9317] - Some master endpoints do not handle failed authorization properly.
+  * [MESOS-9324] - Resource fragmentation: frameworks may be starved of port resources in the presence of large number frameworks with quota.
   * [MESOS-9332] - Nested container should run as the same user of its parent container by default.
   * [MESOS-9334] - Container stuck at ISOLATING state due to libevent poll never returns.
   * [MESOS-9362] - Test `CgroupsIsolatorTest.ROOT_CGROUPS_CreateRecursively` is flaky.
@@ -47,8 +60,14 @@ Release Notes - Mesos - Version 1.7.1
   * [MESOS-9479] - SLRP does not set RP ID in produced OperationStatus.
   * [MESOS-9480] - Master may skip processing authorization results for `LAUNCH_GROUP`.
   * [MESOS-9492] - Persist CNI working directory across reboot.
+  * [MESOS-9501] - Mesos executor fails to terminate and gets stuck after agent host reboot.
+  * [MESOS-9502] - IOswitchboard cleanup could get stuck due to FD leak from a race.
+  * [MESOS-9505] - `make check` failed with linking errors when c-ares is installed.
+  * [MESOS-9508] - Official 1.7.0 tarball can't be built on Ubuntu 16.04 LTS.
+  * [MESOS-9518] - CNI_NETNS should not be set for orphan containers that do not have network namespace.
+  * [MESOS-9519] - Unable to build Mesos with CMake on Ubuntu 14.04.
 
-** Improvement:
+** Improvement
   * [MESOS-6765] - Make the Resources wrapper "copy-on-write" to improve performance.
   * [MESOS-9239] - Improve sorting performance in the DRF sorter.
   * [MESOS-9249] - Avoid dirtying the DRF sorter when allocating resources.
@@ -59,6 +78,8 @@ Release Notes - Mesos - Version 1.7.1
   * [MESOS-9325] - Optimize `Resources::filter` operation.
   * [MESOS-9340] - Log all socket errors in libprocess.
   * [MESOS-9486] - Set up `object.value` for `CREATE_DISK` and `DESTROY_DISK` authorizations.
+  * [MESOS-9510] - Disallowed nan, inf and so on in `Value::Scalar`.
+  * [MESOS-9516] - Extend `min_allocatable_resources` flag to cover non-scalar resources.
 
 
 Release Notes - Mesos - Version 1.7.0
@@ -444,6 +465,7 @@ Release Notes - Mesos - Version 1.6.2 (WIP)
   * [MESOS-9164] - Subprocess should unset CLOEXEC on whitelisted file descriptors.
   * [MESOS-9170] - Zookeeper doesn't compile with newer gcc due to format error.
   * [MESOS-9196] - Removing rootfs mounts may fail with EBUSY.
+  * [MESOS-9210] - Mesos v1 scheduler library does not properly handle SUBSCRIBE retries.
   * [MESOS-9231] - `docker inspect` may return an unexpected result to Docker executor due to a race condition.
   * [MESOS-9267] - Mesos agent crashes when CNI network is not configured but used.
   * [MESOS-9274] - v1 JAVA scheduler library can drop TEARDOWN upon destruction.
@@ -457,10 +479,19 @@ Release Notes - Mesos - Version 1.6.2 (WIP)
   * [MESOS-9418] - Add support for the `Discard` blkio operation type.
   * [MESOS-9419] - Executor to framework message crashes master if framework has not re-registered.
   * [MESOS-9480] - Master may skip processing authorization results for `LAUNCH_GROUP`.
+  * [MESOS-9492] - Persist CNI working directory across reboot.
+  * [MESOS-9518] - CNI_NETNS should not be set for orphan containers that do not have network namespace.
+  * [MESOS-9531] - chown error handling is incorrect in createSandboxDirectory.
+  * [MESOS-9532] - ResourceOffersTest.ResourceOfferWithMultipleSlaves is flaky.
+  * [MESOS-9533] - CniIsolatorTest.ROOT_CleanupAfterReboot is flaky.
 
 ** Improvement
   * [MESOS-9305] - Create cgoup recursively to workaround systemd deleting cgroups_root.
   * [MESOS-9340] - Log all socket errors in libprocess.
+  * [MESOS-9501] - Mesos executor fails to terminate and gets stuck after agent host reboot.
+  * [MESOS-9502] - IOswitchboard cleanup could get stuck due to FD leak from a race.
+  * [MESOS-9510] - Disallowed nan, inf and so on in `Value::Scalar`.
+  * [MESOS-9516] - Extend `min_allocatable_resources` flag to cover non-scalar resources.
 
 
 Release Notes - Mesos - Version 1.6.1
@@ -851,11 +882,9 @@ Release Notes - Mesos - Version 1.5.3 (WIP)
 * This is a bug fix release.
 
 ** Bug
-  * [MESOS-7474] - Mesos fetcher cache doesn't retry when missed.
-  * [MESOS-9317] - Some master endpoints do not handle failed authorization properly.
-  * [MESOS-9332] - Nested container should run as the same user of its parent container by default.
-  * [MESOS-9411] - Validation of JWT tokens using HS256 hashing algorithm is not thread safe.
-  * [MESOS-9419] - Executor to framework message crashes master if framework has not re-registered.
+  * [MESOS-9210] - Mesos v1 scheduler library does not properly handle SUBSCRIBE retries.
+  * [MESOS-9532] - ResourceOffersTest.ResourceOfferWithMultipleSlaves is flaky.
+  * [MESOS-9533] - CniIsolatorTest.ROOT_CleanupAfterReboot is flaky.
 
 
 Release Notes - Mesos - Version 1.5.2
@@ -864,6 +893,7 @@ Release Notes - Mesos - Version 1.5.2
 
 ** Bug
   * [MESOS-3790] - ZooKeeper connection should retry on `EAI_NONAME`.
+  * [MESOS-7474] - Mesos fetcher cache doesn't retry when missed.
   * [MESOS-8128] - Make os::pipe file descriptors O_CLOEXEC.
   * [MESOS-8418] - mesos-agent high cpu usage because of numerous /proc/mounts reads.
   * [MESOS-8545] - AgentAPIStreamingTest.AttachInputToNestedContainerSession is flaky.
@@ -907,8 +937,20 @@ Release Notes - Mesos - Version 1.5.2
   * [MESOS-9283] - Docker containerizer actor can get backlogged with large number of containers.
   * [MESOS-9305] - Create cgoup recursively to workaround systemd deleting cgroups_root.
   * [MESOS-9308] - URI disk profile adaptor could deadlock.
+  * [MESOS-9317] - Some master endpoints do not handle failed authorization properly.
+  * [MESOS-9332] - Nested container should run as the same user of its parent container by default.
   * [MESOS-9334] - Container stuck at ISOLATING state due to libevent poll never returns.
+  * [MESOS-9411] - Validation of JWT tokens using HS256 hashing algorithm is not thread safe.
+  * [MESOS-9419] - Executor to framework message crashes master if framework has not re-registered.
   * [MESOS-9480] - Master may skip processing authorization results for `LAUNCH_GROUP`.
+  * [MESOS-9492] - Persist CNI working directory across reboot.
+  * [MESOS-9501] - Mesos executor fails to terminate and gets stuck after agent host reboot.
+  * [MESOS-9502] - IOswitchboard cleanup could get stuck due to FD leak from a race.
+
+** Improvement:
+  * [MESOS-9510] - Disallowed nan, inf and so on in `Value::Scalar`.
+  * [MESOS-9516] - Extend `min_allocatable_resources` flag to cover non-scalar resources.
+  * [MESOS-9518] - CNI_NETNS should not be set for orphan containers that do not have network namespace.
 
 
 Release Notes - Mesos - Version 1.5.1
@@ -1433,7 +1475,7 @@ All Resolved Issues:
   * [MESOS-8394] - Bump CSI to 0.1.0.
 
 
-Release Notes - Mesos - Version 1.4.3 (WIP)
+Release Notes - Mesos - Version 1.4.3
 -------------------------------------------
 * This is a bug fix release.
 
@@ -1450,12 +1492,24 @@ Release Notes - Mesos - Version 1.4.3 (WIP)
   * [MESOS-9151] - Container stuck at ISOLATING due to FD leak.
   * [MESOS-9170] - Zookeeper doesn't compile with newer gcc due to format error.
   * [MESOS-9196] - Removing rootfs mounts may fail with EBUSY.
+  * [MESOS-9221] - If some image layers are large, the image pulling may stuck due to the authorized token expired.
   * [MESOS-9231] - `docker inspect` may return an unexpected result to Docker executor due to a race condition.
   * [MESOS-9279] - Docker Containerizer 'usage' call might be expensive if mount table is big.
   * [MESOS-9283] - Docker containerizer actor can get backlogged with large number of containers.
+  * [MESOS-9304] - Test `CGROUPS_ROOT_PidNamespaceForward` and `CGROUPS_ROOT_PidNamespaceBackward` fails on 1.4.x.
   * [MESOS-9334] - Container stuck at ISOLATING state due to libevent poll never returns.
   * [MESOS-9419] - Executor to framework message crashes master if framework has not re-registered.
   * [MESOS-9480] - Master may skip processing authorization results for `LAUNCH_GROUP`.
+  * [MESOS-9492] - Persist CNI working directory across reboot.
+  * [MESOS-9501] - Mesos executor fails to terminate and gets stuck after agent host reboot.
+  * [MESOS-9502] - IOswitchboard cleanup could get stuck due to FD leak from a race.
+  * [MESOS-9518] - CNI_NETNS should not be set for orphan containers that do not have network namespace.
+  * [MESOS-9532] - ResourceOffersTest.ResourceOfferWithMultipleSlaves is flaky.
+  * [MESOS-9533] - CniIsolatorTest.ROOT_CleanupAfterReboot is flaky.
+
+** Improvement:
+  * [MESOS-9510] - Disallowed nan, inf and so on in `Value::Scalar`.
+  * [MESOS-9516] - Extend `min_allocatable_resources` flag to cover non-scalar resources.
 
 
 Release Notes - Mesos - Version 1.4.2

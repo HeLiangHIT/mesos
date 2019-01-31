@@ -421,17 +421,17 @@ Option<ContainerStatus> getTaskContainerStatus(const Task& task)
 bool isTerminalState(const OperationState& state)
 {
   switch (state) {
-    case OPERATION_FINISHED:
-    case OPERATION_FAILED:
-    case OPERATION_ERROR:
     case OPERATION_DROPPED:
-      return true;
-    case OPERATION_UNSUPPORTED:
-    case OPERATION_PENDING:
-    case OPERATION_UNREACHABLE:
+    case OPERATION_ERROR:
+    case OPERATION_FAILED:
+    case OPERATION_FINISHED:
     case OPERATION_GONE_BY_OPERATOR:
+      return true;
+    case OPERATION_PENDING:
     case OPERATION_RECOVERING:
     case OPERATION_UNKNOWN:
+    case OPERATION_UNREACHABLE:
+    case OPERATION_UNSUPPORTED:
       return false;
   }
 
@@ -1077,7 +1077,8 @@ bool operator==(const Capabilities& left, const Capabilities& right)
          left.hierarchicalRole == right.hierarchicalRole &&
          left.reservationRefinement == right.reservationRefinement &&
          left.resourceProvider == right.resourceProvider &&
-         left.resizeVolume == right.resizeVolume;
+         left.resizeVolume == right.resizeVolume &&
+         left.agentOperationFeedback == right.agentOperationFeedback;
 }
 
 

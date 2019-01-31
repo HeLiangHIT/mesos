@@ -43,6 +43,39 @@ We categorize the changes as follows:
   </thead>
 <tr>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Version-->
+  1.8.x
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Mesos Core-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-8-x-linux-seccomp-isolator">Linux Seccomp isolator</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Flags-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-8-x-linux-seccomp-isolator">seccomp_config_dir</a></li>
+      <li>A <a href="#1-8-x-linux-seccomp-isolator">seccomp_profile_name</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
+    <ul style="padding-left:10px;">
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
+    <ul style="padding-left:10px;">
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Endpoints-->
+    <ul style="padding-left:10px;">
+    </ul>
+  </td>
+</tr>
+<tr>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Version-->
   1.7.x
   </td>
 
@@ -52,7 +85,6 @@ We categorize the changes as follows:
       <li>A <a href="#1-7-x-auto-load-subsystems">Automatically load local enabled cgroups subsystems</a></li>
       <li>A <a href="#1-7-x-container-specific-cgroups-mounts">Container-specific cgroups mounts</a></li>
       <li>A <a href="#1-7-x-volume-mode-support">Volume mode support</a></li>
-      <li>C <a href="#1-7-x-create-disk">`CREATE_DISK` and `DESTROY_DISK` operations and ACLs</a></li>
       <li>A <a href="#1-7-x-resource-provider-acls">Resource Provider ACLs</a></li>
     </ul>
   </td>
@@ -67,6 +99,7 @@ We categorize the changes as follows:
 
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
     <ul style="padding-left:10px;">
+      <li>C <a href="#1-7-x-create-disk">`CREATE_DISK` and `DESTROY_DISK` operations and ACLs</a></li>
     </ul>
   </td>
 
@@ -440,6 +473,14 @@ We categorize the changes as follows:
 </tr>
 </table>
 
+## Upgrading from 1.7.x to 1.8.x ##
+
+<a name="1-8-x-linux-seccomp-isolator"></a>
+
+* A new [`linux/seccomp`](isolators/linux-seccomp.md) isolator has been added. The isolator supports the following new agent flags:
+  * `--seccomp_config_dir` specifies the directory path of the Seccomp profiles.
+  * `--seccomp_profile_name` specifies the path of the default Seccomp profile relative to the `seccomp_config_dir`.
+
 ## Upgrading from 1.6.x to 1.7.x ##
 
 <a name="1-7-x-linux-devices-isolator"></a>
@@ -506,7 +547,7 @@ We categorize the changes as follows:
 
 <a name="1-6-x-csi-support"></a>
 
-* CSI v0.2 is now supported as experimental. Due to the incompatibility between CSI v0.1 and v0.2, the experimental support for CSI v0.1 is deprecated, and the operator must remove all storage local resource providers within an agent before upgrading the agent. NOTE: This is a **breaking change** for storage local resource providers.
+* CSI v0.2 is now supported as experimental. Due to the incompatibility between CSI v0.1 and v0.2, the experimental support for CSI v0.1 is removed, and the operator must remove all storage local resource providers within an agent before upgrading the agent. NOTE: This is a **breaking change** for storage local resource providers.
 
 <a name="1-6-x-fetcher-stall-timeout"></a>
 

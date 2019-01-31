@@ -104,6 +104,7 @@ using mesos::authorization::KILL_STANDALONE_CONTAINER;
 using mesos::authorization::REMOVE_NESTED_CONTAINER;
 using mesos::authorization::REMOVE_STANDALONE_CONTAINER;
 using mesos::authorization::MODIFY_RESOURCE_PROVIDER_CONFIG;
+using mesos::authorization::MARK_RESOURCE_PROVIDER_GONE;
 using mesos::authorization::PRUNE_IMAGES;
 
 using mesos::internal::recordio::Reader;
@@ -654,6 +655,9 @@ Future<Response> Http::_api(
 
     case mesos::agent::Call::REMOVE_RESOURCE_PROVIDER_CONFIG:
       return removeResourceProviderConfig(call, principal);
+
+    case mesos::agent::Call::MARK_RESOURCE_PROVIDER_GONE:
+      return markResourceProviderGone(call, principal);
 
     case mesos::agent::Call::PRUNE_IMAGES:
       return pruneImages(call, mediaTypes.accept, principal);
@@ -1276,9 +1280,14 @@ Future<Response> Http::state(
   }
 
   return ObjectApprovers::create(
-      slave->authorizer,
-      principal,
-      {VIEW_FRAMEWORK, VIEW_TASK, VIEW_EXECUTOR, VIEW_FLAGS, VIEW_ROLE})
+             slave->authorizer,
+             principal,
+             {VIEW_FRAMEWORK,
+              VIEW_TASK,
+              VIEW_EXECUTOR,
+              VIEW_FLAGS,
+              VIEW_ROLE,
+              VIEW_RESOURCE_PROVIDER})
     .then(defer(
         slave->self(),
         [this, request](const Owned<ObjectApprovers>& approvers) -> Response {
@@ -1383,6 +1392,29 @@ Future<Response> Http::state(
             writer->field(
                 "unreserved_resources_allocated",
                 allocatedResources.unreserved());
+
+            writer->field(
+                "resource_providers",
+                [this, &approvers](JSON::ArrayWriter* writer) {
+                  if (!approvers->approved<VIEW_RESOURCE_PROVIDER>()) {
+                    return;
+                  }
+
+                  foreachvalue (
+                      ResourceProvider* resourceProvider,
+                      slave->resourceProviders) {
+                    agent::Response::GetResourceProviders::ResourceProvider
+                      provider;
+
+                    *provider.mutable_resource_provider_info() =
+                      resourceProvider->info;
+
+                    *provider.mutable_total_resources() =
+                      resourceProvider->totalResources;
+
+                    writer->element(JSON::Protobuf(provider));
+                  }
+                });
 
             writer->field("attributes", Attributes(slave->info.attributes()));
 
@@ -3186,23 +3218,20 @@ Future<Response> Http::addResourceProviderConfig(
   CHECK_EQ(mesos::agent::Call::ADD_RESOURCE_PROVIDER_CONFIG, call.type());
   CHECK(call.has_add_resource_provider_config());
 
+  const ResourceProviderInfo& info = call.add_resource_provider_config().info();
+
+  LOG(INFO)
+    << "Processing ADD_RESOURCE_PROVIDER_CONFIG call with"
+    << " type '" << info.type() << "' and name '" << info.name() << "'";
+
   return ObjectApprovers::create(
-      slave->authorizer,
-      principal,
-      {MODIFY_RESOURCE_PROVIDER_CONFIG})
+             slave->authorizer, principal, {MODIFY_RESOURCE_PROVIDER_CONFIG})
     .then(defer(
         slave->self(),
         [=](const Owned<ObjectApprovers>& approvers) -> Future<Response> {
           if (!approvers->approved<MODIFY_RESOURCE_PROVIDER_CONFIG>()) {
             return Forbidden();
           }
-
-          const ResourceProviderInfo& info =
-              call.add_resource_provider_config().info();
-
-          LOG(INFO)
-              << "Processing ADD_RESOURCE_PROVIDER_CONFIG call with type '"
-              << info.type() << "' and name '" << info.name() << "'";
 
           Option<Error> error = LocalResourceProvider::validate(info);
           if (error.isSome()) {
@@ -3231,6 +3260,13 @@ Future<Response> Http::updateResourceProviderConfig(
   CHECK_EQ(mesos::agent::Call::UPDATE_RESOURCE_PROVIDER_CONFIG, call.type());
   CHECK(call.has_update_resource_provider_config());
 
+  const ResourceProviderInfo& info =
+    call.update_resource_provider_config().info();
+
+  LOG(INFO)
+    << "Processing UPDATE_RESOURCE_PROVIDER_CONFIG call with"
+    << " type '" << info.type() << "' and name '" << info.name() << "'";
+
   return ObjectApprovers::create(
       slave->authorizer,
       principal,
@@ -3241,13 +3277,6 @@ Future<Response> Http::updateResourceProviderConfig(
           if (!approvers->approved<MODIFY_RESOURCE_PROVIDER_CONFIG>()) {
             return Forbidden();
           }
-
-          const ResourceProviderInfo& info =
-              call.update_resource_provider_config().info();
-
-          LOG(INFO)
-              << "Processing UPDATE_RESOURCE_PROVIDER_CONFIG call with type '"
-              << info.type() << "' and name '" << info.name() << "'";
 
           Option<Error> error = LocalResourceProvider::validate(info);
           if (error.isSome()) {
@@ -3276,6 +3305,13 @@ Future<Response> Http::removeResourceProviderConfig(
   CHECK_EQ(mesos::agent::Call::REMOVE_RESOURCE_PROVIDER_CONFIG, call.type());
   CHECK(call.has_remove_resource_provider_config());
 
+  const string& type = call.remove_resource_provider_config().type();
+  const string& name = call.remove_resource_provider_config().name();
+
+  LOG(INFO)
+    << "Processing REMOVE_RESOURCE_PROVIDER_CONFIG call with"
+    << " type '" << type << "' and name '" << name << "'";
+
   return ObjectApprovers::create(
       slave->authorizer,
       principal,
@@ -3287,18 +3323,42 @@ Future<Response> Http::removeResourceProviderConfig(
             return Forbidden();
           }
 
-          const string& type = call.remove_resource_provider_config().type();
-          const string& name = call.remove_resource_provider_config().name();
-
-          LOG(INFO)
-              << "Processing REMOVE_RESOURCE_PROVIDER_CONFIG call with type '"
-              << type << "' and name '" << name << "'";
-
           return slave->localResourceProviderDaemon->remove(type, name)
             .then([]() -> Response { return OK(); });
       }));
 }
 
+
+Future<Response> Http::markResourceProviderGone(
+    const mesos::agent::Call& call,
+    const Option<Principal>& principal) const
+{
+  CHECK_EQ(mesos::agent::Call::MARK_RESOURCE_PROVIDER_GONE, call.type());
+  CHECK(call.has_mark_resource_provider_gone());
+
+  const ResourceProviderID& resourceProviderId =
+    call.mark_resource_provider_gone().resource_provider_id();
+
+  LOG(INFO)
+    << "Processing MARK_RESOURCE_PROVIDER_GONE for resource provider "
+    << resourceProviderId;
+
+  return ObjectApprovers::create(
+      slave->authorizer, principal, {MARK_RESOURCE_PROVIDER_GONE})
+    .then(defer(
+        slave->self(),
+        [this, resourceProviderId](
+            const Owned<ObjectApprovers>& approvers) -> Future<Response> {
+          if (!approvers->approved<MARK_RESOURCE_PROVIDER_GONE>()) {
+            return Forbidden();
+          }
+
+          return slave->markResourceProviderGone(resourceProviderId)
+            .then([](const Future<Nothing>&) -> Future<Response> {
+              return OK();
+            });
+        }));
+}
 
 // Helper that reads data from `writer` and writes to `reader`.
 // Returns a failed future if there are any errors reading or writing.

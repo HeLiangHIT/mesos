@@ -37,6 +37,7 @@ JEMALLOC = 3rdparty/jemalloc-$(JEMALLOC_VERSION)
 LEVELDB = 3rdparty/leveldb-$(LEVELDB_VERSION)
 LIBARCHIVE = 3rdparty/libarchive-$(LIBARCHIVE_VERSION)
 LIBPROCESS = 3rdparty/libprocess
+LIBSECCOMP = 3rdparty/libseccomp-$(LIBSECCOMP_VERSION)
 NVML = 3rdparty/nvml-$(NVML_VERSION)
 PICOJSON = 3rdparty/picojson-$(PICOJSON_VERSION)
 PIP = 3rdparty/pip-$(PIP_VERSION)
@@ -225,6 +226,15 @@ else
 LIB_PROCESS = -lprocess
 endif
 
+if ENABLE_SECCOMP_ISOLATOR
+if WITH_BUNDLED_LIBSECCOMP
+MESOS_CPPFLAGS += -I../$(LIBSECCOMP)/include
+LIB_LIBSECCOMP = ../$(LIBSECCOMP)/src/libseccomp.la
+else
+LIB_LIBSECCOMP = -lseccomp
+endif
+endif
+
 if WITH_BUNDLED_NVML
 MESOS_CPPFLAGS += -I../$(NVML)
 endif
@@ -299,6 +309,7 @@ OCI_SPEC_PROTO = $(top_srcdir)/include/mesos/oci/spec.proto
 QUOTA_PROTO = $(top_srcdir)/include/mesos/quota/quota.proto
 RESOURCE_PROVIDER_PROTO = $(top_srcdir)/include/mesos/resource_provider/resource_provider.proto
 SCHEDULER_PROTO = $(top_srcdir)/include/mesos/scheduler/scheduler.proto
+SECCOMP_PROTO = $(top_srcdir)/include/mesos/seccomp/seccomp.proto
 STATE_PROTO = $(top_srcdir)/include/mesos/state/state.proto
 OVERSUBSCRIPTION_PROTO = $(top_srcdir)/include/mesos/slave/oversubscription.proto
 URI_PROTO = $(top_srcdir)/include/mesos/uri/uri.proto
@@ -356,6 +367,8 @@ CXX_PROTOS =								\
   ../include/mesos/resource_provider/resource_provider.pb.h		\
   ../include/mesos/scheduler/scheduler.pb.cc				\
   ../include/mesos/scheduler/scheduler.pb.h				\
+  ../include/mesos/seccomp/seccomp.pb.cc				\
+  ../include/mesos/seccomp/seccomp.pb.h					\
   ../include/mesos/slave/containerizer.pb.cc				\
   ../include/mesos/slave/containerizer.pb.h				\
   ../include/mesos/slave/oversubscription.pb.cc				\
@@ -394,6 +407,8 @@ CXX_PROTOS +=								\
   resource_provider/registry.pb.h					\
   resource_provider/state.pb.cc						\
   resource_provider/state.pb.h						\
+  slave/state.pb.cc							\
+  slave/state.pb.h							\
   slave/containerizer/mesos/provisioner/docker/message.pb.cc		\
   slave/containerizer/mesos/provisioner/docker/message.pb.h		\
   slave/containerizer/mesos/isolators/docker/volume/state.pb.cc		\
@@ -815,6 +830,15 @@ scheduler_HEADERS =							\
 nodist_scheduler_HEADERS =						\
   ../include/mesos/scheduler/scheduler.pb.h
 
+seccompdir = $(pkgincludedir)/seccomp
+
+seccomp_HEADERS =							\
+  $(top_srcdir)/include/mesos/seccomp/seccomp.hpp			\
+  $(top_srcdir)/include/mesos/seccomp/seccomp.proto
+
+nodist_seccomp_HEADERS =						\
+  ../include/mesos/seccomp/seccomp.pb.h
+
 agentdir = $(pkgincludedir)/agent
 
 agent_HEADERS =								\
@@ -975,6 +999,7 @@ libmesos_no_3rdparty_la_SOURCES =					\
   messages/messages.proto						\
   resource_provider/registry.proto					\
   resource_provider/state.proto						\
+  slave/state.proto							\
   slave/containerizer/mesos/provisioner/docker/message.proto		\
   slave/containerizer/mesos/isolators/docker/volume/state.proto		\
   slave/containerizer/mesos/isolators/network/cni/spec.proto
@@ -1019,6 +1044,8 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   common/protobuf_utils.hpp						\
   common/recordio.hpp							\
   common/resources.cpp							\
+  common/resource_quantities.cpp					\
+  common/resource_quantities.hpp					\
   common/resources_utils.cpp						\
   common/resources_utils.hpp						\
   common/roles.cpp							\
@@ -1397,6 +1424,16 @@ MESOS_LINUX_FILES +=							\
   slave/containerizer/mesos/isolators/xfs/disk.hpp
 endif
 
+if ENABLE_SECCOMP_ISOLATOR
+MESOS_LINUX_FILES +=							\
+  linux/seccomp/seccomp.cpp						\
+  linux/seccomp/seccomp.hpp						\
+  linux/seccomp/seccomp_parser.cpp					\
+  linux/seccomp/seccomp_parser.hpp					\
+  slave/containerizer/mesos/isolators/linux/seccomp.cpp			\
+  slave/containerizer/mesos/isolators/linux/seccomp.hpp
+endif
+
 if ENABLE_LINUX_ROUTING
 MESOS_LINUX_FILES +=							\
   linux/routing/handle.cpp						\
@@ -1465,7 +1502,8 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   resource_provider/storage/disk_profile_utils.cpp			\
   resource_provider/storage/disk_profile_utils.hpp			\
   resource_provider/storage/provider.cpp				\
-  resource_provider/storage/provider.hpp
+  resource_provider/storage/provider.hpp				\
+  resource_provider/storage/provider_process.hpp
 
 libmesos_no_3rdparty_la_CPPFLAGS = $(MESOS_CPPFLAGS)
 
@@ -1616,6 +1654,7 @@ libmesos_la_SOURCES =							\
   $(QUOTA_PROTO)							\
   $(RESOURCE_PROVIDER_PROTO)						\
   $(SCHEDULER_PROTO)							\
+  $(SECCOMP_PROTO)							\
   $(STATE_PROTO)							\
   $(URI_PROTO)								\
   $(V1_AGENT_PROTO)							\
@@ -1643,6 +1682,7 @@ libmesos_la_LIBADD =							\
   $(LIB_LIBARCHIVE)							\
   $(LIB_PROCESS)							\
   $(LIB_PROTOBUF)							\
+  $(LIB_LIBSECCOMP)							\
   $(LIB_ZOOKEEPER)							\
   -lsvn_subr-1								\
   -lsvn_delta-1								\
@@ -2505,7 +2545,8 @@ mesos_tests_SOURCES =						\
   tests/master_allocator_tests.cpp				\
   tests/master_authorization_tests.cpp				\
   tests/master_benchmarks.cpp					\
-  tests/master_contender_detector_tests.cpp			\
+  tests/master_contender_detector_tests.cpp     \
+  tests/master_load_tests.cpp					\
   tests/master_maintenance_tests.cpp				\
   tests/master_quota_tests.cpp					\
   tests/master_slave_reconciliation_tests.cpp			\
@@ -2544,6 +2585,7 @@ mesos_tests_SOURCES =						\
   tests/resource_offers_tests.cpp				\
   tests/resource_provider_manager_tests.cpp			\
   tests/resource_provider_validation_tests.cpp			\
+  tests/resource_quantities_tests.cpp			        \
   tests/resources_tests.cpp					\
   tests/resources_utils.cpp					\
   tests/resources_utils.hpp					\
@@ -2611,6 +2653,12 @@ mesos_tests_SOURCES =						\
 if ENABLE_XFS_DISK_ISOLATOR
 mesos_tests_SOURCES +=						\
   tests/containerizer/xfs_quota_tests.cpp
+endif
+
+if ENABLE_SECCOMP_ISOLATOR
+mesos_tests_SOURCES +=						\
+  tests/containerizer/linux_seccomp_parser_tests.cpp		\
+  tests/containerizer/linux_seccomp_isolator_tests.cpp
 endif
 
 mesos_tests_CPPFLAGS = $(MESOS_CPPFLAGS)

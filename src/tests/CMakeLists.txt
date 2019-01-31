@@ -115,6 +115,7 @@ set(MESOS_TESTS_SRC
   resource_offers_tests.cpp
   resource_provider_manager_tests.cpp
   resource_provider_validation_tests.cpp
+  resource_quantities_tests.cpp
   resources_tests.cpp
   role_tests.cpp
   scheduler_driver_tests.cpp
@@ -241,6 +242,12 @@ if (LINUX)
   if (ENABLE_XFS_DISK_ISOLATOR)
     list(APPEND MESOS_TESTS_SRC
       containerizer/xfs_quota_tests.cpp)
+  endif()
+
+  if (ENABLE_SECCOMP_ISOLATOR)
+    list(APPEND MESOS_TESTS_SRC
+      containerizer/linux_seccomp_parser_tests.cpp
+      containerizer/linux_seccomp_isolator_tests.cpp)
   endif()
 
   if (ENABLE_LINUX_ROUTING)

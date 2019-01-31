@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -1023,7 +1024,7 @@ TEST_P(ResourceProviderManagerHttpApiTest, ConvertResources)
 
   const ContentType contentType = GetParam();
 
-  resourceProvider.start(endpointDetector, contentType);
+  resourceProvider.start(std::move(endpointDetector), contentType);
 
   // Wait until the agent's resources have been updated to include the
   // resource provider resources.
@@ -1156,7 +1157,7 @@ TEST_P_TEMP_DISABLED_ON_WINDOWS(
 
   const ContentType contentType = GetParam();
 
-  resourceProvider->start(endpointDetector, contentType);
+  resourceProvider->start(std::move(endpointDetector), contentType);
 
   // Wait until the agent's resources have been updated to include the
   // resource provider resources. At this point the resource provider
@@ -1176,7 +1177,9 @@ TEST_P_TEMP_DISABLED_ON_WINDOWS(
   EXPECT_CALL(*resourceProvider, subscribed(_))
     .WillOnce(FutureArg<0>(&subscribed1));
 
-  resourceProvider->start(endpointDetector, contentType);
+  endpointDetector =
+    resource_provider::createEndpointDetector(agent.get()->pid);
+  resourceProvider->start(std::move(endpointDetector), contentType);
 
   AWAIT_READY(subscribed1);
   EXPECT_EQ(resourceProviderInfo.id(), subscribed1->provider_id());
@@ -1216,7 +1219,7 @@ TEST_P_TEMP_DISABLED_ON_WINDOWS(
   EXPECT_CALL(*resourceProvider, subscribed(_))
     .WillOnce(FutureArg<0>(&subscribed2));
 
-  resourceProvider->start(endpointDetector, contentType);
+  resourceProvider->start(std::move(endpointDetector), contentType);
 
   AWAIT_READY(subscribed2);
   EXPECT_EQ(resourceProviderInfo.id(), subscribed2->provider_id());
@@ -1275,7 +1278,7 @@ TEST_P(ResourceProviderManagerHttpApiTest, ResubscribeUnknownID)
 
   const ContentType contentType = GetParam();
 
-  resourceProvider->start(endpointDetector, contentType);
+  resourceProvider->start(std::move(endpointDetector), contentType);
 
   AWAIT_READY(disconnected);
 }
@@ -1328,7 +1331,7 @@ TEST_P(ResourceProviderManagerHttpApiTest, ResourceProviderDisconnect)
 
   const ContentType contentType = GetParam();
 
-  resourceProvider->start(endpointDetector, contentType);
+  resourceProvider->start(std::move(endpointDetector), contentType);
 
   {
     // Wait until the agent's resources have been updated to include
@@ -1350,16 +1353,9 @@ TEST_P(ResourceProviderManagerHttpApiTest, ResourceProviderDisconnect)
   // Simulate a resource provider disconnection.
   resourceProvider.reset();
 
-  {
-    AWAIT_READY(updateSlaveMessage);
-    ASSERT_TRUE(updateSlaveMessage->has_resource_providers());
-    ASSERT_EQ(1, updateSlaveMessage->resource_providers().providers_size());
-
-    const Resources& totalResources =
-      updateSlaveMessage->resource_providers().providers(0).total_resources();
-
-    EXPECT_FALSE(totalResources.contains(devolve(disk)));
-  }
+  AWAIT_READY(updateSlaveMessage);
+  ASSERT_TRUE(updateSlaveMessage->has_resource_providers());
+  EXPECT_EQ(0, updateSlaveMessage->resource_providers().providers_size());
 }
 
 
@@ -1404,7 +1400,7 @@ TEST_F(ResourceProviderManagerHttpApiTest, ResourceProviderSubscribeDisconnect)
   EXPECT_CALL(*resourceProvider1, subscribed(_))
     .WillOnce(FutureArg<0>(&subscribed1));
 
-  resourceProvider1->start(endpointDetector, ContentType::PROTOBUF);
+  resourceProvider1->start(std::move(endpointDetector), ContentType::PROTOBUF);
 
   AWAIT_READY(subscribed1);
 
@@ -1430,7 +1426,9 @@ TEST_F(ResourceProviderManagerHttpApiTest, ResourceProviderSubscribeDisconnect)
   EXPECT_CALL(*resourceProvider2, subscribed(_))
     .WillOnce(FutureArg<0>(&subscribed2));
 
-  resourceProvider2->start(endpointDetector, ContentType::PROTOBUF);
+  endpointDetector =
+    resource_provider::createEndpointDetector(agent.get()->pid);
+  resourceProvider2->start(std::move(endpointDetector), ContentType::PROTOBUF);
 
   AWAIT_READY(disconnected1);
   AWAIT_READY(subscribed2);
@@ -1460,6 +1458,21 @@ TEST_F(ResourceProviderManagerHttpApiTest, Metrics)
 
   AWAIT_READY(updateSlaveMessage);
 
+  JSON::Object snapshot = Metrics();
+
+  ASSERT_EQ(1u, snapshot.values.count("resource_provider_manager/subscribed"));
+  EXPECT_EQ(0, snapshot.values.at("resource_provider_manager/subscribed"));
+
+  ASSERT_EQ(
+      1u, snapshot.values.count("resource_provider_manager/events/subscribe"));
+  EXPECT_EQ(
+      0, snapshot.values.at("resource_provider_manager/events/subscribe"));
+
+  ASSERT_EQ(
+      1u, snapshot.values.count("resource_provider_manager/events/disconnect"));
+  EXPECT_EQ(
+      0, snapshot.values.at("resource_provider_manager/events/disconnect"));
+
   mesos::v1::ResourceProviderInfo resourceProviderInfo;
   resourceProviderInfo.set_type("org.apache.mesos.rp.test");
   resourceProviderInfo.set_name("test");
@@ -1475,13 +1488,45 @@ TEST_F(ResourceProviderManagerHttpApiTest, Metrics)
   EXPECT_CALL(*resourceProvider, subscribed(_))
     .WillOnce(FutureArg<0>(&subscribed));
 
-  resourceProvider->start(endpointDetector, ContentType::PROTOBUF);
+  resourceProvider->start(std::move(endpointDetector), ContentType::PROTOBUF);
 
   AWAIT_READY(subscribed);
 
-  const JSON::Object snapshot = Metrics();
+  snapshot = Metrics();
 
+  ASSERT_EQ(1u, snapshot.values.count("resource_provider_manager/subscribed"));
   EXPECT_EQ(1, snapshot.values.at("resource_provider_manager/subscribed"));
+
+  ASSERT_EQ(
+      1u, snapshot.values.count("resource_provider_manager/events/subscribe"));
+  EXPECT_EQ(
+      1, snapshot.values.at("resource_provider_manager/events/subscribe"));
+
+  ASSERT_EQ(
+      1u, snapshot.values.count("resource_provider_manager/events/disconnect"));
+  EXPECT_EQ(
+      0, snapshot.values.at("resource_provider_manager/events/disconnect"));
+
+  updateSlaveMessage = FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
+  resourceProvider.reset();
+
+  // Make sure the resource provider manager processes the disconnection.
+  Clock::settle();
+
+  snapshot = Metrics();
+
+  ASSERT_EQ(1u, snapshot.values.count("resource_provider_manager/subscribed"));
+  EXPECT_EQ(0, snapshot.values.at("resource_provider_manager/subscribed"));
+
+  ASSERT_EQ(
+      1u, snapshot.values.count("resource_provider_manager/events/subscribe"));
+  EXPECT_EQ(
+      1, snapshot.values.at("resource_provider_manager/events/subscribe"));
+
+  ASSERT_EQ(
+      1u, snapshot.values.count("resource_provider_manager/events/disconnect"));
+  EXPECT_EQ(
+      1, snapshot.values.at("resource_provider_manager/events/disconnect"));
 }
 
 

@@ -112,9 +112,17 @@ Future<Nothing> await_subprocess(
 }
 
 
-INSTANTIATE_TEST_CASE_P(SSLVerifyIPAdd,
-                        SSLTest,
-                        ::testing::Values("false", "true"));
+// The SSL protocols that we support through configuration flags.
+static const vector<string> protocols = {
+  // OpenSSL can be compiled with SSLV3 disabled completely, so we
+  // conditionally test for this protocol.
+#ifndef OPENSSL_NO_SSL3
+  "LIBPROCESS_SSL_ENABLE_SSL_V3",
+#endif
+  "LIBPROCESS_SSL_ENABLE_TLS_V1_0",
+  "LIBPROCESS_SSL_ENABLE_TLS_V1_1",
+  "LIBPROCESS_SSL_ENABLE_TLS_V1_2"
+};
 
 
 // Ensure that we can't create an SSL socket when SSL is not enabled.
@@ -125,112 +133,6 @@ TEST(SSL, Disabled)
   EXPECT_ERROR(Socket::create(SocketImpl::Kind::SSL));
 }
 
-
-// Test a basic back-and-forth communication within the same OS
-// process.
-TEST_P(SSLTest, BasicSameProcess)
-{
-  os::setenv("LIBPROCESS_SSL_ENABLED", "true");
-  os::setenv("LIBPROCESS_SSL_KEY_FILE", key_path().string());
-  os::setenv("LIBPROCESS_SSL_CERT_FILE", certificate_path().string());
-  os::setenv("LIBPROCESS_SSL_REQUIRE_CERT", "true");
-  os::setenv("LIBPROCESS_SSL_CA_DIR", os::getcwd());
-  os::setenv("LIBPROCESS_SSL_CA_FILE", certificate_path().string());
-  os::setenv("LIBPROCESS_SSL_VERIFY_IPADD", GetParam());
-
-  openssl::reinitialize();
-
-  Try<Socket> server = Socket::create(SocketImpl::Kind::SSL);
-  ASSERT_SOME(server);
-
-  Try<Socket> client = Socket::create(SocketImpl::Kind::SSL);
-  ASSERT_SOME(client);
-
-  // We need to explicitly bind to the address advertised by libprocess so the
-  // certificate we create in this test fixture can be verified.
-  ASSERT_SOME(server->bind(Address(net::IP(process::address().ip), 0)));
-  ASSERT_SOME(server->listen(BACKLOG));
-
-  Try<Address> address = server->address();
-  ASSERT_SOME(address);
-
-  Future<Socket> accept = server->accept();
-
-  AWAIT_ASSERT_READY(client->connect(address.get()));
-
-  // Wait for the server to have accepted the client connection.
-  AWAIT_ASSERT_READY(accept);
-
-  Socket socket = accept.get();
-
-  // Send a message from the client to the server.
-  const string data = "Hello World!";
-  AWAIT_ASSERT_READY(client->send(data));
-
-  // Verify the server received the message.
-  AWAIT_ASSERT_EQ(data, socket.recv(data.size()));
-
-  // Send the message back from the server to the client.
-  AWAIT_ASSERT_READY(socket.send(data));
-
-  // Verify the client received the message.
-  AWAIT_ASSERT_EQ(data, client->recv(data.size()));
-}
-
-
-#ifndef __WINDOWS__
-TEST_P(SSLTest, BasicSameProcessUnix)
-{
-  os::setenv("LIBPROCESS_SSL_ENABLED", "true");
-  os::setenv("LIBPROCESS_SSL_KEY_FILE", key_path().string());
-  os::setenv("LIBPROCESS_SSL_CERT_FILE", certificate_path().string());
-  // NOTE: we must set LIBPROCESS_SSL_REQUIRE_CERT to false because we
-  // don't have a hostname or IP to verify!
-  os::setenv("LIBPROCESS_SSL_REQUIRE_CERT", "false");
-  os::setenv("LIBPROCESS_SSL_CA_DIR", os::getcwd());
-  os::setenv("LIBPROCESS_SSL_CA_FILE", certificate_path().string());
-  os::setenv("LIBPROCESS_SSL_VERIFY_IPADD", GetParam());
-
-  openssl::reinitialize();
-
-  Try<unix::Socket> server = unix::Socket::create(SocketImpl::Kind::SSL);
-  ASSERT_SOME(server);
-
-  Try<unix::Socket> client = unix::Socket::create(SocketImpl::Kind::SSL);
-  ASSERT_SOME(client);
-
-  // Use a path in the temporary directory so it gets cleaned up.
-  string path = path::join(sandbox.get(), "socket");
-
-  Try<unix::Address> address = unix::Address::create(path);
-  ASSERT_SOME(address);
-
-  ASSERT_SOME(server->bind(address.get()));
-  ASSERT_SOME(server->listen(BACKLOG));
-
-  Future<unix::Socket> accept = server->accept();
-
-  AWAIT_ASSERT_READY(client->connect(address.get()));
-
-  // Wait for the server to have accepted the client connection.
-  AWAIT_ASSERT_READY(accept);
-
-  unix::Socket socket = accept.get();
-
-  // Send a message from the client to the server.
-  const string data = "Hello World!";
-  AWAIT_ASSERT_READY(client->send(data));
-
-  // Verify the server received the message.
-  AWAIT_ASSERT_EQ(data, socket.recv(data.size()));
-
-  // Send the message back from the server to the client.
-  AWAIT_ASSERT_READY(socket.send(data));
-
-  // Verify the client received the message.
-  AWAIT_ASSERT_EQ(data, client->recv(data.size()));
-}
-#endif // __WINDOWS__
 
 // Test a basic back-and-forth communication using the 'ssl-client'
 // subprocess.
@@ -408,123 +310,6 @@ TEST_F(SSLTest, VerifyCertificate)
   AWAIT_ASSERT_READY(Socket(socket.get()).send(data));
 
   AWAIT_ASSERT_READY(await_subprocess(client.get(), 0));
-}
-
-
-// Ensure that a certificate that WAS generated using the certificate
-// authority IS allowed to communicate when the
-// LIBPROCESS_SSL_REQUIRE_CERT flag is enabled.
-TEST_P(SSLTest, RequireCertificate)
-{
-  Try<Socket> server = setup_server({
-      {"LIBPROCESS_SSL_ENABLED", "true"},
-      {"LIBPROCESS_SSL_KEY_FILE", key_path().string()},
-      {"LIBPROCESS_SSL_CERT_FILE", certificate_path().string()},
-      {"LIBPROCESS_SSL_CA_FILE", certificate_path().string()},
-      {"LIBPROCESS_SSL_REQUIRE_CERT", "true"},
-      {"LIBPROCESS_SSL_VERIFY_IPADD", GetParam()}});
-  ASSERT_SOME(server);
-
-  Try<Subprocess> client = launch_client({
-      {"LIBPROCESS_SSL_ENABLED", "true"},
-      {"LIBPROCESS_SSL_KEY_FILE", key_path().string()},
-      {"LIBPROCESS_SSL_CERT_FILE", certificate_path().string()},
-      {"LIBPROCESS_SSL_CA_FILE", certificate_path().string()},
-      {"LIBPROCESS_SSL_REQUIRE_CERT", "true"},
-      {"LIBPROCESS_SSL_VERIFY_IPADD", GetParam()}},
-      server.get(),
-      true);
-  ASSERT_SOME(client);
-
-  Future<Socket> socket = server->accept();
-  AWAIT_ASSERT_READY(socket);
-
-  // TODO(jmlvanre): Remove const copy.
-  AWAIT_ASSERT_EQ(data, Socket(socket.get()).recv());
-  AWAIT_ASSERT_READY(Socket(socket.get()).send(data));
-
-  AWAIT_ASSERT_READY(await_subprocess(client.get(), 0));
-}
-
-
-// The SSL protocols that we support through configuration flags.
-static const vector<string> protocols = {
-  // OpenSSL can be compiled with SSLV3 disabled completely, so we
-  // conditionally test for this protocol.
-#ifndef OPENSSL_NO_SSL3
-  "LIBPROCESS_SSL_ENABLE_SSL_V3",
-#endif
-  "LIBPROCESS_SSL_ENABLE_TLS_V1_0",
-  "LIBPROCESS_SSL_ENABLE_TLS_V1_1",
-  "LIBPROCESS_SSL_ENABLE_TLS_V1_2"
-};
-
-
-// Test all the combinations of protocols. Ensure that they can only
-// communicate if the opposing end allows the given protocol, and not
-// otherwise.
-TEST_F(SSLTest, ProtocolMismatch)
-{
-  // For each server protocol.
-  foreach (const string& server_protocol, protocols) {
-    // For each client protocol.
-    foreach (const string& client_protocol, protocols) {
-      LOG(INFO) << "Testing server protocol '" << server_protocol
-                << "' with client protocol '" << client_protocol << "'\n";
-
-      // Set up the default server environment variables.
-      map<string, string> server_environment = {
-        {"LIBPROCESS_SSL_ENABLED", "true"},
-        {"LIBPROCESS_SSL_KEY_FILE", key_path().string()},
-        {"LIBPROCESS_SSL_CERT_FILE", certificate_path().string()}
-      };
-
-      // Set up the default client environment variables.
-      map<string, string> client_environment = {
-        {"LIBPROCESS_SSL_ENABLED", "true"},
-        {"LIBPROCESS_SSL_KEY_FILE", key_path().string()},
-        {"LIBPROCESS_SSL_CERT_FILE", certificate_path().string()},
-      };
-
-      // Disable all protocols except for the one we're testing.
-      foreach (const string& protocol, protocols) {
-        server_environment.emplace(
-            protocol,
-            stringify(protocol == server_protocol));
-
-        client_environment.emplace(
-            protocol,
-            stringify(protocol == client_protocol));
-      }
-
-      // Set up the server.
-      Try<Socket> server = setup_server(server_environment);
-      ASSERT_SOME(server);
-
-      // Launch the client.
-      Try<Subprocess> client =
-        launch_client(client_environment, server.get(), true);
-      ASSERT_SOME(client);
-
-      if (server_protocol == client_protocol) {
-        // If the protocols are the same, it is valid.
-        Future<Socket> socket = server->accept();
-        AWAIT_ASSERT_READY(socket);
-
-        // TODO(jmlvanre): Remove const copy.
-        AWAIT_ASSERT_EQ(data, Socket(socket.get()).recv());
-        AWAIT_ASSERT_READY(Socket(socket.get()).send(data));
-
-        AWAIT_ASSERT_READY(await_subprocess(client.get(), 0));
-      } else {
-        // If the protocols are NOT the same, it is invalid.
-        Future<Socket> socket = server->accept();
-        AWAIT_ASSERT_FAILED(socket);
-
-        AWAIT_ASSERT_READY(await_subprocess(client.get(), None()));
-      }
-    }
-  }
 }
 
 
@@ -918,4 +703,234 @@ TEST_F(SSLTest, ShutdownThenSend)
   AWAIT_FAILED(Socket(socket.get()).send("Hello World"));
 }
 
+
 #endif // USE_SSL_SOCKET
+
+
+class SSLVerifyIPAddTest : public SSLTest,
+                           public ::testing::WithParamInterface<const char*> {};
+
+
+INSTANTIATE_TEST_CASE_P(SSLVerifyIPAdd,
+                        SSLVerifyIPAddTest,
+                        ::testing::Values("false", "true"));
+
+
+// Test a basic back-and-forth communication within the same OS
+// process.
+TEST_P(SSLVerifyIPAddTest, BasicSameProcess)
+{
+  os::setenv("LIBPROCESS_SSL_ENABLED", "true");
+  os::setenv("LIBPROCESS_SSL_KEY_FILE", key_path().string());
+  os::setenv("LIBPROCESS_SSL_CERT_FILE", certificate_path().string());
+  os::setenv("LIBPROCESS_SSL_REQUIRE_CERT", "true");
+  os::setenv("LIBPROCESS_SSL_CA_DIR", os::getcwd());
+  os::setenv("LIBPROCESS_SSL_CA_FILE", certificate_path().string());
+  os::setenv("LIBPROCESS_SSL_VERIFY_IPADD", GetParam());
+
+  openssl::reinitialize();
+
+  Try<Socket> server = Socket::create(SocketImpl::Kind::SSL);
+  ASSERT_SOME(server);
+
+  Try<Socket> client = Socket::create(SocketImpl::Kind::SSL);
+  ASSERT_SOME(client);
+
+  // We need to explicitly bind to the address advertised by libprocess so the
+  // certificate we create in this test fixture can be verified.
+  ASSERT_SOME(server->bind(Address(net::IP(process::address().ip), 0)));
+  ASSERT_SOME(server->listen(BACKLOG));
+
+  Try<Address> address = server->address();
+  ASSERT_SOME(address);
+
+  Future<Socket> accept = server->accept();
+
+  AWAIT_ASSERT_READY(client->connect(address.get()));
+
+  // Wait for the server to have accepted the client connection.
+  AWAIT_ASSERT_READY(accept);
+
+  Socket socket = accept.get();
+
+  // Send a message from the client to the server.
+  const string data = "Hello World!";
+  AWAIT_ASSERT_READY(client->send(data));
+
+  // Verify the server received the message.
+  AWAIT_ASSERT_EQ(data, socket.recv(data.size()));
+
+  // Send the message back from the server to the client.
+  AWAIT_ASSERT_READY(socket.send(data));
+
+  // Verify the client received the message.
+  AWAIT_ASSERT_EQ(data, client->recv(data.size()));
+}
+
+
+#ifndef __WINDOWS__
+TEST_P(SSLVerifyIPAddTest, BasicSameProcessUnix)
+{
+  os::setenv("LIBPROCESS_SSL_ENABLED", "true");
+  os::setenv("LIBPROCESS_SSL_KEY_FILE", key_path().string());
+  os::setenv("LIBPROCESS_SSL_CERT_FILE", certificate_path().string());
+  // NOTE: we must set LIBPROCESS_SSL_REQUIRE_CERT to false because we
+  // don't have a hostname or IP to verify!
+  os::setenv("LIBPROCESS_SSL_REQUIRE_CERT", "false");
+  os::setenv("LIBPROCESS_SSL_CA_DIR", os::getcwd());
+  os::setenv("LIBPROCESS_SSL_CA_FILE", certificate_path().string());
+  os::setenv("LIBPROCESS_SSL_VERIFY_IPADD", GetParam());
+
+  openssl::reinitialize();
+
+  Try<unix::Socket> server = unix::Socket::create(SocketImpl::Kind::SSL);
+  ASSERT_SOME(server);
+
+  Try<unix::Socket> client = unix::Socket::create(SocketImpl::Kind::SSL);
+  ASSERT_SOME(client);
+
+  // Use a path in the temporary directory so it gets cleaned up.
+  string path = path::join(sandbox.get(), "socket");
+
+  Try<unix::Address> address = unix::Address::create(path);
+  ASSERT_SOME(address);
+
+  ASSERT_SOME(server->bind(address.get()));
+  ASSERT_SOME(server->listen(BACKLOG));
+
+  Future<unix::Socket> accept = server->accept();
+
+  AWAIT_ASSERT_READY(client->connect(address.get()));
+
+  // Wait for the server to have accepted the client connection.
+  AWAIT_ASSERT_READY(accept);
+
+  unix::Socket socket = accept.get();
+
+  // Send a message from the client to the server.
+  const string data = "Hello World!";
+  AWAIT_ASSERT_READY(client->send(data));
+
+  // Verify the server received the message.
+  AWAIT_ASSERT_EQ(data, socket.recv(data.size()));
+
+  // Send the message back from the server to the client.
+  AWAIT_ASSERT_READY(socket.send(data));
+
+  // Verify the client received the message.
+  AWAIT_ASSERT_EQ(data, client->recv(data.size()));
+}
+#endif // __WINDOWS__
+
+
+// Ensure that a certificate that WAS generated using the certificate
+// authority IS allowed to communicate when the
+// LIBPROCESS_SSL_REQUIRE_CERT flag is enabled.
+TEST_P(SSLVerifyIPAddTest, RequireCertificate)
+{
+  Try<Socket> server = setup_server({
+      {"LIBPROCESS_SSL_ENABLED", "true"},
+      {"LIBPROCESS_SSL_KEY_FILE", key_path().string()},
+      {"LIBPROCESS_SSL_CERT_FILE", certificate_path().string()},
+      {"LIBPROCESS_SSL_CA_FILE", certificate_path().string()},
+      {"LIBPROCESS_SSL_REQUIRE_CERT", "true"},
+      {"LIBPROCESS_SSL_VERIFY_IPADD", GetParam()}});
+  ASSERT_SOME(server);
+
+  Try<Subprocess> client = launch_client({
+      {"LIBPROCESS_SSL_ENABLED", "true"},
+      {"LIBPROCESS_SSL_KEY_FILE", key_path().string()},
+      {"LIBPROCESS_SSL_CERT_FILE", certificate_path().string()},
+      {"LIBPROCESS_SSL_CA_FILE", certificate_path().string()},
+      {"LIBPROCESS_SSL_REQUIRE_CERT", "true"},
+      {"LIBPROCESS_SSL_VERIFY_IPADD", GetParam()}},
+      server.get(),
+      true);
+  ASSERT_SOME(client);
+
+  Future<Socket> socket = server->accept();
+  AWAIT_ASSERT_READY(socket);
+
+  // TODO(jmlvanre): Remove const copy.
+  AWAIT_ASSERT_EQ(data, Socket(socket.get()).recv());
+  AWAIT_ASSERT_READY(Socket(socket.get()).send(data));
+
+  AWAIT_ASSERT_READY(await_subprocess(client.get(), 0));
+}
+
+
+class SSLProtocolTest
+  : public SSLTest,
+    public ::testing::WithParamInterface<std::tuple<string, string>> {};
+
+
+INSTANTIATE_TEST_CASE_P(
+    SSLProtocol,
+    SSLProtocolTest,
+    ::testing::Combine(
+        ::testing::ValuesIn(protocols), ::testing::ValuesIn(protocols)));
+
+
+// Test all the combinations of protocols. Ensure that they can only
+// communicate if the opposing end allows the given protocol, and not
+// otherwise.
+TEST_P(SSLProtocolTest, Mismatch)
+{
+  const string& server_protocol = std::get<0>(GetParam());
+  const string& client_protocol = std::get<1>(GetParam());
+
+  LOG(INFO) << "Testing server protocol '" << server_protocol
+    << "' with client protocol '" << client_protocol << "'\n";
+
+  // Set up the default server environment variables.
+  map<string, string> server_environment = {
+    {"LIBPROCESS_SSL_ENABLED", "true"},
+    {"LIBPROCESS_SSL_KEY_FILE", key_path().string()},
+    {"LIBPROCESS_SSL_CERT_FILE", certificate_path().string()}
+  };
+
+  // Set up the default client environment variables.
+  map<string, string> client_environment = {
+    {"LIBPROCESS_SSL_ENABLED", "true"},
+    {"LIBPROCESS_SSL_KEY_FILE", key_path().string()},
+    {"LIBPROCESS_SSL_CERT_FILE", certificate_path().string()},
+  };
+
+  // Disable all protocols except for the one we're testing.
+  foreach (const string& protocol, protocols) {
+    server_environment.emplace(
+        protocol,
+        stringify(protocol == server_protocol));
+
+    client_environment.emplace(
+        protocol,
+        stringify(protocol == client_protocol));
+  }
+
+  // Set up the server.
+  Try<Socket> server = setup_server(server_environment);
+  ASSERT_SOME(server);
+
+  // Launch the client.
+  Try<Subprocess> client =
+    launch_client(client_environment, server.get(), true);
+  ASSERT_SOME(client);
+
+  if (server_protocol == client_protocol) {
+    // If the protocols are the same, it is valid.
+    Future<Socket> socket = server->accept();
+    AWAIT_ASSERT_READY(socket);
+
+    // TODO(jmlvanre): Remove const copy.
+    AWAIT_ASSERT_EQ(data, Socket(socket.get()).recv());
+    AWAIT_ASSERT_READY(Socket(socket.get()).send(data));
+
+    AWAIT_ASSERT_READY(await_subprocess(client.get(), 0));
+  } else {
+    // If the protocols are NOT the same, it is invalid.
+    Future<Socket> socket = server->accept();
+    AWAIT_ASSERT_FAILED(socket);
+
+    AWAIT_ASSERT_READY(await_subprocess(client.get(), None()));
+  }
+}

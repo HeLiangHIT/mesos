@@ -257,12 +257,14 @@ public:
   void updateFramework(
       const UpdateFrameworkMessage& message);
 
-  void checkpointResources(
-      std::vector<Resource> checkpointedResources,
+  void checkpointResourceState(const Resources& resources, bool changeTotal);
+
+  void checkpointResourceState(
+      std::vector<Resource> resources,
       bool changeTotal);
 
   void checkpointResourcesMessage(
-      const std::vector<Resource>& checkpointedResources);
+      const std::vector<Resource>& resources);
 
   void applyOperation(const ApplyOperationMessage& message);
 
@@ -544,11 +546,25 @@ public:
   // executors. Otherwise, the slave attempts to shutdown/kill them.
   process::Future<Nothing> _recover();
 
-  // This is a helper to call recover() on the containerizer at the end of
-  // recover() and before __recover().
+  // This is a helper to call `recover()` on the containerizer at the end of
+  // `recover()` and before `__recover()`.
   // TODO(idownes): Remove this when we support defers to objects.
   process::Future<Nothing> _recoverContainerizer(
       const Option<state::SlaveState>& state);
+
+  // This is called after `_recoverContainerizer()`. It will add all
+  // checkpointed operations affecting agent default resources and call
+  // `OperationStatusUpdateManager::recover()`.
+  process::Future<OperationStatusUpdateManagerState> _recoverOperations(
+      const Option<state::SlaveState>& state);
+
+  // This is called after `OperationStatusUpdateManager::recover()`
+  // completes.
+  //
+  // If necessary it will add any missing operation status updates
+  // that couldn't be checkpointed before the agent failed over.
+  process::Future<Nothing> __recoverOperations(
+      const process::Future<OperationStatusUpdateManagerState>& state);
 
   // This is called when recovery finishes.
   // Made 'virtual' for Slave mocking.
@@ -660,6 +676,9 @@ private:
       const OperationStatus& status);
 
   void removeOperation(Operation* operation);
+
+  process::Future<Nothing> markResourceProviderGone(
+      const ResourceProviderID& resourceProviderId) const;
 
   Operation* getOperation(const UUID& uuid) const;
 
@@ -841,12 +860,14 @@ private:
   // have already been invalidated.
   UUID resourceVersion;
 
-  // Keeps track of the following:
-  // (1) Pending operations for resources from the agent.
-  // (2) Pending operations or terminal operations that have
-  //     unacknowledged status updates for resource provider
-  //     provided resources.
+  // Keeps track of pending operations or terminal operations that
+  // have unacknowledged status updates. These operations may affect
+  // either agent default resources or resources offered by a resource
+  // provider.
   hashmap<UUID, Operation*> operations;
+
+  // Operations that are checkpointed by the agent.
+  hashmap<UUID, Operation> checkpointedOperations;
 };
 
 

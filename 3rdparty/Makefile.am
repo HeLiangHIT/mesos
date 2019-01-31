@@ -64,6 +64,7 @@ LEVELDB = leveldb-$(LEVELDB_VERSION)
 LIBARCHIVE = libarchive-$(LIBARCHIVE_VERSION)
 LIBEV = libev-$(LIBEV_VERSION)
 LIBEVENT = libevent-$(LIBEVENT_VERSION)
+LIBSECCOMP = libseccomp-$(LIBSECCOMP_VERSION)
 NVML = nvml-$(NVML_VERSION)
 PIP = pip-$(PIP_VERSION)
 PICOJSON = picojson-$(PICOJSON_VERSION)
@@ -88,6 +89,7 @@ EXTRA_DIST =			\
   $(LIBARCHIVE).tar.gz		\
   $(LIBEV).tar.gz		\
   $(LIBEVENT).tar.gz		\
+  $(LIBSECCOMP).tar.gz		\
   $(NVML).tar.gz		\
   $(PIP).tar.gz			\
   $(PROTOBUF).tar.gz		\
@@ -99,21 +101,40 @@ EXTRA_DIST =			\
 
 # We need to patch glog in order to deal with a compilation issue when
 # compiling with clang (and C++11); see MESOS-860, MESOS-966.
-EXTRA_DIST +=		\
+EXTRA_DIST +=			\
   $(GLOG).patch
+
+# We need to patch gRPC for non-SSL build; see MEOS-9149.
+EXTRA_DIST +=			\
+  $(GRPC).patch
 
 # We need to patch leveldb to prevent it from linking to snappy and
 # tcmalloc; see MESOS-1054, MESOS-1624.
-EXTRA_DIST +=		\
+EXTRA_DIST +=			\
   $(LEVELDB).patch
 
+# We need to patch libevent 2.0.22 for added compatibilty towards openssl 1.1.x.
+EXTRA_DIST +=			\
+  $(LIBEVENT).patch
+
+# We need to patch PicoJSON for limiting the nesting level of JSON objects.
+EXTRA_DIST +=			\
+  $(PICOJSON).patch
+
 # We need to patch ZooKeeper in order to get 3.4.8 to compile on PPC LE.
-EXTRA_DIST +=		\
+EXTRA_DIST +=			\
   $(ZOOKEEPER).patch
 
-# We need to patch libevent 2.0.22 for added compatibilty towards openssl 1.1.x.
-EXTRA_DIST +=		\
-  $(LIBEVENT).patch
+# We need the following patches for CMake and/or Windows builds.
+EXTRA_DIST +=			\
+  $(BOOST).patch		\
+  $(GOOGLETEST).patch		\
+  $(LIBARCHIVE).patch		\
+  $(PROTOBUF).patch		\
+  bzip2-1.0.6.patch		\
+  cyrus-sasl-2.1.27rc3.patch	\
+  glog-da816ea70.patch		\
+  xz-5.2.3.patch
 
 CLEAN_EXTRACTED =		\
   $(BOOST)			\
@@ -130,6 +151,7 @@ CLEAN_EXTRACTED =		\
   $(LIBARCHIVE)			\
   $(LIBEV)			\
   $(LIBEVENT)			\
+  $(LIBSECCOMP)			\
   $(NVML)			\
   $(PIP)			\
   $(PICOJSON)			\
@@ -326,6 +348,22 @@ $(LIBEVENT)-build-stamp: $(LIBEVENT)-stamp
 ALL_LOCAL += $(LIBEVENT)-build-stamp
 endif
 
+if WITH_BUNDLED_LIBSECCOMP
+LIBSECCOMP_CONFIGURE_ARGS = --disable-shared
+
+LIB_LIBSECCOMP = $(LIBSECCOMP)/src/libseccomp.la
+
+$(LIB_LIBSECCOMP): $(LIBSECCOMP)-build-stamp
+
+$(LIBSECCOMP)-build-stamp: $(LIBSECCOMP)-stamp
+	cd $(LIBSECCOMP) &&						\
+	  ./configure $(LIBSECCOMP_CONFIGURE_ARGS) $(CONFIGURE_ARGS) &&	\
+	  $(MAKE) $(AM_MAKEFLAGS)
+	touch $@
+
+ALL_LOCAL += $(LIB_LIBSECCOMP)
+endif
+
 if WITH_BUNDLED_NVML
 $(NVML)/nvidia/gdk/nvml.h: $(NVML)-stamp
 ALL_LOCAL += $(NVML)-stamp
@@ -447,8 +485,13 @@ $(LIB_GRPC): $(GRPC)-build-stamp
 # flags, which will be overwritten by the command line. See:
 # https://www.gnu.org/software/make/manual/html_node/Target_002dspecific.html
 #
-# We use EXTRA_CPPFLAGS to pass `-Wno-error`, because that one needs to be
+# NOTE: We use EXTRA_CPPFLAGS to pass `-Wno-error`, because that one needs to be
 # appended and not prepended to the constructed flags.
+#
+# NOTE: We compile gRPC with its embedded c-ares library to avoid a link error
+# because Mesos is not aware of the library; see MESOS-9505. If bundle c-ares
+# to resolve MESOS-9338 in the future, we should remove `HAS_SYSTEM_CARES` below
+# and set up proper include and linker flags instead.
 $(GRPC)-build-stamp: $(GRPC)-stamp			\
                      $(PROTOBUF)-build-stamp
 	cd $(GRPC) &&					\
@@ -471,7 +514,9 @@ $(GRPC)-build-stamp: $(GRPC)-stamp			\
 	             $(LDFLAGS)"			\
 	    LDLIBS="$(LDLIBS)"				\
 	    HAS_PKG_CONFIG=false			\
-	    NO_PROTOC=false				\
+	    HAS_SYSTEM_CARES=false			\
+	    HAS_PROTOC=true				\
+	    HAS_VALID_PROTOC=true			\
 	    PROTOC="$(PROTOC)"
 	touch $@
 

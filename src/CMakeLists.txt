@@ -52,6 +52,7 @@ PROTOC_GENERATE(TARGET mesos/module/module)
 PROTOC_GENERATE(TARGET mesos/oci/spec)
 PROTOC_GENERATE(TARGET mesos/quota/quota)
 PROTOC_GENERATE(TARGET mesos/resource_provider/resource_provider)
+PROTOC_GENERATE(TARGET mesos/seccomp/seccomp)
 PROTOC_GENERATE(TARGET mesos/slave/containerizer)
 PROTOC_GENERATE(TARGET mesos/slave/oversubscription)
 PROTOC_GENERATE(TARGET mesos/state/state)
@@ -83,6 +84,7 @@ PROTOC_GENERATE(INTERNAL TARGET messages/state)
 PROTOC_GENERATE(INTERNAL TARGET slave/containerizer/mesos/isolators/network/cni/spec)
 PROTOC_GENERATE(INTERNAL TARGET slave/containerizer/mesos/isolators/docker/volume/state)
 PROTOC_GENERATE(INTERNAL TARGET slave/containerizer/mesos/provisioner/docker/message)
+PROTOC_GENERATE(INTERNAL TARGET slave/state)
 PROTOC_GENERATE(INTERNAL TARGET master/registry)
 PROTOC_GENERATE(INTERNAL TARGET resource_provider/registry)
 PROTOC_GENERATE(INTERNAL TARGET resource_provider/state)
@@ -228,6 +230,7 @@ set(COMMON_SRC
   common/http.cpp
   common/protobuf_utils.cpp
   common/resources.cpp
+  common/resource_quantities.cpp
   common/resources_utils.cpp
   common/roles.cpp
   common/type_utils.cpp
@@ -339,6 +342,13 @@ if (ENABLE_PORT_MAPPING_ISOLATOR)
   list(APPEND LINUX_SRC
     slave/containerizer/mesos/isolators/network/port_mapping.cpp)
 endif()
+
+if (ENABLE_SECCOMP_ISOLATOR)
+  list(APPEND LINUX_SRC
+    linux/seccomp/seccomp.cpp
+    linux/seccomp/seccomp_parser.cpp
+    slave/containerizer/mesos/isolators/linux/seccomp.cpp)
+endif ()
 
 set(LOCAL_SRC
   local/local.cpp)
@@ -559,7 +569,8 @@ target_compile_definitions(
   USE_CMAKE_BUILD_CONFIG
   $<$<BOOL:${ENABLE_XFS_DISK_ISOLATOR}>:ENABLE_XFS_DISK_ISOLATOR>
   $<$<BOOL:${ENABLE_PORT_MAPPING_ISOLATOR}>:ENABLE_PORT_MAPPING_ISOLATOR>
-  $<$<BOOL:${ENABLE_NETWORK_PORTS_ISOLATOR}>:ENABLE_NETWORK_PORTS_ISOLATOR>)
+  $<$<BOOL:${ENABLE_NETWORK_PORTS_ISOLATOR}>:ENABLE_NETWORK_PORTS_ISOLATOR>
+  $<$<BOOL:${ENABLE_SECCOMP_ISOLATOR}>:ENABLE_SECCOMP_ISOLATOR>)
 
 target_include_directories(
   mesos PUBLIC
@@ -579,6 +590,10 @@ target_link_libraries(
 
 if (NOT WIN32)
   target_link_libraries(mesos PUBLIC leveldb)
+endif ()
+
+if (ENABLE_SECCOMP_ISOLATOR)
+  target_link_libraries(mesos PUBLIC libseccomp)
 endif ()
 
 if (ENABLE_PRECOMPILED_HEADERS)

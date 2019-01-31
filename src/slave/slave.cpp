@@ -108,6 +108,7 @@
 #include "slave/flags.hpp"
 #include "slave/paths.hpp"
 #include "slave/slave.hpp"
+#include "slave/state.pb.h"
 #include "slave/task_status_update_manager.hpp"
 
 #ifdef __WINDOWS__
@@ -4115,8 +4116,9 @@ void Slave::updateFramework(
 }
 
 
-void Slave::checkpointResources(
-    vector<Resource> _checkpointedResources,
+// TODO(nfnt): Have this function return a `Result`.
+void Slave::checkpointResourceState(
+    vector<Resource> resources,
     bool changeTotal)
 {
   // TODO(jieyu): Here we assume that CheckpointResourcesMessages are
@@ -4145,21 +4147,72 @@ void Slave::checkpointResources(
   // instead of simply checkpointing results by the master. Fail hard here
   // instead of applying an incompatible message.
   const bool checkpointingResourceProviderResources = std::any_of(
-      _checkpointedResources.begin(),
-      _checkpointedResources.end(),
+      resources.begin(),
+      resources.end(),
       [](const Resource& resource) { return resource.has_provider_id(); });
 
   CHECK(!checkpointingResourceProviderResources)
     << "Resource providers must perform their own checkpointing";
 
-  upgradeResources(&_checkpointedResources);
+  upgradeResources(&resources);
 
-  Resources newCheckpointedResources = _checkpointedResources;
+  Resources resourcesToCheckpoint = resources;
 
-  if (newCheckpointedResources == checkpointedResources) {
-    VLOG(1) << "Ignoring new checkpointed resources identical to the current "
-            << "version: " << checkpointedResources;
+  // Tests if the given Operation needs to be checkpointed on the agent.
+  //
+  // The agent checkpoints pending CREATE/DESTROY operations on agent default
+  // resources and terminal operations on agent default resources that have
+  // unacknowledged status updates.
+  auto operationNeedsCheckpointing = [](const Operation& operation) {
+    Result<ResourceProviderID> resourceProviderId =
+      getResourceProviderId(operation.info());
+
+    CHECK(!resourceProviderId.isError())
+      << "Failed to get resource provider ID: "
+      << resourceProviderId.error();
+
+    if (resourceProviderId.isSome()) {
+      return false;
+    }
+
+    const OperationStatus& status(operation.latest_status());
+
+    // Creating and destroying a persistent volume isn't atomic, so non-terminal
+    // CREATE/DESTROY operations on agent default resources have to be
+    // checkpointed to retry the creation/removal of persistent volumes.
+    if (!protobuf::isTerminalState(status.state())) {
+      Offer::Operation::Type type = operation.info().type();
+
+      return type == Offer::Operation::CREATE ||
+             type == Offer::Operation::DESTROY;
+    }
+
+    return status.has_uuid();
+  };
+
+  hashmap<UUID, Operation> operationsToCheckpoint;
+
+  foreachpair (const UUID& uuid, Operation* operation, operations) {
+    if (operationNeedsCheckpointing(*operation)) {
+      operationsToCheckpoint.put(uuid, *operation);
+    }
+  }
+
+  if (resourcesToCheckpoint == checkpointedResources &&
+      operationsToCheckpoint == checkpointedOperations) {
+    VLOG(1) << "Ignoring new checkpointed resources and operations identical "
+            << "to the current version";
     return;
+  }
+
+  ResourceState resourceState;
+
+  foreach (const Resource& resource, resourcesToCheckpoint) {
+    resourceState.add_resources()->CopyFrom(resource);
+  }
+
+  foreach (const Operation& operation, operationsToCheckpoint.values()) {
+    resourceState.add_operations()->CopyFrom(operation);
   }
 
   // This is a sanity check to verify that the new checkpointed
@@ -4168,11 +4221,11 @@ void Slave::checkpointResources(
   // should be guaranteed compatible by the master.
   Try<Resources> _totalResources = applyCheckpointedResources(
       info.resources(),
-      newCheckpointedResources);
+      resourcesToCheckpoint);
 
   CHECK_SOME(_totalResources)
     << "Failed to apply checkpointed resources "
-    << newCheckpointedResources << " to agent's resources "
+    << resourcesToCheckpoint << " to agent's resources "
     << info.resources();
 
   if (changeTotal) {
@@ -4189,44 +4242,69 @@ void Slave::checkpointResources(
   // the agent restarts during handling of CheckpointResourcesMessage.
 
   CHECK_SOME(state::checkpoint(
-      paths::getResourcesTargetPath(metaDir),
-      newCheckpointedResources))
-    << "Failed to checkpoint resources target " << newCheckpointedResources;
+      paths::getResourceStatePath(metaDir),
+      resourceState,
+      false,
+      false))
+    << "Failed to checkpoint resources " << resourceState.resources()
+    << " and operations " << resourceState.operations();
 
-  Try<Nothing> syncResult = syncCheckpointedResources(
-      newCheckpointedResources);
+  if (resourcesToCheckpoint != checkpointedResources) {
+    CHECK_SOME(state::checkpoint(
+        paths::getResourcesTargetPath(metaDir),
+        resourcesToCheckpoint))
+      << "Failed to checkpoint resources target " << resourcesToCheckpoint;
 
-  if (syncResult.isError()) {
-    // Exit the agent (without committing the checkpoint) on failure.
-    EXIT(EXIT_FAILURE)
-      << "Failed to sync checkpointed resources: "
-      << syncResult.error();
+    Try<Nothing> syncResult = syncCheckpointedResources(resourcesToCheckpoint);
+
+    if (syncResult.isError()) {
+      // Exit the agent (without committing the checkpoint) on failure.
+      EXIT(EXIT_FAILURE)
+        << "Failed to sync checkpointed resources: "
+        << syncResult.error();
+    }
+
+    // Rename the target checkpoint to the committed checkpoint.
+    Try<Nothing> renameResult = os::rename(
+        paths::getResourcesTargetPath(metaDir),
+        paths::getResourcesInfoPath(metaDir));
+
+    if (renameResult.isError()) {
+      // Exit the agent since the checkpoint could not be committed.
+      EXIT(EXIT_FAILURE)
+        << "Failed to checkpoint resources " << resourcesToCheckpoint
+        << ": " << renameResult.error();
+    }
+
+    LOG(INFO) << "Updated checkpointed resources from "
+              << checkpointedResources << " to "
+              << resourcesToCheckpoint;
+
+    checkpointedResources = std::move(resourcesToCheckpoint);
   }
 
-  // Rename the target checkpoint to the committed checkpoint.
-  Try<Nothing> renameResult = os::rename(
-      paths::getResourcesTargetPath(metaDir),
-      paths::getResourcesInfoPath(metaDir));
+  if (operationsToCheckpoint != checkpointedOperations) {
+    LOG(INFO) << "Updated checkpointed operations from "
+              << checkpointedOperations.values() << " to "
+              << operationsToCheckpoint.values();
 
-  if (renameResult.isError()) {
-    // Exit the agent since the checkpoint could not be committed.
-    EXIT(EXIT_FAILURE)
-      << "Failed to checkpoint resources " << newCheckpointedResources
-      << ": " << renameResult.error();
+    checkpointedOperations = std::move(operationsToCheckpoint);
   }
+}
 
-  LOG(INFO) << "Updated checkpointed resources from "
-            << checkpointedResources << " to "
-            << newCheckpointedResources;
 
-  checkpointedResources = newCheckpointedResources;
+void Slave::checkpointResourceState(
+    const Resources& resources,
+    bool changeTotal)
+{
+  checkpointResourceState({resources.begin(), resources.end()}, changeTotal);
 }
 
 
 void Slave::checkpointResourcesMessage(
-    const vector<Resource>& checkpointedResources)
+    const vector<Resource>& resources)
 {
-  checkpointResources(checkpointedResources, true);
+  checkpointResourceState(resources, true);
 }
 
 
@@ -4376,6 +4454,15 @@ void Slave::applyOperation(const ApplyOperationMessage& message)
 
   addOperation(operation);
 
+  // TODO(jieyu): We should drop the operation if the resource version
+  // uuid in the operation does not match that of the agent. This is
+  // currently not possible because if any speculative operation for
+  // agent default resources fails, the agent will crash. We might
+  // want to change that behavior in the future. Revisit this once we
+  // change that behavior.
+  checkpointResourceState(
+      totalResources.filter(mesos::needCheckpointing), false);
+
   if (protobuf::isSpeculativeOperation(message.operation_info())) {
     apply(operation);
   }
@@ -4386,19 +4473,6 @@ void Slave::applyOperation(const ApplyOperationMessage& message)
   }
 
   CHECK(protobuf::isSpeculativeOperation(message.operation_info()));
-
-  // TODO(jieyu): We should drop the operation if the resource version
-  // uuid in the operation does not match that of the agent. This is
-  // currently not possible because if any speculative operation for
-  // agent default resources fails, the agent will crash. We might
-  // want to change that behavior in the future. Revisit this once we
-  // change that behavior.
-  Resources _checkpointedResources = totalResources.filter(needCheckpointing);
-
-  // TODO(nfnt): Have this function return a `Result`.
-  checkpointResources(
-      {_checkpointedResources.begin(), _checkpointedResources.end()},
-      false);
 
   UpdateOperationStatusMessage update =
     protobuf::createUpdateOperationStatusMessage(
@@ -4418,7 +4492,8 @@ void Slave::applyOperation(const ApplyOperationMessage& message)
 
   updateOperation(operation, update);
 
-  removeOperation(operation);
+  checkpointResourceState(
+      totalResources.filter(mesos::needCheckpointing), false);
 
   operationStatusUpdateManager.update(update);
 }
@@ -4610,6 +4685,26 @@ void Slave::operationStatusAcknowledgement(
     if (resourceProviderId.isSome()) {
       CHECK_NOTNULL(resourceProviderManager.get())
         ->acknowledgeOperationStatus(acknowledgement);
+    } else {
+      // Acknowledgement was for an operation on the agent's default resources
+      auto statusUuid = id::UUID::fromBytes(
+          acknowledgement.status_uuid().value());
+
+      auto operationUuid = id::UUID::fromBytes(
+          acknowledgement.operation_uuid().value());
+
+      if (operationUuid.isError() || statusUuid.isError()) {
+        LOG(WARNING) << "Dropping acknowledgement for operation " << operation
+                     << " with provided operation uuid "
+                     << acknowledgement.operation_uuid().value()
+                     << " and status uuid "
+                     << acknowledgement.status_uuid().value() << ".";
+        return;
+      }
+
+      operationStatusUpdateManager.acknowledgement(
+          operationUuid.get(),
+          statusUuid.get());
     }
 
     CHECK(operation->statuses_size() > 0);
@@ -7217,7 +7312,9 @@ Future<Nothing> Slave::recover(const Try<state::State>& state)
   }
 
   return taskStatusUpdateManager->recover(metaDir, slaveState)
-    .then(defer(self(), &Slave::_recoverContainerizer, slaveState));
+    .then(defer(self(), &Slave::_recoverContainerizer, slaveState))
+    .then(defer(self(), &Slave::_recoverOperations, slaveState))
+    .then(defer(self(), &Slave::__recoverOperations, lambda::_1));
 }
 
 
@@ -7225,6 +7322,110 @@ Future<Nothing> Slave::_recoverContainerizer(
     const Option<state::SlaveState>& state)
 {
   return containerizer->recover(state);
+}
+
+
+Future<OperationStatusUpdateManagerState> Slave::_recoverOperations(
+    const Option<state::SlaveState>& state)
+{
+  list<id::UUID> operationUuids;
+  if (state.isSome() && state->operations.isSome()) {
+    foreach (const Operation& operation, state->operations.get()) {
+      Result<ResourceProviderID> resourceProviderId =
+        getResourceProviderId(operation.info());
+
+      // Only operations affecting agent default resources are checkpointed.
+      CHECK(resourceProviderId.isNone());
+
+      operationUuids.push_back(
+          CHECK_NOTERROR(id::UUID::fromBytes(operation.uuid().value())));
+
+      addOperation(new Operation(operation));
+    }
+  }
+
+  return operationStatusUpdateManager.recover(operationUuids, flags.strict);
+}
+
+
+Future<Nothing> Slave::__recoverOperations(
+  const Future<OperationStatusUpdateManagerState>& state)
+{
+  if (!state.isReady()) {
+    EXIT(EXIT_FAILURE)
+      << "Failed to recover operation status update manager: "
+      << (state.isFailed() ? state.failure() : "future discarded") << "\n";
+  }
+
+  if (state->errors > 0) {
+    LOG(WARNING)
+      << "Errors encountered during operation status update manager recovery: "
+      << state->errors;
+
+    metrics.recovery_errors += state->errors;
+  }
+
+  foreachpair (const UUID& uuid,
+               Operation* operation,
+               operations) {
+    const id::UUID operationUuid(
+        CHECK_NOTERROR(id::UUID::fromBytes(uuid.value())));
+
+    // The operation might be from an operator API call, thus the framework
+    // ID here is optional.
+    Option<FrameworkID> frameworkId =
+      operation->has_framework_id()
+        ? operation->framework_id()
+        : Option<FrameworkID>::none();
+
+    if (operation->latest_status().state() == OPERATION_PENDING) {
+      // The agent failed over before creating an `OPERATION_FINISHED` update.
+      CHECK(!state->streams.contains(operationUuid));
+
+      Option<OperationID> operationId =
+        operation->info().has_id()
+          ? operation->info().id()
+          : Option<OperationID>::none();
+
+      UpdateOperationStatusMessage update =
+        protobuf::createUpdateOperationStatusMessage(
+            operation->uuid(),
+            protobuf::createOperationStatus(
+                OPERATION_FINISHED,
+                operationId,
+                None(),
+                None(),
+                id::UUID::random(),
+                info.id(),
+                Option<ResourceProviderID>::none()),
+            None(),
+            frameworkId,
+            info.id());
+
+      updateOperation(operation, update);
+
+      CHECK(protobuf::isSpeculativeOperation(operation->info()));
+      apply(operation);
+
+      checkpointResourceState(
+          totalResources.filter(mesos::needCheckpointing), false);
+
+      operationStatusUpdateManager.update(update);
+    } else if (!state->streams.contains(operationUuid) ||
+               state->streams.get(operationUuid)->isNone()) {
+      // The agent failed over after creating the `OPERATION_FINISHED` update,
+      // but before the operation status update manager checkpointed it.
+      operationStatusUpdateManager.update(
+          protobuf::createUpdateOperationStatusMessage(
+              operation->uuid(),
+              operation->latest_status(),
+              None(),
+              frameworkId,
+              info.id()));
+    }
+  }
+
+  return Nothing();
 }
 
 
@@ -7673,6 +7874,11 @@ UpdateSlaveMessage Slave::generateResourceProviderUpdate() const
     }
   }
 
+  // Always add a `resource_providers` field so we can distinguish the
+  // empty and unset case.
+  UpdateSlaveMessage::ResourceProviders* providers =
+    message.mutable_resource_providers();
+
   foreachvalue (ResourceProvider* resourceProvider, resourceProviders) {
     // If the resource provider has not updated its state we do not
     // need to and cannot include its information in an
@@ -7681,8 +7887,7 @@ UpdateSlaveMessage Slave::generateResourceProviderUpdate() const
       continue;
     }
 
-    UpdateSlaveMessage::ResourceProvider* provider =
-      message.mutable_resource_providers()->add_providers();
+    UpdateSlaveMessage::ResourceProvider* provider = providers->add_providers();
 
     provider->mutable_info()->CopyFrom(
         resourceProvider->info);
@@ -7824,7 +8029,7 @@ void Slave::handleResourceProviderMessage(
       // the total resources reported by the resource provider, and thus it
       // should not be applied again in an operation status update handler
       // when its terminal status update arrives. So we set the terminal
-      // `latest_status` here to prevent resource convervions elsewhere.
+      // `latest_status` here to prevent resource conversions elsewhere.
       //
       // NOTE: We only update the `latest_status` of a known operation if it
       // is not terminal yet here; its `statuses` would be updated by an
@@ -7961,17 +8166,12 @@ void Slave::handleResourceProviderMessage(
         break;
       }
 
-      // A disconnected resource provider effectively results in its
-      // total resources to be set to empty. This will cause offers to
-      // be rescinded so that no operation or task can be launched
-      // using resources from the disconnected resource provider. If
-      // later, the resource provider reconnects, it'll result in
-      // an `UpdateSlaveMessage` so that its resources can be offered
-      // again by the master.
+      // Remove the resource provider's resources from the agent's
+      // total resources and remove it from our internal tracking.
       CHECK(totalResources.contains(resourceProvider->totalResources));
       totalResources -= resourceProvider->totalResources;
 
-      resourceProvider->totalResources = Resources();
+      resourceProviders.erase(resourceProviderId);
 
       // Send the updated resources to the master if the agent is running. Note
       // that since we have already updated our copy of the latest resource
@@ -8001,7 +8201,97 @@ void Slave::handleResourceProviderMessage(
       const ResourceProviderID& resourceProviderId =
         message->remove->resourceProviderId;
 
+      if (!resourceProviders.contains(resourceProviderId)) {
+        break;
+      }
+
+      const ResourceProvider* resourceProvider =
+        resourceProviders.at(resourceProviderId);
+
+      CHECK_NOTNULL(resourceProvider);
+
+      // Transition all non-terminal operations on the resource provider to a
+      // terminal state.
+      //
+      // NOTE: We operate on a copy of the operations container since we trigger
+      // removal of current operation in below loop. This invalidates the loop
+      // iterator so it cannot be safely incremented after the loop body.
+      const hashmap<UUID, Operation*> operations = resourceProvider->operations;
+      foreachpair (const UUID& uuid, Operation * operation, operations) {
+        CHECK_NOTNULL(operation);
+
+        if (protobuf::isTerminalState(operation->latest_status().state())) {
+          continue;
+        }
+
+        // The operation might be from an operator API call, thus the framework
+        // ID here is optional.
+        Option<FrameworkID> frameworkId =
+          operation->has_framework_id()
+            ? operation->framework_id()
+            : Option<FrameworkID>::none();
+
+        Option<OperationID> operationId =
+          operation->info().has_id()
+            ? operation->info().id()
+            : Option<OperationID>::none();
+
+        UpdateOperationStatusMessage update =
+          protobuf::createUpdateOperationStatusMessage(
+              uuid,
+              protobuf::createOperationStatus(
+                  OPERATION_GONE_BY_OPERATOR,
+                  operationId,
+                  "The resource provider was removed before a terminal "
+                  "operation status update was received",
+                  None(),
+                  None(),
+                  info.id()),
+              None(),
+              frameworkId);
+
+        updateOperation(operation, update);
+
+        removeOperation(operation);
+
+        // Forward the operation status update to the master.
+        //
+        // The status update from the resource provider does not
+        // provide the agent ID (because the resource provider doesn't
+        // know it), so we inject it here.
+        UpdateOperationStatusMessage _update;
+        _update.CopyFrom(update);
+        _update.mutable_slave_id()->CopyFrom(info.id());
+        send(master.get(), _update);
+      };
+
+      // TODO(bbannier): Consider transitioning all tasks using resources from
+      // this resource provider to e.g., `TASK_GONE_BY_OPERATOR` and terminating
+      // them.
+
+      // Remove the resources of the resource provider from the agent's total.
+      // This needs to be done after triggering the operation status update so
+      // that master does not receive a operations status update for an unknown
+      // operation (gone from `UpdateSlaveMessage`).
+      totalResources -= resourceProvider->totalResources;
+
       resourceProviders.erase(resourceProviderId);
+
+      switch (state) {
+        case RECOVERING:
+        case DISCONNECTED:
+        case TERMINATING: {
+          break;
+        }
+        case RUNNING: {
+          LOG(INFO) << "Forwarding new total resources " << totalResources;
+
+          // Inform the master about the updated resources.
+          send(master.get(), generateResourceProviderUpdate());
+
+          break;
+        }
+      }
 
       LOG(INFO) << "Removed resource provider '" << resourceProviderId << "'";
       break;
@@ -8113,9 +8403,10 @@ void Slave::updateOperation(
     }
 
     // Terminal state, and the conversion has failed.
-    case OPERATION_FAILED:
+    case OPERATION_DROPPED:
     case OPERATION_ERROR:
-    case OPERATION_DROPPED: {
+    case OPERATION_FAILED:
+    case OPERATION_GONE_BY_OPERATOR: {
       break;
     }
 
@@ -8123,7 +8414,6 @@ void Slave::updateOperation(
     case OPERATION_UNSUPPORTED:
     case OPERATION_PENDING:
     case OPERATION_UNREACHABLE:
-    case OPERATION_GONE_BY_OPERATOR:
     case OPERATION_RECOVERING:
     case OPERATION_UNKNOWN: {
       LOG(FATAL)
@@ -8170,6 +8460,9 @@ void Slave::removeOperation(Operation* operation)
 
   operations.erase(uuid);
   delete operation;
+
+  checkpointResourceState(
+      totalResources.filter(mesos::needCheckpointing), false);
 }
 
 
@@ -8201,6 +8494,27 @@ ResourceProvider* Slave::getResourceProvider(const ResourceProviderID& id) const
   return nullptr;
 }
 
+
+Future<Nothing> Slave::markResourceProviderGone(
+    const ResourceProviderID& resourceProviderId) const
+{
+  auto message = [&resourceProviderId](const string& reason) {
+    return
+      "Could not mark resource provider '" + stringify(resourceProviderId) +
+      "' as gone: " + reason;
+  };
+
+  if (!resourceProviderManager.get()) {
+    return Failure(message("Agent has not registered yet"));
+  }
+
+  if (resourceProviders.contains(resourceProviderId) &&
+      !resourceProviders.at(resourceProviderId)->totalResources.empty()) {
+    return Failure(message("Resource provider has resources"));
+  }
+
+  return resourceProviderManager->removeResourceProvider(resourceProviderId);
+}
 
 void Slave::apply(Operation* operation)
 {

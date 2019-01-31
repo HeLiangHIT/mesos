@@ -18,8 +18,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
+#include <functional>
+#include <list>
 #include <memory>
 #include <numeric>
+#include <queue>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -30,6 +35,8 @@
 #include <process/defer.hpp>
 #include <process/delay.hpp>
 #include <process/dispatch.hpp>
+#include <process/future.hpp>
+#include <process/grpc.hpp>
 #include <process/id.hpp>
 #include <process/loop.hpp>
 #include <process/process.hpp>
@@ -40,21 +47,28 @@
 #include <process/metrics/metrics.hpp>
 #include <process/metrics/push_gauge.hpp>
 
+#include <mesos/http.hpp>
 #include <mesos/resources.hpp>
 #include <mesos/type_utils.hpp>
 
 #include <mesos/resource_provider/resource_provider.hpp>
+
 #include <mesos/resource_provider/storage/disk_profile_adaptor.hpp>
 
 #include <mesos/v1/resource_provider.hpp>
 
+#include <stout/bytes.hpp>
+#include <stout/duration.hpp>
 #include <stout/foreach.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
 #include <stout/linkedhashmap.hpp>
+#include <stout/nothing.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
+#include <stout/unreachable.hpp>
+#include <stout/uuid.hpp>
 
 #include <stout/os/realpath.hpp>
 
@@ -73,6 +87,8 @@
 
 #include "resource_provider/detector.hpp"
 #include "resource_provider/state.hpp"
+
+#include "resource_provider/storage/provider_process.hpp"
 
 #include "slave/container_daemon.hpp"
 #include "slave/paths.hpp"
@@ -103,11 +119,13 @@ using process::Failure;
 using process::Future;
 using process::loop;
 using process::Owned;
-using process::Process;
+using process::ProcessBase;
 using process::Promise;
 using process::Sequence;
 using process::spawn;
 using process::Timeout;
+
+using process::grpc::StatusError;
 
 using process::http::authentication::Principal;
 
@@ -129,6 +147,12 @@ using mesos::v1::resource_provider::Driver;
 
 namespace mesos {
 namespace internal {
+
+// Timeout for a CSI plugin component to create its endpoint socket.
+//
+// TODO(chhsiao): Make the timeout configurable.
+constexpr Duration CSI_ENDPOINT_CREATION_TIMEOUT = Minutes(1);
+
 
 // Returns true if the string is a valid Java identifier.
 static bool isValidName(const string& s)
@@ -162,11 +186,6 @@ static bool isValidType(const string& s)
 
   return true;
 }
-
-
-// Timeout for a CSI plugin component to create its endpoint socket.
-// TODO(chhsiao): Make the timeout configurable.
-static const Duration CSI_ENDPOINT_CREATION_TIMEOUT = Minutes(1);
 
 
 // Returns the container ID of the standalone container to run a CSI plugin
@@ -287,251 +306,32 @@ static inline Resource createRawDiskResource(
 }
 
 
-class StorageLocalResourceProviderProcess
-  : public Process<StorageLocalResourceProviderProcess>
+StorageLocalResourceProviderProcess::StorageLocalResourceProviderProcess(
+    const http::URL& _url,
+    const string& _workDir,
+    const ResourceProviderInfo& _info,
+    const SlaveID& _slaveId,
+    const Option<string>& _authToken,
+    bool _strict)
+  : ProcessBase(process::ID::generate("storage-local-resource-provider")),
+    state(RECOVERING),
+    url(_url),
+    workDir(_workDir),
+    metaDir(slave::paths::getMetaRootDir(_workDir)),
+    contentType(ContentType::PROTOBUF),
+    info(_info),
+    vendor(
+        info.storage().plugin().type() + "." + info.storage().plugin().name()),
+    slaveId(_slaveId),
+    authToken(_authToken),
+    strict(_strict),
+    resourceVersion(id::UUID::random()),
+    sequence("storage-local-resource-provider-sequence"),
+    metrics("resource_providers/" + info.type() + "." + info.name() + "/")
 {
-public:
-  explicit StorageLocalResourceProviderProcess(
-      const http::URL& _url,
-      const string& _workDir,
-      const ResourceProviderInfo& _info,
-      const SlaveID& _slaveId,
-      const Option<string>& _authToken,
-      bool _strict)
-    : ProcessBase(process::ID::generate("storage-local-resource-provider")),
-      state(RECOVERING),
-      url(_url),
-      workDir(_workDir),
-      metaDir(slave::paths::getMetaRootDir(_workDir)),
-      contentType(ContentType::PROTOBUF),
-      info(_info),
-      vendor(
-          info.storage().plugin().type() + "." +
-          info.storage().plugin().name()),
-      slaveId(_slaveId),
-      authToken(_authToken),
-      strict(_strict),
-      resourceVersion(id::UUID::random()),
-      sequence("storage-local-resource-provider-sequence"),
-      metrics("resource_providers/" + info.type() + "." + info.name() + "/")
-  {
-    diskProfileAdaptor = DiskProfileAdaptor::getAdaptor();
-    CHECK_NOTNULL(diskProfileAdaptor.get());
-  }
-
-  StorageLocalResourceProviderProcess(
-      const StorageLocalResourceProviderProcess& other) = delete;
-
-  StorageLocalResourceProviderProcess& operator=(
-      const StorageLocalResourceProviderProcess& other) = delete;
-
-  void connected();
-  void disconnected();
-  void received(const Event& event);
-
-private:
-  struct VolumeData
-  {
-    VolumeData(VolumeState&& _state)
-      : state(_state), sequence(new Sequence("volume-sequence")) {}
-
-    VolumeState state;
-
-    // We run all CSI operations for the same volume on a sequence to
-    // ensure that they are processed in a sequential order.
-    Owned<Sequence> sequence;
-  };
-
-  void initialize() override;
-  void fatal();
-
-  // The recover functions are responsible to recover the state of the
-  // resource provider and CSI volumes from checkpointed data.
-  Future<Nothing> recover();
-  Future<Nothing> recoverServices();
-  Future<Nothing> recoverVolumes();
-  Future<Nothing> recoverResourceProviderState();
-
-  void doReliableRegistration();
-
-  // The reconcile functions are responsible to reconcile the state of
-  // the resource provider from the recovered state and other sources of
-  // truth, such as CSI plugin responses or the status update manager.
-  Future<Nothing> reconcileResourceProviderState();
-  Future<Nothing> reconcileOperationStatuses();
-  ResourceConversion reconcileResources(
-      const Resources& checkpointed,
-      const Resources& discovered);
-
-  // Spawns a loop to watch for changes in the set of known profiles and update
-  // the profile mapping and storage pools accordingly.
-  void watchProfiles();
-
-  // Update the profile mapping when the set of known profiles changes.
-  // NOTE: This function never fails. If it fails to translate a new
-  // profile, the resource provider will continue to operate with the
-  // set of profiles it knows about.
-  Future<Nothing> updateProfiles(const hashset<string>& profiles);
-
-  // Reconcile the storage pools when the set of known profiles changes,
-  // or a volume with an unknown profile is destroyed.
-  Future<Nothing> reconcileStoragePools();
-
-  // Returns true if the storage pools are allowed to be reconciled when
-  // the operation is being applied.
-  static bool allowsReconciliation(const Offer::Operation& operation);
-
-  // Functions for received events.
-  void subscribed(const Event::Subscribed& subscribed);
-  void applyOperation(const Event::ApplyOperation& operation);
-  void publishResources(const Event::PublishResources& publish);
-  void acknowledgeOperationStatus(
-      const Event::AcknowledgeOperationStatus& acknowledge);
-  void reconcileOperations(
-      const Event::ReconcileOperations& reconcile);
-
-  template <csi::v0::RPC rpc>
-  Future<typename csi::v0::RPCTraits<rpc>::response_type> call(
-      csi::v0::Client client,
-      typename csi::v0::RPCTraits<rpc>::request_type&& request);
-
-  Future<csi::v0::Client> connect(const string& endpoint);
-  Future<csi::v0::Client> getService(const ContainerID& containerId);
-  Future<hashmap<ContainerID, Option<ContainerStatus>>> getContainers();
-  Future<Nothing> waitContainer(const ContainerID& containerId);
-  Future<Nothing> killContainer(const ContainerID& containerId);
-
-  Future<Nothing> prepareIdentityService();
-  Future<Nothing> prepareControllerService();
-  Future<Nothing> prepareNodeService();
-  Future<Nothing> controllerPublish(const string& volumeId);
-  Future<Nothing> controllerUnpublish(const string& volumeId);
-  Future<Nothing> nodeStage(const string& volumeId);
-  Future<Nothing> nodeUnstage(const string& volumeId);
-  Future<Nothing> nodePublish(const string& volumeId);
-  Future<Nothing> nodeUnpublish(const string& volumeId);
-  Future<string> createVolume(
-      const string& name,
-      const Bytes& capacity,
-      const DiskProfileAdaptor::ProfileInfo& profileInfo);
-  Future<bool> deleteVolume(const string& volumeId);
-  Future<Nothing> validateVolume(
-      const string& volumeId,
-      const Option<Labels>& metadata,
-      const DiskProfileAdaptor::ProfileInfo& profileInfo);
-  Future<Resources> listVolumes();
-  Future<Resources> getCapacities();
-
-  Future<Nothing> _applyOperation(const id::UUID& operationUuid);
-  void dropOperation(
-      const id::UUID& operationUuid,
-      const Option<FrameworkID>& frameworkId,
-      const Option<Offer::Operation>& operation,
-      const string& message);
-
-  Future<vector<ResourceConversion>> applyCreateDisk(
-      const Resource& resource,
-      const id::UUID& operationUuid,
-      const Resource::DiskInfo::Source::Type& targetType,
-      const Option<string>& targetProfile);
-  Future<vector<ResourceConversion>> applyDestroyDisk(
-      const Resource& resource);
-
-  Try<Nothing> updateOperationStatus(
-      const id::UUID& operationUuid,
-      const Try<vector<ResourceConversion>>& conversions);
-
-  void garbageCollectOperationPath(const id::UUID& operationUuid);
-
-  void checkpointResourceProviderState();
-  void checkpointVolumeState(const string& volumeId);
-
-  void sendResourceProviderStateUpdate();
-
-  // NOTE: This is a callback for the status update manager and should
-  // not be called directly.
-  void sendOperationStatusUpdate(
-      const UpdateOperationStatusMessage& update);
-
-  enum State
-  {
-    RECOVERING,
-    DISCONNECTED,
-    CONNECTED,
-    SUBSCRIBED,
-    READY
-  } state;
-
-  const http::URL url;
-  const string workDir;
-  const string metaDir;
-  const ContentType contentType;
-  ResourceProviderInfo info;
-  const string vendor;
-  const SlaveID slaveId;
-  const Option<string> authToken;
-  const bool strict;
-
-  shared_ptr<DiskProfileAdaptor> diskProfileAdaptor;
-
-  string bootId;
-  process::grpc::client::Runtime runtime;
-  Owned<v1::resource_provider::Driver> driver;
-  OperationStatusUpdateManager statusUpdateManager;
-
-  // The mapping of known profiles fetched from the DiskProfileAdaptor.
-  hashmap<string, DiskProfileAdaptor::ProfileInfo> profileInfos;
-
-  hashmap<ContainerID, Owned<ContainerDaemon>> daemons;
-  hashmap<ContainerID, Owned<Promise<csi::v0::Client>>> services;
-
-  Option<ContainerID> nodeContainerId;
-  Option<ContainerID> controllerContainerId;
-  Option<csi::v0::GetPluginInfoResponse> pluginInfo;
-  csi::v0::PluginCapabilities pluginCapabilities;
-  csi::v0::ControllerCapabilities controllerCapabilities;
-  csi::v0::NodeCapabilities nodeCapabilities;
-  Option<string> nodeId;
-
-  // We maintain the following invariant: if one operation depends on
-  // another, they cannot be in PENDING state at the same time, i.e.,
-  // the result of the preceding operation must have been reflected in
-  // the total resources.
-  // NOTE: We store the list of operations in a `LinkedHashMap` to
-  // preserve the order we receive the operations in case we need it.
-  LinkedHashMap<id::UUID, Operation> operations;
-  Resources totalResources;
-  id::UUID resourceVersion;
-  hashmap<string, VolumeData> volumes;
-
-  // If pending, it means that the storage pools are being reconciled, and all
-  // incoming operations that disallow reconciliation will be dropped.
-  Future<Nothing> reconciled;
-
-  // We maintain a sequence to coordinate reconciliations of storage pools. It
-  // keeps track of pending operations that disallow reconciliation, and ensures
-  // that any reconciliation waits for these operations to finish.
-  Sequence sequence;
-
-  struct Metrics
-  {
-    explicit Metrics(const string& prefix);
-    ~Metrics();
-
-    // CSI plugin metrics.
-    Counter csi_plugin_container_terminations;
-    hashmap<csi::v0::RPC, PushGauge> csi_plugin_rpcs_pending;
-    hashmap<csi::v0::RPC, Counter> csi_plugin_rpcs_successes;
-    hashmap<csi::v0::RPC, Counter> csi_plugin_rpcs_errors;
-    hashmap<csi::v0::RPC, Counter> csi_plugin_rpcs_cancelled;
-
-    // Operation state metrics.
-    hashmap<Offer::Operation::Type, PushGauge> operations_pending;
-    hashmap<Offer::Operation::Type, Counter> operations_finished;
-    hashmap<Offer::Operation::Type, Counter> operations_failed;
-    hashmap<Offer::Operation::Type, Counter> operations_dropped;
-  } metrics;
-};
+  diskProfileAdaptor = DiskProfileAdaptor::getAdaptor();
+  CHECK_NOTNULL(diskProfileAdaptor.get());
+}
 
 
 void StorageLocalResourceProviderProcess::connected()
@@ -597,6 +397,121 @@ void StorageLocalResourceProviderProcess::received(const Event& event)
       break;
     }
   }
+}
+
+
+template <
+    csi::v0::RPC rpc,
+    typename std::enable_if<rpc != csi::v0::PROBE, int>::type>
+Future<csi::v0::Response<rpc>> StorageLocalResourceProviderProcess::call(
+    const ContainerID& containerId,
+    const csi::v0::Request<rpc>& request,
+    const bool retry)
+{
+  Duration maxBackoff = DEFAULT_CSI_RETRY_BACKOFF_FACTOR;
+
+  return loop(
+      self(),
+      [=] {
+        // Perform the call with the latest service future.
+        return getService(containerId)
+          .then(defer(
+              self(),
+              &StorageLocalResourceProviderProcess::_call<rpc>,
+              lambda::_1,
+              request));
+      },
+      [=](const Try<csi::v0::Response<rpc>, StatusError>& result) mutable
+          -> Future<ControlFlow<csi::v0::Response<rpc>>> {
+        Option<Duration> backoff = retry
+          ? maxBackoff * (static_cast<double>(os::random()) / RAND_MAX)
+          : Option<Duration>::none();
+
+        maxBackoff = std::min(maxBackoff * 2, DEFAULT_CSI_RETRY_INTERVAL_MAX);
+
+        // We dispatch `__call` for testing purpose.
+        return dispatch(
+            self(),
+            &StorageLocalResourceProviderProcess::__call<rpc>,
+            result,
+            backoff);
+      });
+}
+
+
+template <csi::v0::RPC rpc>
+Future<Try<csi::v0::Response<rpc>, StatusError>>
+StorageLocalResourceProviderProcess::_call(
+    csi::v0::Client client, const csi::v0::Request<rpc>& request)
+{
+  ++metrics.csi_plugin_rpcs_pending.at(rpc);
+
+  return client.call<rpc>(request)
+    .onAny(defer(self(), [=](
+        const Future<Try<csi::v0::Response<rpc>, StatusError>>& future) {
+      --metrics.csi_plugin_rpcs_pending.at(rpc);
+      if (future.isReady() && future->isSome()) {
+        ++metrics.csi_plugin_rpcs_successes.at(rpc);
+      } else if (future.isDiscarded()) {
+        ++metrics.csi_plugin_rpcs_cancelled.at(rpc);
+      } else {
+        ++metrics.csi_plugin_rpcs_errors.at(rpc);
+      }
+    }));
+}
+
+
+template <csi::v0::RPC rpc>
+Future<ControlFlow<csi::v0::Response<rpc>>>
+StorageLocalResourceProviderProcess::__call(
+    const Try<csi::v0::Response<rpc>, StatusError>& result,
+    const Option<Duration>& backoff)
+{
+  if (result.isSome()) {
+    return Break(result.get());
+  }
+
+  if (backoff.isNone()) {
+    return Failure(result.error());
+  }
+
+  // See the link below for retryable status codes:
+  // https://grpc.io/grpc/cpp/namespacegrpc.html#aff1730578c90160528f6a8d67ef5c43b // NOLINT
+  switch (result.error().status.error_code()) {
+    case grpc::DEADLINE_EXCEEDED:
+    case grpc::UNAVAILABLE: {
+      LOG(ERROR)
+        << "Received '" << result.error() << "' while calling " << rpc
+        << ". Retrying in " << backoff.get();
+
+      return after(backoff.get())
+        .then([]() -> Future<ControlFlow<csi::v0::Response<rpc>>> {
+          return Continue();
+        });
+    }
+    case grpc::CANCELLED:
+    case grpc::UNKNOWN:
+    case grpc::INVALID_ARGUMENT:
+    case grpc::NOT_FOUND:
+    case grpc::ALREADY_EXISTS:
+    case grpc::PERMISSION_DENIED:
+    case grpc::UNAUTHENTICATED:
+    case grpc::RESOURCE_EXHAUSTED:
+    case grpc::FAILED_PRECONDITION:
+    case grpc::ABORTED:
+    case grpc::OUT_OF_RANGE:
+    case grpc::UNIMPLEMENTED:
+    case grpc::INTERNAL:
+    case grpc::DATA_LOSS: {
+      return Failure(result.error());
+    }
+    case grpc::OK:
+    case grpc::DO_NOT_USE: {
+      UNREACHABLE();
+    }
+  }
+
+  UNREACHABLE();
 }
 
 
@@ -1851,44 +1766,18 @@ void StorageLocalResourceProviderProcess::reconcileOperations(
 }
 
 
-template <csi::v0::RPC rpc>
-Future<typename csi::v0::RPCTraits<rpc>::response_type>
-StorageLocalResourceProviderProcess::call(
-    csi::v0::Client client,
-    typename csi::v0::RPCTraits<rpc>::request_type&& request)
-{
-  ++metrics.csi_plugin_rpcs_pending.at(rpc);
-
-  return client.call<rpc>(std::move(request))
-    .onAny(defer(self(), [=](
-        const Future<typename csi::v0::RPCTraits<rpc>::response_type>& future) {
-      --metrics.csi_plugin_rpcs_pending.at(rpc);
-      if (future.isReady()) {
-        ++metrics.csi_plugin_rpcs_successes.at(rpc);
-      } else if (future.isFailed()) {
-        ++metrics.csi_plugin_rpcs_errors.at(rpc);
-      } else {
-        ++metrics.csi_plugin_rpcs_cancelled.at(rpc);
-      }
-    }));
-}
-
-
-// Returns a future of a CSI client that waits for the endpoint socket
-// to appear if necessary, then connects to the socket and check its
-// readiness.
-Future<csi::v0::Client> StorageLocalResourceProviderProcess::connect(
+Future<csi::v0::Client> StorageLocalResourceProviderProcess::waitService(
     const string& endpoint)
 {
-  Future<csi::v0::Client> future;
+  Future<csi::v0::Client> service;
 
   if (os::exists(endpoint)) {
-    future = csi::v0::Client("unix://" + endpoint, runtime);
+    service = csi::v0::Client("unix://" + endpoint, runtime);
   } else {
     // Wait for the endpoint socket to appear until the timeout expires.
     Timeout timeout = Timeout::in(CSI_ENDPOINT_CREATION_TIMEOUT);
 
-    future = loop(
+    service = loop(
         self(),
         [=]() -> Future<Nothing> {
           if (timeout.expired()) {
@@ -1906,20 +1795,21 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::connect(
         });
   }
 
-  return future
+  return service
     .then(defer(self(), [=](csi::v0::Client client) {
-      return call<csi::v0::PROBE>(client, csi::v0::ProbeRequest())
-        .then(defer(self(), [=](
-            const csi::v0::ProbeResponse& response) -> csi::v0::Client {
+      return _call<csi::v0::PROBE>(client, csi::v0::ProbeRequest())
+        .then([=](const Try<csi::v0::ProbeResponse, StatusError>& result)
+            -> Future<csi::v0::Client> {
+          if (result.isError()) {
+            return Failure(result.error());
+          }
+
           return client;
-        }));
+        });
     }));
 }
 
 
-// Returns a future of the latest CSI client for the specified plugin
-// container. If the container is not already running, this method will
-// start a new a new container daemon.
 Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
     const ContainerID& containerId)
 {
@@ -2017,7 +1907,12 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
       config->resources(),
       containerInfo,
       std::function<Future<Nothing>()>(defer(self(), [=]() -> Future<Nothing> {
-        CHECK(services.at(containerId)->associate(connect(endpointPath)));
+        LOG(INFO)
+          << "CSI plugin container '" << containerId << "' started for plugin"
+          << " type '" << info.storage().plugin().type() << "' and "
+          << " name '" << info.storage().plugin().name() << "'";
+
+        CHECK(services.at(containerId)->associate(waitService(endpointPath)));
         return services.at(containerId)->future()
           .then([] { return Nothing(); });
       })),
@@ -2026,6 +1921,11 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
 
         services.at(containerId)->discard();
         services.at(containerId).reset(new Promise<csi::v0::Client>());
+
+        LOG(INFO)
+          << "CSI plugin container '" << containerId << "' stopped for plugin"
+          << " type '" << info.storage().plugin().type() << "' and "
+          << " name '" << info.storage().plugin().name() << "'";
 
         if (os::exists(endpointPath)) {
           Try<Nothing> rm = os::rm(endpointPath);
@@ -2060,9 +1960,6 @@ Future<csi::v0::Client> StorageLocalResourceProviderProcess::getService(
 }
 
 
-// Lists all running plugin containers for this resource provider.
-// NOTE: This might return containers that are not actually running,
-// e.g., if they are being destroyed.
 Future<hashmap<ContainerID, Option<ContainerStatus>>>
 StorageLocalResourceProviderProcess::getContainers()
 {
@@ -2115,7 +2012,6 @@ StorageLocalResourceProviderProcess::getContainers()
 }
 
 
-// Waits for the specified plugin container to be terminated.
 Future<Nothing> StorageLocalResourceProviderProcess::waitContainer(
     const ContainerID& containerId)
 {
@@ -2142,7 +2038,6 @@ Future<Nothing> StorageLocalResourceProviderProcess::waitContainer(
 }
 
 
-// Kills the specified plugin container.
 Future<Nothing> StorageLocalResourceProviderProcess::killContainer(
     const ContainerID& containerId)
 {
@@ -2173,36 +2068,27 @@ Future<Nothing> StorageLocalResourceProviderProcess::prepareIdentityService()
 {
   CHECK_SOME(nodeContainerId);
 
-  return getService(nodeContainerId.get())
-    .then(defer(self(), [=](csi::v0::Client client) {
-      // Get the plugin info.
-      return call<csi::v0::GET_PLUGIN_INFO>(
-          client, csi::v0::GetPluginInfoRequest())
-        .then(defer(self(), [=](
-            const csi::v0::GetPluginInfoResponse& response) {
-          pluginInfo = response;
+  // Get the plugin info.
+  return call<csi::v0::GET_PLUGIN_INFO>(
+      nodeContainerId.get(), csi::v0::GetPluginInfoRequest())
+    .then(defer(self(), [=](const csi::v0::GetPluginInfoResponse& response) {
+      pluginInfo = response;
 
-          LOG(INFO) << "Node plugin loaded: " << stringify(pluginInfo.get());
+      LOG(INFO) << "Node plugin loaded: " << stringify(pluginInfo.get());
 
-          // Get the latest service future before proceeding to the next step.
-          return getService(nodeContainerId.get());
-        }));
-    }))
-    .then(defer(self(), [=](csi::v0::Client client) {
       // Get the plugin capabilities.
       return call<csi::v0::GET_PLUGIN_CAPABILITIES>(
-          client, csi::v0::GetPluginCapabilitiesRequest())
-        .then(defer(self(), [=](
-            const csi::v0::GetPluginCapabilitiesResponse& response) {
-          pluginCapabilities = response.capabilities();
+          nodeContainerId.get(), csi::v0::GetPluginCapabilitiesRequest());
+    }))
+    .then(defer(self(), [=](
+        const csi::v0::GetPluginCapabilitiesResponse& response) {
+      pluginCapabilities = response.capabilities();
 
-          return Nothing();
-        }));
+      return Nothing();
     }));
 }
 
 
-// NOTE: This can only be called after `prepareIdentityService`.
 Future<Nothing> StorageLocalResourceProviderProcess::prepareControllerService()
 {
   CHECK_SOME(pluginInfo);
@@ -2216,33 +2102,54 @@ Future<Nothing> StorageLocalResourceProviderProcess::prepareControllerService()
         stringify(CSIPluginContainerInfo::CONTROLLER_SERVICE) + " not found");
   }
 
-  return getService(controllerContainerId.get())
-    .then(defer(self(), [=](csi::v0::Client client) {
-      // Get the controller plugin info and check for consistency.
-      return call<csi::v0::GET_PLUGIN_INFO>(
-          client, csi::v0::GetPluginInfoRequest())
-        .then(defer(self(), [=](
-            const csi::v0::GetPluginInfoResponse& response) {
-          LOG(INFO) << "Controller plugin loaded: " << stringify(response);
+  // Get the controller plugin info and check for consistency.
+  return call<csi::v0::GET_PLUGIN_INFO>(
+      controllerContainerId.get(), csi::v0::GetPluginInfoRequest())
+    .then(defer(self(), [=](const csi::v0::GetPluginInfoResponse& response) {
+      LOG(INFO) << "Controller plugin loaded: " << stringify(response);
 
-          if (pluginInfo->name() != response.name() ||
-              pluginInfo->vendor_version() != response.vendor_version()) {
-            LOG(WARNING)
-              << "Inconsistent controller and node plugin components. Please "
-                 "check with the plugin vendor to ensure compatibility.";
-          }
+      if (pluginInfo->name() != response.name() ||
+          pluginInfo->vendor_version() != response.vendor_version()) {
+        LOG(WARNING)
+          << "Inconsistent controller and node plugin components. Please check "
+             "with the plugin vendor to ensure compatibility.";
+      }
 
-          // Get the latest service future before proceeding to the next step.
-          return getService(controllerContainerId.get());
-        }));
-    }))
-    .then(defer(self(), [=](csi::v0::Client client) {
       // Get the controller capabilities.
       return call<csi::v0::CONTROLLER_GET_CAPABILITIES>(
-          client, csi::v0::ControllerGetCapabilitiesRequest())
-        .then(defer(self(), [=](
-            const csi::v0::ControllerGetCapabilitiesResponse& response) {
-          controllerCapabilities = response.capabilities();
+          controllerContainerId.get(),
+          csi::v0::ControllerGetCapabilitiesRequest());
+    }))
+    .then(defer(self(), [=](
+        const csi::v0::ControllerGetCapabilitiesResponse& response) {
+      controllerCapabilities = response.capabilities();
+
+      return Nothing();
+    }));
+}
+
+
+Future<Nothing> StorageLocalResourceProviderProcess::prepareNodeService()
+{
+  CHECK_SOME(nodeContainerId);
+
+  // Get the node capabilities.
+  return call<csi::v0::NODE_GET_CAPABILITIES>(
+      nodeContainerId.get(), csi::v0::NodeGetCapabilitiesRequest())
+    .then(defer(self(), [=](
+        const csi::v0::NodeGetCapabilitiesResponse& response)
+        -> Future<Nothing> {
+      nodeCapabilities = response.capabilities();
+
+      if (!controllerCapabilities.publishUnpublishVolume) {
+        return Nothing();
+      }
+
+      // Get the node ID.
+      return call<csi::v0::NODE_GET_ID>(
+          nodeContainerId.get(), csi::v0::NodeGetIdRequest())
+        .then(defer(self(), [=](const csi::v0::NodeGetIdResponse& response) {
+          nodeId = response.node_id();
 
           return Nothing();
         }));
@@ -2250,47 +2157,6 @@ Future<Nothing> StorageLocalResourceProviderProcess::prepareControllerService()
 }
 
 
-// NOTE: This can only be called after `prepareIdentityService` and
-// `prepareControllerService`.
-Future<Nothing> StorageLocalResourceProviderProcess::prepareNodeService()
-{
-  CHECK_SOME(nodeContainerId);
-
-  return getService(nodeContainerId.get())
-    .then(defer(self(), [=](csi::v0::Client client) {
-      // Get the node capabilities.
-      return call<csi::v0::NODE_GET_CAPABILITIES>(
-          client, csi::v0::NodeGetCapabilitiesRequest())
-        .then(defer(self(), [=](
-            const csi::v0::NodeGetCapabilitiesResponse& response)
-            -> Future<csi::v0::Client> {
-          nodeCapabilities = response.capabilities();
-
-          // Get the latest service future before proceeding to the next step.
-          return getService(nodeContainerId.get());
-        }))
-        .then(defer(self(), [=](csi::v0::Client client) -> Future<Nothing> {
-          if (!controllerCapabilities.publishUnpublishVolume) {
-            return Nothing();
-          }
-
-          // Get the node ID.
-          return call<csi::v0::NODE_GET_ID>(client, csi::v0::NodeGetIdRequest())
-            .then(defer(self(), [=](
-                const csi::v0::NodeGetIdResponse& response) {
-              nodeId = response.node_id();
-
-              return Nothing();
-            }));
-        }));
-    }));
-}
-
-
-// Transitions the state of the specified volume from `CREATED` or
-// `CONTROLLER_PUBLISH` to `NODE_READY`.
-// NOTE: This can only be called after `prepareControllerService` and
-// `prepareNodeService`.
 Future<Nothing> StorageLocalResourceProviderProcess::controllerPublish(
     const string& volumeId)
 {
@@ -2306,49 +2172,39 @@ Future<Nothing> StorageLocalResourceProviderProcess::controllerPublish(
     return Nothing();
   }
 
-  CHECK_SOME(controllerContainerId);
+  if (volume.state.state() == VolumeState::CREATED) {
+    volume.state.set_state(VolumeState::CONTROLLER_PUBLISH);
+    checkpointVolumeState(volumeId);
+  }
+
+  CHECK_EQ(VolumeState::CONTROLLER_PUBLISH, volume.state.state());
+
   CHECK_SOME(nodeId);
 
-  return getService(controllerContainerId.get())
+  csi::v0::ControllerPublishVolumeRequest request;
+  request.set_volume_id(volumeId);
+  request.set_node_id(nodeId.get());
+  *request.mutable_volume_capability() = volume.state.volume_capability();
+  request.set_readonly(false);
+  *request.mutable_volume_attributes() = volume.state.volume_attributes();
+
+  CHECK_SOME(controllerContainerId);
+
+  return call<csi::v0::CONTROLLER_PUBLISH_VOLUME>(
+      controllerContainerId.get(), std::move(request))
     .then(defer(self(), [this, volumeId](
-        csi::v0::Client client) -> Future<Nothing> {
+        const csi::v0::ControllerPublishVolumeResponse& response) {
       VolumeData& volume = volumes.at(volumeId);
 
-      if (volume.state.state() == VolumeState::CREATED) {
-        volume.state.set_state(VolumeState::CONTROLLER_PUBLISH);
-        checkpointVolumeState(volumeId);
-      }
+      volume.state.set_state(VolumeState::NODE_READY);
+      *volume.state.mutable_publish_info() = response.publish_info();
+      checkpointVolumeState(volumeId);
 
-      CHECK_EQ(VolumeState::CONTROLLER_PUBLISH, volume.state.state());
-
-      csi::v0::ControllerPublishVolumeRequest request;
-      request.set_volume_id(volumeId);
-      request.set_node_id(nodeId.get());
-      request.mutable_volume_capability()
-        ->CopyFrom(volume.state.volume_capability());
-      request.set_readonly(false);
-      *request.mutable_volume_attributes() = volume.state.volume_attributes();
-
-      return call<csi::v0::CONTROLLER_PUBLISH_VOLUME>(
-          client, std::move(request))
-        .then(defer(self(), [this, volumeId](
-            const csi::v0::ControllerPublishVolumeResponse& response) {
-          VolumeData& volume = volumes.at(volumeId);
-
-          volume.state.set_state(VolumeState::NODE_READY);
-          *volume.state.mutable_publish_info() = response.publish_info();
-          checkpointVolumeState(volumeId);
-
-          return Nothing();
-        }));
+      return Nothing();
     }));
 }
 
 
-// Transitions the state of the specified volume from `NODE_READY`,
-// `CONTROLLER_PUBLISH` or `CONTROLLER_UNPUBLISH` to `CREATED`.
-// NOTE: This can only be called after `prepareControllerService` and
-// `prepareNodeService`.
 Future<Nothing> StorageLocalResourceProviderProcess::controllerUnpublish(
     const string& volumeId)
 {
@@ -2364,46 +2220,39 @@ Future<Nothing> StorageLocalResourceProviderProcess::controllerUnpublish(
     return Nothing();
   }
 
-  CHECK_SOME(controllerContainerId);
+  // A previously failed `ControllerPublishVolume` call can be recovered through
+  // the current `ControllerUnpublishVolume` call. See:
+  // https://github.com/container-storage-interface/spec/blob/v0.2.0/spec.md#controllerpublishvolume // NOLINT
+  if (volume.state.state() == VolumeState::NODE_READY ||
+      volume.state.state() == VolumeState::CONTROLLER_PUBLISH) {
+    volume.state.set_state(VolumeState::CONTROLLER_UNPUBLISH);
+    checkpointVolumeState(volumeId);
+  }
+
+  CHECK_EQ(VolumeState::CONTROLLER_UNPUBLISH, volume.state.state());
+
   CHECK_SOME(nodeId);
 
-  return getService(controllerContainerId.get())
-    .then(defer(self(), [this, volumeId](csi::v0::Client client) {
+  csi::v0::ControllerUnpublishVolumeRequest request;
+  request.set_volume_id(volumeId);
+  request.set_node_id(nodeId.get());
+
+  CHECK_SOME(controllerContainerId);
+
+  return call<csi::v0::CONTROLLER_UNPUBLISH_VOLUME>(
+      controllerContainerId.get(), std::move(request))
+    .then(defer(self(), [this, volumeId] {
       VolumeData& volume = volumes.at(volumeId);
 
-      // A previously failed `ControllerPublishVolume` call can be recovered
-      // through the current `ControllerUnpublishVolume` call. See:
-      // https://github.com/container-storage-interface/spec/blob/v0.2.0/spec.md#controllerpublishvolume // NOLINT
-      if (volume.state.state() == VolumeState::NODE_READY ||
-          volume.state.state() == VolumeState::CONTROLLER_PUBLISH) {
-        volume.state.set_state(VolumeState::CONTROLLER_UNPUBLISH);
-        checkpointVolumeState(volumeId);
-      }
+      volume.state.set_state(VolumeState::CREATED);
+      volume.state.mutable_publish_info()->clear();
+      checkpointVolumeState(volumeId);
 
-      CHECK_EQ(VolumeState::CONTROLLER_UNPUBLISH, volume.state.state());
-
-      csi::v0::ControllerUnpublishVolumeRequest request;
-      request.set_volume_id(volumeId);
-      request.set_node_id(nodeId.get());
-
-      return call<csi::v0::CONTROLLER_UNPUBLISH_VOLUME>(
-          client, std::move(request))
-        .then(defer(self(), [this, volumeId] {
-          VolumeData& volume = volumes.at(volumeId);
-
-          volume.state.set_state(VolumeState::CREATED);
-          volume.state.mutable_publish_info()->clear();
-          checkpointVolumeState(volumeId);
-
-          return Nothing();
-        }));
+      return Nothing();
     }));
 }
 
 
-// Transitions the state of the specified volume from `NODE_READY` or
-// `NODE_STAGE` to `VOL_READY`.
-// NOTE: This can only be called after `prepareNodeService`.
 Future<Nothing> StorageLocalResourceProviderProcess::nodeStage(
     const string& volumeId)
 {
@@ -2420,59 +2269,50 @@ Future<Nothing> StorageLocalResourceProviderProcess::nodeStage(
     return Nothing();
   }
 
+  const string stagingPath = csi::paths::getMountStagingPath(
+      csi::paths::getMountRootDir(
+          slave::paths::getCsiRootDir(workDir),
+          info.storage().plugin().type(),
+          info.storage().plugin().name()),
+      volumeId);
+
+  Try<Nothing> mkdir = os::mkdir(stagingPath);
+  if (mkdir.isError()) {
+    return Failure(
+        "Failed to create mount staging path '" + stagingPath +
+        "': " + mkdir.error());
+  }
+
+  if (volume.state.state() == VolumeState::NODE_READY) {
+    volume.state.set_state(VolumeState::NODE_STAGE);
+    checkpointVolumeState(volumeId);
+  }
+
+  CHECK_EQ(VolumeState::NODE_STAGE, volume.state.state());
+
+  csi::v0::NodeStageVolumeRequest request;
+  request.set_volume_id(volumeId);
+  *request.mutable_publish_info() = volume.state.publish_info();
+  request.set_staging_target_path(stagingPath);
+  *request.mutable_volume_capability() = volume.state.volume_capability();
+  *request.mutable_volume_attributes() = volume.state.volume_attributes();
+
   CHECK_SOME(nodeContainerId);
 
-  return getService(nodeContainerId.get())
-    .then(defer(self(), [this, volumeId](
-        csi::v0::Client client) -> Future<Nothing> {
+  return call<csi::v0::NODE_STAGE_VOLUME>(
+      nodeContainerId.get(), std::move(request))
+    .then(defer(self(), [this, volumeId] {
       VolumeData& volume = volumes.at(volumeId);
 
-      const string stagingPath = csi::paths::getMountStagingPath(
-          csi::paths::getMountRootDir(
-              slave::paths::getCsiRootDir(workDir),
-              info.storage().plugin().type(),
-              info.storage().plugin().name()),
-          volumeId);
+      volume.state.set_state(VolumeState::VOL_READY);
+      volume.state.set_boot_id(bootId);
+      checkpointVolumeState(volumeId);
 
-      Try<Nothing> mkdir = os::mkdir(stagingPath);
-      if (mkdir.isError()) {
-        return Failure(
-            "Failed to create mount staging path '" + stagingPath + "': " +
-            mkdir.error());
-      }
-
-      if (volume.state.state() == VolumeState::NODE_READY) {
-        volume.state.set_state(VolumeState::NODE_STAGE);
-        checkpointVolumeState(volumeId);
-      }
-
-      CHECK_EQ(VolumeState::NODE_STAGE, volume.state.state());
-
-      csi::v0::NodeStageVolumeRequest request;
-      request.set_volume_id(volumeId);
-      *request.mutable_publish_info() = volume.state.publish_info();
-      request.set_staging_target_path(stagingPath);
-      request.mutable_volume_capability()
-        ->CopyFrom(volume.state.volume_capability());
-      *request.mutable_volume_attributes() = volume.state.volume_attributes();
-
-      return call<csi::v0::NODE_STAGE_VOLUME>(client, std::move(request))
-        .then(defer(self(), [this, volumeId] {
-          VolumeData& volume = volumes.at(volumeId);
-
-          volume.state.set_state(VolumeState::VOL_READY);
-          volume.state.set_boot_id(bootId);
-          checkpointVolumeState(volumeId);
-
-          return Nothing();
-        }));
+      return Nothing();
     }));
 }
 
 
-// Transitions the state of the specified volume from `VOL_READY`, `NODE_STAGE`
-// or `NODE_UNSTAGE` to `NODE_READY`.
-// NOTE: This can only be called after `prepareNodeService`.
 Future<Nothing> StorageLocalResourceProviderProcess::nodeUnstage(
     const string& volumeId)
 {
@@ -2489,180 +2329,161 @@ Future<Nothing> StorageLocalResourceProviderProcess::nodeUnstage(
     return Nothing();
   }
 
+  const string stagingPath = csi::paths::getMountStagingPath(
+      csi::paths::getMountRootDir(
+          slave::paths::getCsiRootDir(workDir),
+          info.storage().plugin().type(),
+          info.storage().plugin().name()),
+      volumeId);
+
+  CHECK(os::exists(stagingPath));
+
+  // A previously failed `NodeStageVolume` call can be recovered through the
+  // current `NodeUnstageVolume` call. See:
+  // https://github.com/container-storage-interface/spec/blob/v0.2.0/spec.md#nodestagevolume // NOLINT
+  if (volume.state.state() == VolumeState::VOL_READY ||
+      volume.state.state() == VolumeState::NODE_STAGE) {
+    volume.state.set_state(VolumeState::NODE_UNSTAGE);
+    checkpointVolumeState(volumeId);
+  }
+
+  CHECK_EQ(VolumeState::NODE_UNSTAGE, volume.state.state());
+
+  csi::v0::NodeUnstageVolumeRequest request;
+  request.set_volume_id(volumeId);
+  request.set_staging_target_path(stagingPath);
+
   CHECK_SOME(nodeContainerId);
 
-  return getService(nodeContainerId.get())
-    .then(defer(self(), [this, volumeId](csi::v0::Client client) {
+  return call<csi::v0::NODE_UNSTAGE_VOLUME>(
+      nodeContainerId.get(), std::move(request))
+    .then(defer(self(), [this, volumeId] {
       VolumeData& volume = volumes.at(volumeId);
 
-      const string stagingPath = csi::paths::getMountStagingPath(
-          csi::paths::getMountRootDir(
-              slave::paths::getCsiRootDir(workDir),
-              info.storage().plugin().type(),
-              info.storage().plugin().name()),
-          volumeId);
+      volume.state.set_state(VolumeState::NODE_READY);
+      volume.state.clear_boot_id();
+      checkpointVolumeState(volumeId);
 
-      CHECK(os::exists(stagingPath));
-
-      // A previously failed `NodeStageVolume` call can be recovered through the
-      // current `NodeUnstageVolume` call. See:
-      // https://github.com/container-storage-interface/spec/blob/v0.2.0/spec.md#nodestagevolume // NOLINT
-      if (volume.state.state() == VolumeState::VOL_READY ||
-          volume.state.state() == VolumeState::NODE_STAGE) {
-        volume.state.set_state(VolumeState::NODE_UNSTAGE);
-        checkpointVolumeState(volumeId);
-      }
-
-      CHECK_EQ(VolumeState::NODE_UNSTAGE, volume.state.state());
-
-      csi::v0::NodeUnstageVolumeRequest request;
-      request.set_volume_id(volumeId);
-      request.set_staging_target_path(stagingPath);
-
-      return call<csi::v0::NODE_UNSTAGE_VOLUME>(client, std::move(request))
-        .then(defer(self(), [this, volumeId] {
-          VolumeData& volume = volumes.at(volumeId);
-
-          volume.state.set_state(VolumeState::NODE_READY);
-          volume.state.clear_boot_id();
-          checkpointVolumeState(volumeId);
-
-          return Nothing();
-        }));
+      return Nothing();
     }));
 }
 
 
-// Transitions the state of the specified volume from `VOL_READY` or
-// `NODE_PUBLISH` to `PUBLISHED`.
-// NOTE: This can only be called after `prepareNodeService`.
 Future<Nothing> StorageLocalResourceProviderProcess::nodePublish(
     const string& volumeId)
 {
   CHECK(volumes.contains(volumeId));
+  VolumeData& volume = volumes.at(volumeId);
+
+  const string targetPath = csi::paths::getMountTargetPath(
+      csi::paths::getMountRootDir(
+          slave::paths::getCsiRootDir(workDir),
+          info.storage().plugin().type(),
+          info.storage().plugin().name()),
+      volumeId);
+
+  Try<Nothing> mkdir = os::mkdir(targetPath);
+  if (mkdir.isError()) {
+    return Failure(
+        "Failed to create mount target path '" + targetPath +
+        "': " + mkdir.error());
+  }
+
+  if (volume.state.state() == VolumeState::VOL_READY) {
+    volume.state.set_state(VolumeState::NODE_PUBLISH);
+    checkpointVolumeState(volumeId);
+  }
+
+  CHECK_EQ(VolumeState::NODE_PUBLISH, volume.state.state());
+
+  csi::v0::NodePublishVolumeRequest request;
+  request.set_volume_id(volumeId);
+  *request.mutable_publish_info() = volume.state.publish_info();
+  request.set_target_path(targetPath);
+  *request.mutable_volume_capability() = volume.state.volume_capability();
+  request.set_readonly(false);
+  *request.mutable_volume_attributes() = volume.state.volume_attributes();
+
+  if (nodeCapabilities.stageUnstageVolume) {
+    const string stagingPath = csi::paths::getMountStagingPath(
+        csi::paths::getMountRootDir(
+            slave::paths::getCsiRootDir(workDir),
+            info.storage().plugin().type(),
+            info.storage().plugin().name()),
+        volumeId);
+
+    CHECK(os::exists(stagingPath));
+
+    request.set_staging_target_path(stagingPath);
+  }
+
   CHECK_SOME(nodeContainerId);
 
-  return getService(nodeContainerId.get())
-    .then(defer(self(), [this, volumeId](
-        csi::v0::Client client) -> Future<Nothing> {
+  return call<csi::v0::NODE_PUBLISH_VOLUME>(
+      nodeContainerId.get(), std::move(request))
+    .then(defer(self(), [this, volumeId] {
       VolumeData& volume = volumes.at(volumeId);
 
-      const string targetPath = csi::paths::getMountTargetPath(
-          csi::paths::getMountRootDir(
-              slave::paths::getCsiRootDir(workDir),
-              info.storage().plugin().type(),
-              info.storage().plugin().name()),
-          volumeId);
+      volume.state.set_state(VolumeState::PUBLISHED);
+      checkpointVolumeState(volumeId);
 
-      Try<Nothing> mkdir = os::mkdir(targetPath);
-      if (mkdir.isError()) {
-        return Failure(
-            "Failed to create mount target path '" + targetPath + "': " +
-            mkdir.error());
-      }
-
-      if (volume.state.state() == VolumeState::VOL_READY) {
-        volume.state.set_state(VolumeState::NODE_PUBLISH);
-        checkpointVolumeState(volumeId);
-      }
-
-      CHECK_EQ(VolumeState::NODE_PUBLISH, volume.state.state());
-
-      csi::v0::NodePublishVolumeRequest request;
-      request.set_volume_id(volumeId);
-      *request.mutable_publish_info() = volume.state.publish_info();
-      request.set_target_path(targetPath);
-      request.mutable_volume_capability()
-        ->CopyFrom(volume.state.volume_capability());
-      request.set_readonly(false);
-      *request.mutable_volume_attributes() = volume.state.volume_attributes();
-
-      if (nodeCapabilities.stageUnstageVolume) {
-        const string stagingPath = csi::paths::getMountStagingPath(
-            csi::paths::getMountRootDir(
-                slave::paths::getCsiRootDir(workDir),
-                info.storage().plugin().type(),
-                info.storage().plugin().name()),
-            volumeId);
-
-        CHECK(os::exists(stagingPath));
-
-        request.set_staging_target_path(stagingPath);
-      }
-
-      return call<csi::v0::NODE_PUBLISH_VOLUME>(client, std::move(request))
-        .then(defer(self(), [this, volumeId] {
-          VolumeData& volume = volumes.at(volumeId);
-
-          volume.state.set_state(VolumeState::PUBLISHED);
-          checkpointVolumeState(volumeId);
-
-          return Nothing();
-        }));
+      return Nothing();
     }));
 }
 
 
-// Transitions the state of the specified volume from `PUBLISHED`,
-// `NODE_PUBLISH` or `NODE_UNPUBLISH` to `VOL_READY`.
-// NOTE: This can only be called after `prepareNodeService`.
 Future<Nothing> StorageLocalResourceProviderProcess::nodeUnpublish(
     const string& volumeId)
 {
   CHECK(volumes.contains(volumeId));
+  VolumeData& volume = volumes.at(volumeId);
+
+  const string targetPath = csi::paths::getMountTargetPath(
+      csi::paths::getMountRootDir(
+          slave::paths::getCsiRootDir(workDir),
+          info.storage().plugin().type(),
+          info.storage().plugin().name()),
+      volumeId);
+
+  CHECK(os::exists(targetPath));
+
+  // A previously failed `NodePublishVolume` call can be recovered through the
+  // current `NodeUnpublishVolume` call. See:
+  // https://github.com/container-storage-interface/spec/blob/v0.2.0/spec.md#nodepublishvolume // NOLINT
+  if (volume.state.state() == VolumeState::PUBLISHED ||
+      volume.state.state() == VolumeState::NODE_PUBLISH) {
+    volume.state.set_state(VolumeState::NODE_UNPUBLISH);
+    checkpointVolumeState(volumeId);
+  }
+
+  CHECK_EQ(VolumeState::NODE_UNPUBLISH, volume.state.state());
+
+  csi::v0::NodeUnpublishVolumeRequest request;
+  request.set_volume_id(volumeId);
+  request.set_target_path(targetPath);
+
   CHECK_SOME(nodeContainerId);
 
-  return getService(nodeContainerId.get())
-    .then(defer(self(), [this, volumeId](csi::v0::Client client) {
+  return call<csi::v0::NODE_UNPUBLISH_VOLUME>(
+      nodeContainerId.get(), std::move(request))
+    .then(defer(self(), [this, volumeId, targetPath]() -> Future<Nothing> {
       VolumeData& volume = volumes.at(volumeId);
 
-      const string targetPath = csi::paths::getMountTargetPath(
-          csi::paths::getMountRootDir(
-              slave::paths::getCsiRootDir(workDir),
-              info.storage().plugin().type(),
-              info.storage().plugin().name()),
-          volumeId);
+      volume.state.set_state(VolumeState::VOL_READY);
+      checkpointVolumeState(volumeId);
 
-      CHECK(os::exists(targetPath));
-
-      // A previously failed `NodePublishVolume` call can be recovered through
-      // the current `NodeUnpublishVolume` call. See:
-      // https://github.com/container-storage-interface/spec/blob/v0.2.0/spec.md#nodepublishvolume // NOLINT
-      if (volume.state.state() == VolumeState::PUBLISHED ||
-          volume.state.state() == VolumeState::NODE_PUBLISH) {
-        volume.state.set_state(VolumeState::NODE_UNPUBLISH);
-        checkpointVolumeState(volumeId);
+      Try<Nothing> rmdir = os::rmdir(targetPath);
+      if (rmdir.isError()) {
+        return Failure(
+            "Failed to remove mount point '" + targetPath + "': " +
+            rmdir.error());
       }
 
-      CHECK_EQ(VolumeState::NODE_UNPUBLISH, volume.state.state());
-
-      csi::v0::NodeUnpublishVolumeRequest request;
-      request.set_volume_id(volumeId);
-      request.set_target_path(targetPath);
-
-      return call<csi::v0::NODE_UNPUBLISH_VOLUME>(client, std::move(request))
-        .then(defer(self(), [this, volumeId, targetPath]() -> Future<Nothing> {
-          VolumeData& volume = volumes.at(volumeId);
-
-          volume.state.set_state(VolumeState::VOL_READY);
-          checkpointVolumeState(volumeId);
-
-          Try<Nothing> rmdir = os::rmdir(targetPath);
-          if (rmdir.isError()) {
-            return Failure(
-                "Failed to remove mount point '" + targetPath + "': " +
-                rmdir.error());
-          }
-
-          return Nothing();
-        }));
+      return Nothing();
     }));
 }
 
 
-// Returns a CSI volume ID.
-//
-// NOTE: This can only be called after `prepareControllerService`.
 Future<string> StorageLocalResourceProviderProcess::createVolume(
     const string& name,
     const Bytes& capacity,
@@ -2673,56 +2494,44 @@ Future<string> StorageLocalResourceProviderProcess::createVolume(
         "Controller capability 'CREATE_DELETE_VOLUME' is not supported");
   }
 
+  csi::v0::CreateVolumeRequest request;
+  request.set_name(name);
+  request.mutable_capacity_range()->set_required_bytes(capacity.bytes());
+  request.mutable_capacity_range()->set_limit_bytes(capacity.bytes());
+  *request.add_volume_capabilities() = profileInfo.capability;
+  *request.mutable_parameters() = profileInfo.parameters;
+
   CHECK_SOME(controllerContainerId);
 
-  return getService(controllerContainerId.get())
-    .then(defer(self(), [=](csi::v0::Client client) {
-      csi::v0::CreateVolumeRequest request;
-      request.set_name(name);
-      request.mutable_capacity_range()
-        ->set_required_bytes(capacity.bytes());
-      request.mutable_capacity_range()
-        ->set_limit_bytes(capacity.bytes());
-      request.add_volume_capabilities()->CopyFrom(profileInfo.capability);
-      *request.mutable_parameters() = profileInfo.parameters;
+  return call<csi::v0::CREATE_VOLUME>(
+      controllerContainerId.get(), std::move(request), true) // Retry.
+    .then(defer(self(), [=](
+        const csi::v0::CreateVolumeResponse& response) -> string {
+      const csi::v0::Volume& volume = response.volume();
 
-      return call<csi::v0::CREATE_VOLUME>(client, std::move(request))
-        .then(defer(self(), [=](
-            const csi::v0::CreateVolumeResponse& response) -> string {
-          const csi::v0::Volume& volume = response.volume();
+      if (volumes.contains(volume.id())) {
+        // The resource provider failed over after the last `createVolume` call,
+        // but before the operation status was checkpointed.
+        CHECK_EQ(VolumeState::CREATED, volumes.at(volume.id()).state.state());
+      } else {
+        VolumeState volumeState;
+        volumeState.set_state(VolumeState::CREATED);
+        *volumeState.mutable_volume_capability() = profileInfo.capability;
+        *volumeState.mutable_parameters() = profileInfo.parameters;
+        *volumeState.mutable_volume_attributes() = volume.attributes();
 
-          if (volumes.contains(volume.id())) {
-            // The resource provider failed over after the last `createVolume`
-            // call, but before the operation status was checkpointed.
-            CHECK_EQ(VolumeState::CREATED,
-                     volumes.at(volume.id()).state.state());
-          } else {
-            VolumeState volumeState;
-            volumeState.set_state(VolumeState::CREATED);
-            volumeState.mutable_volume_capability()
-              ->CopyFrom(profileInfo.capability);
-            *volumeState.mutable_parameters() = profileInfo.parameters;
-            *volumeState.mutable_volume_attributes() = volume.attributes();
+        volumes.put(volume.id(), std::move(volumeState));
+        checkpointVolumeState(volume.id());
+      }
 
-            volumes.put(volume.id(), std::move(volumeState));
-            checkpointVolumeState(volume.id());
-          }
-
-          return volume.id();
-        }));
+      return volume.id();
     }));
 }
 
 
-// Returns true if the volume has been deprovisioned.
-//
-// NOTE: This can only be called after `prepareControllerService` and
-// `prepareNodeService` (since it may require `NodeUnpublishVolume`).
 Future<bool> StorageLocalResourceProviderProcess::deleteVolume(
     const string& volumeId)
 {
-  CHECK_SOME(controllerContainerId);
-
   const string volumePath = csi::paths::getVolumePath(
       slave::paths::getCsiRootDir(workDir),
       info.storage().plugin().type(),
@@ -2739,9 +2548,9 @@ Future<bool> StorageLocalResourceProviderProcess::deleteVolume(
 
   const VolumeData& volume = volumes.at(volumeId);
 
-  Future<Nothing> deleted = Nothing();
-
   CHECK(VolumeState::State_IsValid(volume.state.state()));
+
+  Future<Nothing> deleted = Nothing();
 
   switch (volume.state.state()) {
     case VolumeState::PUBLISHED:
@@ -2776,12 +2585,14 @@ Future<bool> StorageLocalResourceProviderProcess::deleteVolume(
       // supported. Otherwise, we simply leave it as a preprovisioned volume.
       if (controllerCapabilities.createDeleteVolume) {
         deleted = deleted
-          .then(defer(self(), &Self::getService, controllerContainerId.get()))
-          .then(defer(self(), [this, volumeId](csi::v0::Client client) {
+          .then(defer(self(), [this, volumeId] {
             csi::v0::DeleteVolumeRequest request;
             request.set_volume_id(volumeId);
 
-            return call<csi::v0::DELETE_VOLUME>(client, std::move(request))
+            CHECK_SOME(controllerContainerId);
+
+            return call<csi::v0::DELETE_VOLUME>(
+                controllerContainerId.get(), std::move(request), true) // Retry.
               .then([] { return Nothing(); });
           }));
       }
@@ -2817,12 +2628,6 @@ Future<bool> StorageLocalResourceProviderProcess::deleteVolume(
 }
 
 
-// Validates if a volume supports the capability of the specified profile.
-//
-// NOTE: This can only be called after `prepareIdentityService`.
-//
-// TODO(chhsiao): Validate the volume against the parameters of the profile once
-// we get CSI v1.
 Future<Nothing> StorageLocalResourceProviderProcess::validateVolume(
     const string& volumeId,
     const Option<Labels>& metadata,
@@ -2850,51 +2655,46 @@ Future<Nothing> StorageLocalResourceProviderProcess::validateVolume(
         "Plugin capability 'CONTROLLER_SERVICE' is not supported");
   }
 
+  google::protobuf::Map<string, string> volumeAttributes;
+
+  if (metadata.isSome()) {
+    volumeAttributes = CHECK_NOTERROR(convertLabelsToStringMap(metadata.get()));
+  }
+
+  // TODO(chhsiao): Validate the volume against the parameters of the profile
+  // once we get CSI v1.
+  csi::v0::ValidateVolumeCapabilitiesRequest request;
+  request.set_volume_id(volumeId);
+  *request.add_volume_capabilities() = profileInfo.capability;
+  *request.mutable_volume_attributes() = volumeAttributes;
+
   CHECK_SOME(controllerContainerId);
 
-  return getService(controllerContainerId.get())
-    .then(defer(self(), [=](csi::v0::Client client) {
-      google::protobuf::Map<string, string> volumeAttributes;
-
-      if (metadata.isSome()) {
-        volumeAttributes =
-          CHECK_NOTERROR(convertLabelsToStringMap(metadata.get()));
+  return call<csi::v0::VALIDATE_VOLUME_CAPABILITIES>(
+      controllerContainerId.get(), std::move(request))
+    .then(defer(self(), [=](
+        const csi::v0::ValidateVolumeCapabilitiesResponse& response)
+        -> Future<Nothing> {
+      if (!response.supported()) {
+        return Failure(
+            "Unsupported volume capability for volume '" + volumeId + "': " +
+            response.message());
       }
 
-      csi::v0::ValidateVolumeCapabilitiesRequest request;
-      request.set_volume_id(volumeId);
-      request.add_volume_capabilities()->CopyFrom(profileInfo.capability);
-      *request.mutable_volume_attributes() = volumeAttributes;
+      VolumeState volumeState;
+      volumeState.set_state(VolumeState::CREATED);
+      *volumeState.mutable_volume_capability() = profileInfo.capability;
+      *volumeState.mutable_parameters() = profileInfo.parameters;
+      *volumeState.mutable_volume_attributes() = volumeAttributes;
 
-      return call<csi::v0::VALIDATE_VOLUME_CAPABILITIES>(
-          client, std::move(request))
-        .then(defer(self(), [=](
-            const csi::v0::ValidateVolumeCapabilitiesResponse& response)
-            -> Future<Nothing> {
-          if (!response.supported()) {
-            return Failure(
-                "Unsupported volume capability for volume '" + volumeId +
-                "': " + response.message());
-          }
+      volumes.put(volumeId, std::move(volumeState));
+      checkpointVolumeState(volumeId);
 
-          VolumeState volumeState;
-          volumeState.set_state(VolumeState::CREATED);
-          volumeState.mutable_volume_capability()
-            ->CopyFrom(profileInfo.capability);
-          *volumeState.mutable_parameters() = profileInfo.parameters;
-          *volumeState.mutable_volume_attributes() = volumeAttributes;
-
-          volumes.put(volumeId, std::move(volumeState));
-          checkpointVolumeState(volumeId);
-
-          return Nothing();
-        }));
+      return Nothing();
     }));
 }
 
 
-// NOTE: This can only be called after `prepareControllerService` and
-// the resource provider ID has been obtained.
 Future<Resources> StorageLocalResourceProviderProcess::listVolumes()
 {
   CHECK(info.has_id());
@@ -2906,47 +2706,43 @@ Future<Resources> StorageLocalResourceProviderProcess::listVolumes()
 
   CHECK_SOME(controllerContainerId);
 
-  return getService(controllerContainerId.get())
-    .then(defer(self(), [=](csi::v0::Client client) {
-      // TODO(chhsiao): Set the max entries and use a loop to do
-      // multiple `ListVolumes` calls.
-      return call<csi::v0::LIST_VOLUMES>(client, csi::v0::ListVolumesRequest())
-        .then(defer(self(), [=](const csi::v0::ListVolumesResponse& response) {
-          Resources resources;
+  // TODO(chhsiao): Set the max entries and use a loop to do
+  // multiple `ListVolumes` calls.
+  return call<csi::v0::LIST_VOLUMES>(
+      controllerContainerId.get(), csi::v0::ListVolumesRequest())
+    .then(defer(self(), [=](const csi::v0::ListVolumesResponse& response) {
+      Resources resources;
 
-          // Recover disk profiles from the checkpointed state.
-          hashmap<string, string> volumesToProfiles;
-          foreach (const Resource& resource, totalResources) {
-            if (resource.disk().source().has_id() &&
-                resource.disk().source().has_profile()) {
-              volumesToProfiles.put(
-                  resource.disk().source().id(),
-                  resource.disk().source().profile());
-            }
-          }
+      // Recover disk profiles from the checkpointed state.
+      hashmap<string, string> volumesToProfiles;
+      foreach (const Resource& resource, totalResources) {
+        if (resource.disk().source().has_id() &&
+            resource.disk().source().has_profile()) {
+          volumesToProfiles.put(
+              resource.disk().source().id(),
+              resource.disk().source().profile());
+        }
+      }
 
-          foreach (const auto& entry, response.entries()) {
-            resources += createRawDiskResource(
-                info,
-                Bytes(entry.volume().capacity_bytes()),
-                volumesToProfiles.contains(entry.volume().id())
-                  ? volumesToProfiles.at(entry.volume().id())
-                  : Option<string>::none(),
-                vendor,
-                entry.volume().id(),
-                entry.volume().attributes().empty()
-                  ? Option<Labels>::none()
-                  : convertStringMapToLabels(entry.volume().attributes()));
-          }
+      foreach (const auto& entry, response.entries()) {
+        resources += createRawDiskResource(
+            info,
+            Bytes(entry.volume().capacity_bytes()),
+            volumesToProfiles.contains(entry.volume().id())
+              ? volumesToProfiles.at(entry.volume().id())
+              : Option<string>::none(),
+            vendor,
+            entry.volume().id(),
+            entry.volume().attributes().empty()
+              ? Option<Labels>::none()
+              : convertStringMapToLabels(entry.volume().attributes()));
+      }
 
-          return resources;
-        }));
+      return resources;
     }));
 }
 
 
-// NOTE: This can only be called after `prepareControllerService` and
-// the resource provider ID has been obtained.
 Future<Resources> StorageLocalResourceProviderProcess::getCapacities()
 {
   CHECK(info.has_id());
@@ -2958,19 +2754,18 @@ Future<Resources> StorageLocalResourceProviderProcess::getCapacities()
 
   CHECK_SOME(controllerContainerId);
 
-  return getService(controllerContainerId.get())
-    .then(defer(self(), [=](csi::v0::Client client) {
-      vector<Future<Resources>> futures;
+  vector<Future<Resources>> futures;
 
-      foreachpair (const string& profile,
-                   const DiskProfileAdaptor::ProfileInfo& profileInfo,
-                   profileInfos) {
-        csi::v0::GetCapacityRequest request;
-        request.add_volume_capabilities()->CopyFrom(profileInfo.capability);
-        *request.mutable_parameters() = profileInfo.parameters;
+  foreachpair (const string& profile,
+               const DiskProfileAdaptor::ProfileInfo& profileInfo,
+               profileInfos) {
+    csi::v0::GetCapacityRequest request;
+    *request.add_volume_capabilities() = profileInfo.capability;
+    *request.mutable_parameters() = profileInfo.parameters;
 
-        futures.push_back(call<csi::v0::GET_CAPACITY>(
-            client, std::move(request))
+    futures.push_back(
+        call<csi::v0::GET_CAPACITY>(
+            controllerContainerId.get(), std::move(request))
           .then(defer(self(), [=](
               const csi::v0::GetCapacityResponse& response) -> Resources {
             if (response.available_capacity() == 0) {
@@ -2978,23 +2773,17 @@ Future<Resources> StorageLocalResourceProviderProcess::getCapacities()
             }
 
             return createRawDiskResource(
-                info,
-                Bytes(response.available_capacity()),
-                profile,
-                vendor);
+                info, Bytes(response.available_capacity()), profile, vendor);
           })));
-      }
+  }
 
-      return collect(futures)
-        .then([](const vector<Resources>& resources) {
-          return accumulate(resources.begin(), resources.end(), Resources());
-        });
-    }));
+  return collect(futures)
+    .then([](const vector<Resources>& resources) {
+      return accumulate(resources.begin(), resources.end(), Resources());
+    });
 }
 
 
-// Applies the operation. Speculative operations will be synchronously
-// applied. Do nothing if the operation is already in a terminal state.
 Future<Nothing> StorageLocalResourceProviderProcess::_applyOperation(
     const id::UUID& operationUuid)
 {
@@ -3085,8 +2874,6 @@ Future<Nothing> StorageLocalResourceProviderProcess::_applyOperation(
 }
 
 
-// Sends `OPERATION_DROPPED` without checkpointing the status of
-// the operation.
 void StorageLocalResourceProviderProcess::dropOperation(
     const id::UUID& operationUuid,
     const Option<FrameworkID>& frameworkId,
@@ -3201,7 +2988,7 @@ StorageLocalResourceProviderProcess::applyCreateDisk(
             ? resource.disk().source().metadata()
             : Option<Labels>::none(),
           profileInfo)
-        .then([=] { return resource.disk().source().id(); });
+        .then([=]() -> string { return resource.disk().source().id(); });
 
   return created
     .then(defer(self(), [=](const string& volumeId) {
@@ -3313,8 +3100,6 @@ StorageLocalResourceProviderProcess::applyDestroyDisk(
 }
 
 
-// Synchronously updates `totalResources` and the operation status and
-// then asks the status update manager to send status updates.
 Try<Nothing> StorageLocalResourceProviderProcess::updateOperationStatus(
     const id::UUID& operationUuid,
     const Try<vector<ResourceConversion>>& conversions)
