@@ -9,7 +9,13 @@ INSTALL_DIR=${ROOT_PATH}/install
 mkdir build
 cd build
 ../configure
-make -j
+make
+if [[ $? != 0 ]]; then
+	echo -e "build libprocess failed! please check log for more infomation. you can try:"
+	echo -e "yum groupinstall -y 'Development Tools'"
+	echo -e "yum install -y zlib-devel libcurl-devel openssl-devel cyrus-sasl-devel cyrus-sasl-md5 apr-devel subversion-devel apr-util-devel apache-maven python-devel python-six python-virtualenv"
+	exit 1
+fi
 
 # package
 mkdir -p ${INSTALL_DIR}/lib ${INSTALL_DIR}/pkgconfig
@@ -33,7 +39,7 @@ Libs: -L\${libdir} -lprocess -lprotobuf -lglog -lgmock -lev -lgpr -lhashtable -l
 Cflags: -I\${includedir} -Wliteral-suffix -D__STDC_FORMAT_MACROS -std=c++11
 EOF
 
-echo -e "\nlibprocess build success, usage: \n\
+echo -e "\nbuild libprocess success, usage: \n\
     1. link libprocess pkg by: export PKG_CONFIG_PATH=${INSTALL_DIR}/pkgconfig/:\${PKG_CONFIG_PATH} \n\
     2. build program by: \$(pkg-config --cflags --libs libprocess) \n\
 for instance: cd example/

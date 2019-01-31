@@ -1,18 +1,26 @@
 # Apache Libprocess
 
-**this branch libprocess is part of mesos for libprocess lib only**
+**this branch is part of mesos for libprocess and its dependancies only**
 
 # Installation
 
 ```sh
-cd mesos && ./bootstrap
-export PYTHON=/bin/python2.7 # 需要python2支持
-mkdir build && cd build && ../configure
-make -j
-# make check
-make install # 安装到 
-```
+cd mesos && sh build.sh
+cd example/
+# build the code by g++ 
+ln -s ${INSTALL_DIR} /opt/libprocess
+g++ -std=c++11 -Wliteral-suffix -D__STDC_FORMAT_MACROS example-server.cpp -o server -I/opt/libprocess/include -I./ -L/opt/libprocess/lib -lprocess -lprotobuf -lglog -lev -larchive -lry_http_parser -lz -lrt -lpthread
+g++ -std=c++11 -Wliteral-suffix -D__STDC_FORMAT_MACROS example-client.cpp -o client -I/opt/libprocess/include -I./ -L/opt/libprocess/lib -lprocess -lprotobuf -lglog -lev -larchive -lry_http_parser -lz -lrt -lpthread
+# or
+export PKG_CONFIG_PATH=${PWD}/install/pkgconfig/:${PKG_CONFIG_PATH}
+g++ example-server.cpp -o server $(pkg-config --cflags --libs libprocess)
+g++ example-client.cpp -o client $(pkg-config --cflags --libs libprocess)
 
+# run the demo
+./server 127.0.0.1 55444 >server.log 2>&1 &
+curl -XGET http://127.0.0.1:55444/server/vars -w "%{http_code}\n"
+./client 127.0.0.1 55444
+```
 
 # License
 
