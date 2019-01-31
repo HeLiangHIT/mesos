@@ -262,22 +262,6 @@ $(HTTP_PARSER)-build-stamp: libry_http_parser.la
 endif
 
 
-if WITH_BUNDLED_JEMALLOC
-JEMALLOC_CONFIGURE_ARGS = \
-    --enable-stats --enable-prof --with-malloc-conf="prof:true,prof_active:false"
-
-LIB_JEMALLOC = $(JEMALLOC)/libjemalloc.la
-
-$(LIB_JEMALLOC): $(JEMALLOC)-build-stamp
-
-$(JEMALLOC)-build-stamp: $(JEMALLOC)-stamp
-	cd $(JEMALLOC) && ./configure $(JEMALLOC_CONFIGURE_ARGS) $(CONFIGURE_ARGS)
-	cd $(JEMALLOC) && $(MAKE) $(AM_MAKEFLAGS)
-	touch $@
-
-ALL_LOCAL += $(LIB_JEMALLOC)
-endif
-
 if WITH_BUNDLED_LIBARCHIVE
 LIB_LIBARCHIVE = $(LIBARCHIVE)/.libs/libarchive.la
 

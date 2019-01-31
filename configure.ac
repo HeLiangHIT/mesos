@@ -68,139 +68,12 @@ AM_CONDITIONAL([STANDALONE_LIBPROCESS], [false])
 AM_CONDITIONAL([STANDALONE_STOUT], [false])
 
 AC_CONFIG_FILES([Makefile mesos.pc])
-AC_CONFIG_FILES([src/Makefile])
 AC_CONFIG_FILES([3rdparty/Makefile])
 AC_CONFIG_FILES([3rdparty/libprocess/Makefile])
 AC_CONFIG_FILES([3rdparty/libprocess/include/Makefile])
 AC_CONFIG_FILES([3rdparty/stout/Makefile])
 AC_CONFIG_FILES([3rdparty/stout/include/Makefile])
 AC_CONFIG_FILES([3rdparty/gmock_sources.cc])
-
-AC_CONFIG_FILES(
-  [bin/mesos.sh],
-  [chmod +x bin/mesos.sh])
-AC_CONFIG_FILES(
-  [bin/mesos-agent.sh],
-  [chmod +x bin/mesos-agent.sh])
-AC_CONFIG_FILES(
-  [bin/mesos-local.sh],
-  [chmod +x bin/mesos-local.sh])
-AC_CONFIG_FILES(
-  [bin/mesos-master.sh],
-  [chmod +x bin/mesos-master.sh])
-# TODO(tomxing): Remove this script once the
-# slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES(
-  [bin/mesos-slave.sh:bin/mesos-agent.sh.in],
-  [chmod +x bin/mesos-slave.sh])
-AC_CONFIG_FILES(
-  [bin/mesos-tests.sh],
-  [chmod +x bin/mesos-tests.sh])
-AC_CONFIG_FILES(
-  [bin/mesos-agent-flags.sh],
-  [chmod +x bin/mesos-agent-flags.sh])
-AC_CONFIG_FILES(
-  [bin/mesos-local-flags.sh],
-  [chmod +x bin/mesos-local-flags.sh])
-AC_CONFIG_FILES(
-  [bin/mesos-master-flags.sh],
-  [chmod +x bin/mesos-master-flags.sh])
-# TODO(tomxing): Remove this script once the
-# slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES(
-  [bin/mesos-slave-flags.sh:bin/mesos-agent-flags.sh.in],
-  [chmod +x bin/mesos-slave-flags.sh])
-AC_CONFIG_FILES(
-  [bin/mesos-tests-flags.sh],
-  [chmod +x bin/mesos-tests-flags.sh])
-AC_CONFIG_FILES(
-  [bin/gdb-mesos-agent.sh],
-  [chmod +x bin/gdb-mesos-agent.sh])
-AC_CONFIG_FILES(
-  [bin/gdb-mesos-local.sh],
-  [chmod +x bin/gdb-mesos-local.sh])
-AC_CONFIG_FILES(
-  [bin/gdb-mesos-master.sh],
-  [chmod +x bin/gdb-mesos-master.sh])
-# TODO(tomxing): Remove this script once the
-# slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES(
-  [bin/gdb-mesos-slave.sh:bin/gdb-mesos-agent.sh.in],
-  [chmod +x bin/gdb-mesos-slave.sh])
-AC_CONFIG_FILES(
-  [bin/gdb-mesos-tests.sh],
-  [chmod +x bin/gdb-mesos-tests.sh])
-AC_CONFIG_FILES(
-  [bin/lldb-mesos-agent.sh],
-  [chmod +x bin/lldb-mesos-agent.sh])
-AC_CONFIG_FILES(
-  [bin/lldb-mesos-local.sh],
-  [chmod +x bin/lldb-mesos-local.sh])
-AC_CONFIG_FILES(
-  [bin/lldb-mesos-master.sh],
-  [chmod +x bin/lldb-mesos-master.sh])
-# TODO(tomxing): Remove this script once the
-# slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES(
-  [bin/lldb-mesos-slave.sh:bin/lldb-mesos-agent.sh.in],
-  [chmod +x bin/lldb-mesos-slave.sh])
-AC_CONFIG_FILES(
-  [bin/lldb-mesos-tests.sh],
-  [chmod +x bin/lldb-mesos-tests.sh])
-AC_CONFIG_FILES(
-  [bin/valgrind-mesos-agent.sh],
-  [chmod +x bin/valgrind-mesos-agent.sh])
-AC_CONFIG_FILES(
-  [bin/valgrind-mesos-local.sh],
-  [chmod +x bin/valgrind-mesos-local.sh])
-AC_CONFIG_FILES(
-  [bin/valgrind-mesos-master.sh],
-  [chmod +x bin/valgrind-mesos-master.sh])
-# TODO(tomxing): Remove this script once the
-# slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES(
-  [bin/valgrind-mesos-slave.sh:bin/valgrind-mesos-agent.sh.in],
-  [chmod +x bin/valgrind-mesos-slave.sh])
-AC_CONFIG_FILES(
-  [bin/valgrind-mesos-tests.sh],
-  [chmod +x bin/valgrind-mesos-tests.sh])
-AC_CONFIG_FILES(
-  [src/deploy/mesos-daemon.sh],
-  [chmod +x src/deploy/mesos-daemon.sh])
-AC_CONFIG_FILES(
-  [src/deploy/mesos-start-agents.sh],
-  [chmod +x src/deploy/mesos-start-agents.sh])
-AC_CONFIG_FILES(
-  [src/deploy/mesos-start-cluster.sh],
-  [chmod +x src/deploy/mesos-start-cluster.sh])
-AC_CONFIG_FILES(
-  [src/deploy/mesos-start-masters.sh],
-  [chmod +x src/deploy/mesos-start-masters.sh])
-# TODO(tomxing): Remove this script once the
-# slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES(
-  [src/deploy/mesos-start-slaves.sh:src/deploy/mesos-start-agents.sh.in],
-  [chmod +x src/deploy/mesos-start-slaves.sh])
-AC_CONFIG_FILES(
-  [src/deploy/mesos-stop-agents.sh],
-  [chmod +x src/deploy/mesos-stop-agents.sh])
-AC_CONFIG_FILES(
-  [src/deploy/mesos-stop-cluster.sh],
-  [chmod +x src/deploy/mesos-stop-cluster.sh])
-AC_CONFIG_FILES(
-  [src/deploy/mesos-stop-masters.sh],
-  [chmod +x src/deploy/mesos-stop-masters.sh])
-# TODO(tomxing): Remove this script once the
-# slave->agent rename is complete(MESOS-3782).
-AC_CONFIG_FILES(
-  [src/deploy/mesos-stop-slaves.sh:src/deploy/mesos-stop-agents.sh.in],
-  [chmod +x src/deploy/mesos-stop-slaves.sh])
-
-AC_CONFIG_FILES([include/mesos/version.hpp])
-
-AC_CONFIG_FILES([src/java/generated/org/apache/mesos/MesosNativeLibrary.java])
-
-AC_CONFIG_FILES([mpi/mpiexec-mesos], [chmod +x mpi/mpiexec-mesos])
 
 
 ###############################################################################
@@ -256,24 +129,8 @@ AC_ARG_ENABLE([install-module-dependencies],
               AS_HELP_STRING([--enable-install-module-dependencies],
                              [Install third-party bundled dependencies required
                               for module development]),
-              [], [enable_install_module_dependencies=no])
+              [], [enable_install_module_dependencies=yes])
 
-AC_ARG_ENABLE([network-ports-isolator],
-              AS_HELP_STRING([--enable-network-ports-isolator],
-                             [enable network ports isolator]),
-              [], [enable_network_ports_isolator=no])
-
-AC_ARG_ENABLE([java],
-              AS_HELP_STRING([--disable-java],
-                             [do not build Java bindings]),
-              [], [enable_java=yes])
-
-# TODO(bevers): Eventually make this enabled by default.
-AC_ARG_ENABLE([jemalloc-allocator],
-               AS_HELP_STRING([--enable-jemalloc-allocator],
-                              [Use jemalloc as the default memory allocator for the
-                               mesos-master and mesos-agent binaries.]),
-               [], [enable_jemalloc_allocator=no])
 
 # TODO(benh): Eventually make this enabled by default.
 AC_ARG_ENABLE([last_in_first_out_fixed_size_semaphore],
@@ -329,10 +186,6 @@ AC_ARG_ENABLE([perftools],
                              [enable Google perftools]),
               [], [enable_perftools=no])
 
-AC_ARG_ENABLE([port-mapping-isolator],
-              AS_HELP_STRING([--enable-port-mapping-isolator],
-                             [enable port mapping network isolator]),
-              [], [enable_port_mapping_isolator=no])
 
 AC_ARG_ENABLE([python],
               AS_HELP_STRING([--disable-python],
@@ -373,6 +226,8 @@ AC_ARG_ENABLE([xfs-disk-isolator],
               AS_HELP_STRING([--enable-xfs-disk-isolator],
                              [builds the XFS disk isolator]),
               [], [enable_xfs_disk_isolator=no])
+
+
 
 ###############################################################################
 # Optional packages.
@@ -437,13 +292,6 @@ AC_ARG_WITH([http-parser],
                            location prefixed by the given path]),
             [without_bundled_http_parser=yes], [])
 
-AC_ARG_WITH([jemalloc],
-            AS_HELP_STRING([--with-jemalloc@<:@=DIR@:>@],
-                          [excludes building and using the bundled jemalloc
-                          package in lieu of an installed version at a
-                          location prefixed by the given path.]),
-            [without_bundled_jemalloc=yes], [])
-
 AC_ARG_WITH([leveldb],
             AS_HELP_STRING([--with-leveldb@<:@=DIR@:>@],
                            [excludes building and using the bundled LevelDB
@@ -467,18 +315,6 @@ AC_ARG_WITH([libarchive],
             AS_HELP_STRING([--with-libarchive=@<:@=DIR@:>@],
                            [specify where to locate the libarchive library]),
             [without_bundled_libarchive=yes], [])
-
-AC_ARG_WITH([libprocess],
-            AS_HELP_STRING([--with-libprocess=@<:@=DIR@:>@],
-                           [specify where to locate the libprocess library]),
-            [], [])
-
-AC_ARG_WITH([network-isolator],
-            AS_HELP_STRING([--with-network-isolator],
-                           [builds the network isolator]),
-            [AC_MSG_WARN([--with-network-isolator is being deprecated, please use --enable-port-mapping-isolator instead.]);
-             enable_port_mapping_isolator=yes],
-            [])
 
 AC_ARG_WITH([nvml],
             AS_HELP_STRING([--with-nvml@<:@=DIR@:>@],
@@ -584,10 +420,6 @@ AS_IF([test "x$enable_lock_free_event_queue" = "xyes"],
 # Check if we should use the lock-free run queue.
 AS_IF([test "x$enable_lock_free_run_queue" = "xyes"],
       [AC_DEFINE([LOCK_FREE_RUN_QUEUE])])
-
-# Check if we should link the mesos binaries against jemalloc.
-AM_CONDITIONAL([ENABLE_JEMALLOC_ALLOCATOR],
-         [test x"$enable_jemalloc_allocator" = "xyes"])
 
 # Check to see if we should harden or not.
 AM_CONDITIONAL([ENABLE_HARDENING], [test x"$enable_hardening" = "xyes"])
@@ -741,16 +573,6 @@ esac
 ###############################################################################
 # Miscellaneous flags/library/tool checks.
 ###############################################################################
-
-AC_ARG_VAR([JAVA_HOME], [location of Java Development Kit (JDK)])
-
-AC_ARG_VAR([JAVA_CPPFLAGS], [preprocessor flags for JNI])
-
-AC_ARG_VAR([JAVA_JVM_LIBRARY], [full path to libjvm.so])
-
-AC_ARG_VAR([MAVEN_HOME], [looks for mvn at MAVEN_HOME/bin/mvn])
-
-AC_ARG_VAR([PROTOBUF_JAR], [full path to protobuf jar on prefixed builds])
 
 AC_ARG_VAR([PYTHON], [which Python 2 interpreter to use])
 
@@ -1156,63 +978,7 @@ AM_CONDITIONAL([WITH_BUNDLED_HTTP_PARSER],
                [test "x$with_bundled_http_parser" = "xyes"])
 
 
-# NB: Since malloc() and free() are declared in stdlib.h, and the
-# jemalloc-specific api is detected at runtime, we dont need any
-# jemalloc headers or modify CPPFLAGS here.
-if test "x$enable_jemalloc_allocator" = "xyes"; then
-  if test "x$OS_NAME" != "xlinux"; then
-    # Building and linking against jemalloc is actually not a problem
-    # on OSX even now, but to make it actually *useful* we would have
-    # have to re-route all existing malloc/free calls through jemalloc.
-    # The recommended way of doing that on Mac seems to be call
-    # `malloc_default_zone()` and to overwrite the hooks in the
-    # returned `malloc_zone_t`.
-    AC_MSG_ERROR([
---------------------------------------------------------------------
-You have requested the default memory allocator to be replaced by
-jemalloc, but your operating system was detected to be $OS_NAME.
 
-This feature is currently only supported on linux.
---------------------------------------------------------------------
-    ])
-  fi
-
-  if test -n "`echo $with_jemalloc`"; then
-    WITH_JEMALLOC="${with_jemalloc}"
-  fi
-
-  # Check if the user asked us to use a preinstalled jemalloc, or if
-  # they asked us to ignore all bundled libraries while compiling and
-  # linking.
-  if test "x$without_bundled_jemalloc" = "xyes" || \
-     test "x$enable_bundled" != "xyes"; then
-
-    # Avoid AC_SEARCH_LIBS here because it would implicitly add jemalloc
-    # to LIBS, but we dont want to link it against libmesos, only the
-    # individual binaries
-    AC_CHECK_LIB([jemalloc], [malloc_stats_print], [found_jemalloc=yes])
-    if test "x$found_jemalloc" = "xyes"; then
-      with_bundled_jemalloc=no
-    else
-      AC_MSG_ERROR([cannot find jemalloc
--------------------------------------------------------------------
-You have requested the use of a non-bundled jemalloc but no suitable
-library could be found.
-
-You may want specify the location of jemalloc by providing a prefix
-path via --with-jemalloc=DIR, or check that the path you provided is
-correct if you're already doing this.
--------------------------------------------------------------------
-  ])
-    fi
-  else
-    with_bundled_jemalloc=yes
-  fi
-fi
-
-AC_SUBST(WITH_JEMALLOC)
-AM_CONDITIONAL([WITH_BUNDLED_JEMALLOC],
-         [test "x$with_bundled_jemalloc" = "xyes"])
 
 # TODO(benh): Consider using AS_IF instead of just shell 'if'
 # statements for better autoconf style (the AS_IF macros also make
@@ -1378,19 +1144,6 @@ __EOF__
   fi
   AC_MSG_RESULT([yes])
 
-  AC_CONFIG_FILES([src/examples/java/test-exception-framework],
-                  [chmod +x src/examples/java/test-exception-framework])
-  AC_CONFIG_FILES([src/examples/java/test-executor],
-                  [chmod +x src/examples/java/test-executor])
-  AC_CONFIG_FILES([src/examples/java/test-framework],
-                  [chmod +x src/examples/java/test-framework])
-  AC_CONFIG_FILES([src/examples/java/test-multiple-executors-framework],
-                  [chmod +x src/examples/java/test-multiple-executors-framework])
-  AC_CONFIG_FILES([src/examples/java/test-log],
-                  [chmod +x src/examples/java/test-log])
-  AC_CONFIG_FILES([src/examples/java/v1-test-framework],
-                  [chmod +x src/examples/java/v1-test-framework])
-  AC_CONFIG_FILES([src/java/mesos.pom])
 
   AC_DEFINE([MESOS_HAS_JAVA])
 
@@ -1569,28 +1322,6 @@ fi
 AM_CONDITIONAL([WITH_BUNDLED_LIBPROCESS], [test "x$with_bundled_libprocess" = "xyes"])
 
 
-# Perform necessary configuration for port mapping isolator.
-if test "x$enable_port_mapping_isolator" = "xyes"; then
-  # Check for OS support.
-  AS_IF([test "$OS_NAME" = "linux"],
-        [],
-        [AC_MSG_ERROR([cannot build port mapping isolator
--------------------------------------------------------------------
-The port mapping isolator is only supported on Linux
--------------------------------------------------------------------
-  ])])
-
-  MESOS_HAVE_LIBNL3([], [
-    MESOS_MSG_LIBNL3_ERROR([libnl-3 is required for building the port mapping isolator])
-  ])
-
-  AC_DEFINE([ENABLE_PORT_MAPPING_ISOLATOR])
-fi
-
-AM_CONDITIONAL([ENABLE_PORT_MAPPING_ISOLATOR],
-               [test "x$enable_port_mapping_isolator" = "xyes"])
-
-
 if test "x$enable_network_ports_isolator" = "xyes"; then
 
   AS_IF([test "$OS_NAME" = "linux"],
@@ -1607,14 +1338,6 @@ The network/ports isolator is only supported on Linux
 
   AC_DEFINE([ENABLE_NETWORK_PORTS_ISOLATOR])
 fi
-
-AM_CONDITIONAL([ENABLE_NETWORK_PORTS_ISOLATOR],
-               [test "x$enable_network_ports_isolator" = "xyes"])
-
-
-AM_CONDITIONAL(
-  [ENABLE_LINUX_ROUTING],
-  [test "x$enable_network_ports_isolator" = "xyes" -o "x$enable_port_mapping_isolator" = "xyes"])
 
 
 # If the user has asked not to include the bundled NVML headers for
@@ -2540,21 +2263,6 @@ There are two possible workarounds for this issue:
   PYTHON_WHL_PUREPY_POSTFIX=`$PYTHON -c \
     'import sys; \
      print "-py" + sys.version[[0]] + "-none-any"'`
-
-  AC_CONFIG_FILES([src/examples/python/test-executor],
-                  [chmod +x src/examples/python/test-executor])
-  AC_CONFIG_FILES([src/examples/python/test-framework],
-                  [chmod +x src/examples/python/test-framework])
-  AC_CONFIG_FILES([src/python/setup.py])
-  AC_CONFIG_FILES([src/python/cli/setup.py])
-  AC_CONFIG_FILES([src/python/interface/setup.py])
-  AC_CONFIG_FILES([src/python/native_common/ext_modules.py])
-  AC_CONFIG_FILES([src/python/executor/setup.py])
-  AC_CONFIG_FILES([src/python/native/setup.py])
-  AC_CONFIG_FILES([src/python/scheduler/setup.py])
-
-  AC_CONFIG_LINKS([src/python/executor/ext_modules.py:src/python/native_common/ext_modules.py])
-  AC_CONFIG_LINKS([src/python/scheduler/ext_modules.py:src/python/native_common/ext_modules.py])
 
   # When clang is being used, make sure that the distutils python-
   # config cflags extraction does not cause build errors (MESOS-1079).

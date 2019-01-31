@@ -18,7 +18,7 @@ ACLOCAL_AMFLAGS = -I m4
 
 AUTOMAKE_OPTIONS = foreign
 
-SUBDIRS = . 3rdparty src
+SUBDIRS = . 3rdparty
 
 EXTRA_DIST =
 
@@ -29,14 +29,6 @@ pkgconfig_DATA = mesos.pc
 
 # Directories to optionally install test binaries and libraries.
 testlibexecdir = $(pkglibexecdir)/tests
-
-# Since we generate several files in src/ with config.status, make
-# sure they're regenerated before we recurse into the src directory.
-all-recursive: src/python/setup.py			\
-	src/python/cli/setup.py				\
-	src/python/interface/setup.py			\
-	src/python/native/setup.py			\
-	src/java/mesos.pom
 
 # Standard stuff.
 EXTRA_DIST += bootstrap LICENSE NOTICE README.md	\
@@ -60,12 +52,6 @@ AM_DISTCHECK_CONFIGURE_FLAGS += --disable-dependency-tracking
 EXTRA_DIST += mpi/README mpi/mpiexec-mesos.in mpi/mpiexec-mesos.py
 
 
-if HAS_JAVA
-maven-install:
-	@cd src && $(MAKE) $(AM_MAKEFLAGS) maven-install
-
-PHONY_TARGETS += maven-install
-endif
 
 
 # Run benchmark tests.
@@ -83,13 +69,11 @@ endif
 # when we have benchmark tests in multiple subdirs.
 bench: all
 	@cd 3rdparty && $(MAKE) $(AM_MAKEFLAGS) libgmock.la
-	@cd src && MESOS_BENCHMARK=1 $(MAKE) $(AM_MAKEFLAGS) check
 
 PHONY_TARGETS += bench
 
 tests: all
 	@cd 3rdparty && $(MAKE) $(AM_MAKEFLAGS) tests
-	@cd src && $(MAKE) $(AM_MAKEFLAGS) tests
 
 # Using LT_OUTPUT in configure.ac creates config.lt that doesn't get
 # cleaned up by distclean-libtool. See this bug patch (which doesn't
@@ -100,7 +84,6 @@ distclean-local:
 	-rm -f ./3rdparty/report.xml
 	-rm -f ./3rdparty/libprocess/report.xml
 	-rm -f ./3rdparty/stout/report.xml
-	-rm -f ./src/report.xml
 
 if INSTALL_TESTS
 dist_testlibexec_SCRIPTS = 				\
