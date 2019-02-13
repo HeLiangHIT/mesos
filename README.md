@@ -1,8 +1,8 @@
 # Apache Libprocess
 
-**this branch is part of mesos for libprocess and its dependancies only**
+**this branch is part of mesos for libprocess and its dependancies only with static lib**
 
-# Installation
+# Installation && Usage
 
 ```sh
 cd mesos && sh build.sh

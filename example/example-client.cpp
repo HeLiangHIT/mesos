@@ -4,8 +4,7 @@
 2. 客户端退出前会发送一个 stop 命令停止服务器端
 
 编译： 
-g++ -std=c++11 -Wliteral-suffix -D__STDC_FORMAT_MACROS example-client.cpp -o client -I/opt/libprocess/include -I./ -L/opt/libprocess/lib \
--lprocess -lprotobuf -lglog -lev -larchive -lry_http_parser -lz -lrt -lpthread
+g++ example-client.cpp -o client $(pkg-config --cflags --libs libprocess)
 运行： ./client 127.0.0.1 55444 # 参数为服务器地址+端口
  */
 #include <iostream>

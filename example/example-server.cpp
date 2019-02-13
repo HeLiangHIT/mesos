@@ -6,8 +6,7 @@
   + "stop" 消息用户退出服务端
 
 编译： 
-g++ -std=c++11 -Wliteral-suffix -D__STDC_FORMAT_MACROS example-server.cpp -o server -I/opt/libprocess/include -I./ -L/opt/libprocess/lib \
--lprocess -lprotobuf -lglog -lev -larchive -lry_http_parser -lz -lrt -lpthread
+g++ example-server.cpp -o server $(pkg-config --cflags --libs libprocess)
 
 后台运行： ./server 127.0.0.1 55444 >server.log 2>&1 &
 查看运行日志： cat server.log
