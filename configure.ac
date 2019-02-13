@@ -190,7 +190,7 @@ AC_ARG_ENABLE([perftools],
 AC_ARG_ENABLE([python],
               AS_HELP_STRING([--disable-python],
                              [do not build Python bindings]),
-              [], [enable_python=yes])
+              [], [enable_python=no])
 
 # This is used to make distcheck and python install work together. For more
 # information, see the comment above AM_DISTCHECK_CONFIGURE_FLAGS in
@@ -200,7 +200,7 @@ AC_ARG_ENABLE([python-dependency-install],
                              [when the python packages are installed during
                               make install, no external dependencies are
                               downloaded or installed]),
-              [], [enable_python_dependency_install=yes])
+              [], [enable_python_dependency_install=no])
 
 AC_ARG_ENABLE([ssl],
               AS_HELP_STRING([--enable-ssl],

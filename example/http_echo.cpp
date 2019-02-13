@@ -36,6 +36,12 @@ public:
         info = info + client.str();
     }
     LOG(INFO) << info << ",body=" << request.body;
+    /*
+    OK response;
+    response.headers["Content-Type"] = "text/plain";
+    response.headers["Content-Length"] = 6;
+    response.body = "hello";
+    */
     // return to sender
     return OK(request.body);
   }
