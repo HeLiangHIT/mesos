@@ -24,10 +24,10 @@ find ./ -name lib*.a -type f -exec cp {} ${INSTALL_DIR}/lib \;
 cp -rp 3rdparty/bin ${INSTALL_DIR}/
 cp -rp 3rdparty/include ${INSTALL_DIR}/
 
-cp -rp 3rdparty/googletest-release-*/google*/include/ \
+cp -rp 3rdparty/googletest-release-*/google*/include/* \
   3rdparty/concurrentqueue*/*.h  3rdparty/concurrentqueue*/internal \
-  3rdparty/grpc*/include/  3rdparty/http-parser*/http_parser.h \
-  3rdparty/leveldb*/include/ \
+  3rdparty/grpc*/include/*  3rdparty/http-parser*/http_parser.h \
+  3rdparty/leveldb*/include/* \
   3rdparty/picojson*/picojson.h \
   ${INSTALL_DIR}/include
 mkdir -p ${INSTALL_DIR}/include/libarchive && cp 3rdparty/libarchive*/libarchive/*.h ${INSTALL_DIR}/include/libarchive
