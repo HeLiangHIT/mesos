@@ -50,9 +50,13 @@ Name: libprocess
 Description: Libprocess dependencies
 Version: 0.0.1
 Libs: -L\${libdir} -lprocess -lprotobuf -lglog -lgmock -lev -lgpr -lhashtable -lleveldb -lprotoc -larchive -lares -lry_http_parser -lzookeeper_mt -lz -lrt -lpthread 
-Libs.private: -lz
 Cflags: -I\${includedir} -Wliteral-suffix -D__STDC_FORMAT_MACROS -std=c++11
 EOF
+
+if [ "$(uname)" == "Darwin" ];then
+  # macOS do not need real-time for glibc since it's clang
+  sed -i "s|-lrt| |g" ${INSTALL_DIR}/pkgconfig/libprocess.pc
+fi
 
 echo -e "\nbuild libprocess success, usage:
     1. link libprocess pkg by: \033[32m export PKG_CONFIG_PATH=${INSTALL_DIR}/pkgconfig/:\${PKG_CONFIG_PATH} \033[0m
