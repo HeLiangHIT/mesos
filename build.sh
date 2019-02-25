@@ -1,8 +1,9 @@
 #!/bin/bash
 
 #  ---- build and package libprocess ----
-ROOT_PATH=${PWD}
+ROOT_PATH=$(dirname $(readlink -f $0))
 INSTALL_DIR=${ROOT_PATH}/install
+cd ${ROOT_PATH}
 
 # build
 ./bootstrap
@@ -62,7 +63,7 @@ echo -e "\nbuild libprocess success, usage:
     1. link libprocess pkg by: \033[32m export PKG_CONFIG_PATH=${INSTALL_DIR}/pkgconfig/:\${PKG_CONFIG_PATH} \033[0m
     2. build program by: \033[32m \$(pkg-config --cflags --libs libprocess) \033[0m
     3. if you need to use protoc/zookeeper, export path by: \033[32m export PATH=${INSTALL_DIR}/bin/:\${PATH} \033[0m
-for instance: cd example/
+for instance: cd ${ROOT_PATH}/example/
     g++ example-server.cpp -o server \$(pkg-config --cflags --libs libprocess)
     g++ example-client.cpp -o client \$(pkg-config --cflags --libs libprocess)
 "
