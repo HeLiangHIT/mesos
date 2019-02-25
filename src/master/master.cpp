@@ -1796,7 +1796,7 @@ void Master::doRegistryGc()
     TimeInfo currentTime = protobuf::getCurrentTime();
     hashset<SlaveID> toRemove;
 
-    foreachpair (const SlaveID& slave,
+    foreachpair (const SlaveID& slaveId,
                  const TimeInfo& removalTime,
                  slaves) {
       // Count-based GC.
@@ -1804,7 +1804,7 @@ void Master::doRegistryGc()
 
       size_t liveCount = count - toRemove.size();
       if (liveCount > flags.registry_max_agent_count) {
-        toRemove.insert(slave);
+        toRemove.insert(slaveId);
         continue;
       }
 
@@ -1813,7 +1813,7 @@ void Master::doRegistryGc()
           currentTime.nanoseconds() - removalTime.nanoseconds());
 
       if (age > flags.registry_max_agent_age) {
-        toRemove.insert(slave);
+        toRemove.insert(slaveId);
       }
     }
 
@@ -1866,29 +1866,49 @@ void Master::_doRegistryGc(
   // operation, but there isn't an easy way to do that.
 
   size_t numRemovedUnreachable = 0;
-  foreach (const SlaveID& slave, toRemoveUnreachable) {
-    if (!slaves.unreachable.contains(slave)) {
-      LOG(WARNING) << "Failed to garbage collect " << slave
+  foreach (const SlaveID& slaveId, toRemoveUnreachable) {
+    if (!slaves.unreachable.contains(slaveId)) {
+      LOG(WARNING) << "Failed to garbage collect " << slaveId
                    << " from the unreachable list";
 
       continue;
     }
 
-    slaves.unreachable.erase(slave);
-    slaves.unreachableTasks.erase(slave);
+    slaves.unreachable.erase(slaveId);
+
+    // TODO(vinod): Consider moving these tasks into `completedTasks` by
+    // transitioning them to a terminal state and sending status updates.
+    // But it's not clear what this state should be. If a framework
+    // reconciles these tasks after this point it would get `TASK_UNKNOWN`
+    // which seems appropriate but we don't keep tasks in this state in-memory.
+    if (slaves.unreachableTasks.contains(slaveId)) {
+      foreachkey (const FrameworkID& frameworkId,
+                  slaves.unreachableTasks.at(slaveId)) {
+        Framework* framework = getFramework(frameworkId);
+        if (framework != nullptr) {
+          foreach (const TaskID& taskId,
+                   slaves.unreachableTasks.at(slaveId).get(frameworkId)) {
+            framework->unreachableTasks.erase(taskId);
+          }
+        }
+      }
+    }
+
+    slaves.unreachableTasks.erase(slaveId);
+
     numRemovedUnreachable++;
   }
 
   size_t numRemovedGone = 0;
-  foreach (const SlaveID& slave, toRemoveGone) {
-    if (!slaves.gone.contains(slave)) {
-      LOG(WARNING) << "Failed to garbage collect " << slave
+  foreach (const SlaveID& slaveId, toRemoveGone) {
+    if (!slaves.gone.contains(slaveId)) {
+      LOG(WARNING) << "Failed to garbage collect " << slaveId
                    << " from the gone list";
 
       continue;
     }
 
-    slaves.gone.erase(slave);
+    slaves.gone.erase(slaveId);
     numRemovedGone++;
   }
 
@@ -4366,13 +4386,14 @@ void Master::accept(
             }
 
             if (getResourceProviderId(operation).isNone() &&
-                !slave->capabilities.agentOperationFeedback) {
+                !(slave->capabilities.agentOperationFeedback &&
+                  slave->capabilities.resourceProvider)) {
               drop(framework,
                    operation,
                    "Operation on agent default resources requested feedback,"
                    " but agent " + stringify(slaveId.get()) +
-                   " does not have the required AGENT_OPERATION_FEEDBACK"
-                   " capability");
+                   " does not have the required AGENT_OPERATION_FEEDBACK and"
+                   " RESOURCE_PROVIDER capabilities");
               break;
             }
 
@@ -4449,6 +4470,12 @@ void Master::accept(
               task.mutable_health_check()->set_type(HealthCheck::HTTP);
             }
           }
+
+          if (HookManager::hooksAvailable()) {
+            *task.mutable_resources() =
+              HookManager::masterLaunchTaskResourceDecorator(task,
+                slave->totalResources);
+          }
         }
 
         break;
@@ -4465,6 +4492,12 @@ void Master::accept(
         foreach (TaskInfo& task, *taskGroup->mutable_tasks()) {
           if (!task.has_executor()) {
             task.mutable_executor()->CopyFrom(executor);
+          }
+
+          if (HookManager::hooksAvailable()) {
+            *task.mutable_resources() =
+              HookManager::masterLaunchTaskResourceDecorator(task,
+                slave->totalResources);
           }
         }
 
@@ -6411,12 +6444,14 @@ void Master::acknowledgeOperationStatus(
     return;
   }
 
-  if (!slave->capabilities.resourceProvider) {
+  if (acknowledge.has_resource_provider_id() &&
+      !slave->capabilities.resourceProvider) {
     LOG(WARNING)
       << "Cannot send operation status update acknowledgement for status "
       << statusUuid << " of operation '" << operationId << "'"
       << " of framework " << *framework << " to agent " << slaveId
-      << " because the agent does not support resource providers";
+      << " because the agent does not have the RESOURCE_PROVIDER"
+      << " capability";
 
     metrics->invalid_operation_status_update_acknowledgements++;
     return;
@@ -7259,6 +7294,25 @@ void Master::_reregisterSlave(
 
       slaves.reregistering.erase(slaveInfo.id());
       return;
+    }
+
+    // If this agent has been downgraded from AGENT_OPERATION_FEEDBACK-capable
+    // to a version which does not have this capability, then we clean up
+    // terminal-but-unACKed operations on agent default resources.
+    vector<SlaveInfo::Capability> slaveCapabilities_ =
+      google::protobuf::convert(reregisterSlaveMessage.agent_capabilities());
+
+    protobuf::slave::Capabilities slaveCapabilities(slaveCapabilities_);
+
+    if (!slaveCapabilities.agentOperationFeedback &&
+        slave->capabilities.agentOperationFeedback) {
+      foreachvalue (Operation* operation, utils::copy(slave->operations)) {
+        if (!operation->latest_status().has_resource_provider_id() &&
+            operation->info().has_id() &&
+            protobuf::isTerminalState(operation->latest_status().state())) {
+          removeOperation(operation);
+        }
+      }
     }
 
     // Skip updating the registry if `slaveInfo` did not change from its
@@ -8674,7 +8728,11 @@ void Master::updateOperationStatus(UpdateOperationStatusMessage&& update)
 
   const OperationStatus& latestStatus = *operation->statuses().rbegin();
 
-  if (operation->info().has_id()) {
+  bool frameworkWillAcknowledge =
+    operation->info().has_id() &&
+    !isCompletedFramework(frameworkId.get());
+
+  if (frameworkWillAcknowledge) {
     // Forward the status update to the framework.
     Framework* framework = getFramework(frameworkId.get());
 
@@ -8695,8 +8753,9 @@ void Master::updateOperationStatus(UpdateOperationStatusMessage&& update)
     }
   } else {
     if (latestStatus.has_uuid()) {
-      // This update is being sent reliably, and it doesn't have an operation
-      // ID, so the master has to send an acknowledgement.
+      // This update is being sent reliably, and either doesn't have
+      // an operation ID or the associated framework terminated, so
+      // the master has to send an acknowledgement.
 
       Result<ResourceProviderID> resourceProviderId =
         getResourceProviderId(operation->info());
@@ -8717,7 +8776,8 @@ void Master::updateOperationStatus(UpdateOperationStatusMessage&& update)
             resourceProviderId.get());
       }
 
-      CHECK(slave->capabilities.resourceProvider);
+      CHECK(slave->capabilities.resourceProvider ||
+            slave->capabilities.agentOperationFeedback);
 
       send(slave->pid, acknowledgement);
     }
@@ -9065,13 +9125,25 @@ void Master::sendBulkOperationFeedback(
       continue;
     }
 
+    Result<ResourceProviderID> resourceProviderId =
+      getResourceProviderId(operation->info());
+
+    CHECK(!resourceProviderId.isError());
+
     scheduler::Event update;
     update.set_type(scheduler::Event::UPDATE_OPERATION_STATUS);
     *update.mutable_update_operation_status()->mutable_status() =
       protobuf::createOperationStatus(
           operationState,
           operation->info().id(),
-          message);
+          message,
+          None(),
+          None(),
+          slave->id,
+          resourceProviderId.isSome()
+            ? Some(resourceProviderId.get())
+            : Option<ResourceProviderID>::none());
+
 
     framework.get()->send(update);
   }
@@ -10945,6 +11017,32 @@ void Master::_removeSlave(
     // `RemoveSlave()`.
     // Remove and rescind inverse offers.
     removeInverseOffer(inverseOffer, true); // Rescind!
+  }
+
+  // Usually, operations are removed when the framework acknowledges
+  // a terminal operation status update. However, currently only operations
+  // on registered agents can be acknowledged. Since we're about to remove
+  // this agent from the list of registered agents, clean out all outstanding
+  // operations to prevent leaks.
+  //
+  // NOTE: If the agent comes back, there will be a brief window between
+  // the `ReregisterSlaveMessage` and the first `UpdateSlaveMessage` where
+  // where the master will not be able to give correct answers to operation
+  // reconciliation requests. However, since the same thing happens during
+  // master failover, the scheduler must be able to handle this scenario
+  // anyway so we allow it to happen here.
+  foreachvalue (Operation* operation, utils::copy(slave->operations)) {
+    removeOperation(operation);
+  }
+
+  foreachvalue (
+      const Slave::ResourceProvider& provider,
+      slave->resourceProviders) {
+    foreachvalue (
+        Operation* operation,
+        utils::copy(provider.operations)) {
+      removeOperation(operation);
+    }
   }
 
   // Remove the pending tasks from the slave.

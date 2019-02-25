@@ -78,6 +78,7 @@ endif ()
 set(MESOS_TESTS_SRC
   ${MESOS_TESTS_UTILS_SRC}
   agent_container_api_tests.cpp
+  agent_operation_feedback_tests.cpp
   anonymous_tests.cpp
   api_tests.cpp
   attributes_tests.cpp
@@ -104,6 +105,7 @@ set(MESOS_TESTS_SRC
   hook_tests.cpp
   http_authentication_tests.cpp
   http_fault_tolerance_tests.cpp
+  master_load_tests.cpp
   master_maintenance_tests.cpp
   master_slave_reconciliation_tests.cpp
   operation_reconciliation_tests.cpp
@@ -248,6 +250,11 @@ if (LINUX)
     list(APPEND MESOS_TESTS_SRC
       containerizer/linux_seccomp_parser_tests.cpp
       containerizer/linux_seccomp_isolator_tests.cpp)
+  endif()
+
+  if (ENABLE_LAUNCHER_SEALING)
+    list(APPEND MESOS_TESTS_SRC
+      containerizer/linux_memfd_tests.cpp)
   endif()
 
   if (ENABLE_LINUX_ROUTING)

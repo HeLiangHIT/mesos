@@ -410,6 +410,11 @@ message FrameworkInfo {
   // the framework). These labels are not interpreted by Mesos itself.
   // Labels should not contain duplicate key-value pairs.
   optional Labels labels = 11;
+
+  // Specifc resource requirements for each of the framework's roles. This field
+  // is used by e.g., the default allocator to decide whether a framework is
+  // interested in seeing a resource of a certain shape.
+  map<string, OfferFilters> offer_filters = 13;
 }
 
 
@@ -827,6 +832,18 @@ message ExecutorInfo {
  * in the same zone, in different zones in the same region, or in
  * different regions. Note that all masters in a given Mesos cluster
  * must be in the same region.
+ *
+ * Complex deployments may have additional levels of hierarchy: for example,
+ * multiple racks might be grouped together into "halls" and multiple DCs in
+ * the same geographical vicinity might be grouped together. As a convention,
+ * the recommended way to represent additional levels of hierarchy is via dot-
+ * separated labels in the existing zone and region fields. For example, the
+ * fact that racks "abc" and "def" are in the same hall might be represented
+ * using the zone names "rack-abc.hall-1" and "rack-def.hall-1", for example.
+ * Software that is not aware of this additional structure will compare the
+ * zone names for equality- hence, the two zones will be treated as different
+ * (unrelated) zones. Software that is "hall-aware" can inspect the zone names
+ * and make use of the additional hierarchy.
  */
 message DomainInfo {
   message FaultDomain {
@@ -985,7 +1002,13 @@ message AgentInfo {
       // (1) The ability to report resources that are provided by some
       //     local resource providers through the resource provider API.
       //
-      // (2) The ability to provide operation feedback.
+      // (2) The ability to provide operation feedback. This also means
+      //     that this capability is a prerequisite for full support of
+      //     feedback for operations on agent default resources. If an
+      //     agent has the mandatory AGENT_OPERATION_FEEDBACK capability
+      //     set but not the RESOURCE_PROVIDER capability, then
+      //     operations on agent default resources which request feedback
+      //     will not be allowed.
       RESOURCE_PROVIDER = 4;
 
       // This expresses the capability for the agent to handle persistent volume
@@ -994,6 +1017,11 @@ message AgentInfo {
 
       // This expresses the ability of the agent to handle operation feedback
       // for operations on agent default resources.
+      //
+      // Note that full support for this feature also requires the
+      // RESOURCE_PROVIDER capability; if you would like the agent to
+      // handle feedback for operations on agent default resources, the
+      // RESOURCE_PROVIDER capability should be set as well.
       AGENT_OPERATION_FEEDBACK = 6;
     }
 
@@ -1869,6 +1897,34 @@ message PerfStatistics {
   optional uint64 node_store_misses = 51;
   optional uint64 node_prefetches = 52;
   optional uint64 node_prefetch_misses = 53;
+}
+
+
+/**
+ * Represents filters that allow a framework to control the shape of
+ * offers that will be sent to its role(s). These filters apply
+ * globally to any agent (unlike the existing `DECLINE` filter which
+ * us a time-based resource subset filter that only applies to the
+ * agent that was declined).
+ *
+ * NOTE: Custom allocators might interpret these fields in a different
+ * way, or not at all.
+ */
+message OfferFilters {
+  message ResourceQuantities {
+    // Quantities are pairs of identifiers of scalar resources and
+    // an associated value, e.g., `{"disk": Scalar {"value": 30}}`.
+    map<string, Value.Scalar> quantities = 1;
+  }
+
+  message MinAllocatableResources {
+    // A set of resources is considered allocatable if contained in any of
+    // the following quantities. If no quantities are specified any resource
+    // is considered allocatable.
+    repeated ResourceQuantities quantities = 1;
+  }
+
+  optional MinAllocatableResources min_allocatable_resources = 1;
 }
 
 

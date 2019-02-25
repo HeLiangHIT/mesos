@@ -3,11 +3,21 @@ Release Notes - Mesos - Version 1.7.2 (WIP)
 * This is a bug fix release.
 
 ** Bug
+  * [MESOS-8887] - Unreachable tasks are not GC'ed when unreachable agent is GC'ed.
   * [MESOS-9210] - Mesos v1 scheduler library does not properly handle SUBSCRIBE retries.
+  * [MESOS-9507] - Agent could not recover due to empty docker volume checkpointed files.
   * [MESOS-9517] - SLRP should treat gRPC timeouts as non-terminal errors, instead of reporting OPERATION_FAILED.
   * [MESOS-9531] - chown error handling is incorrect in createSandboxDirectory.
   * [MESOS-9532] - ResourceOffersTest.ResourceOfferWithMultipleSlaves is flaky.
   * [MESOS-9533] - CniIsolatorTest.ROOT_CleanupAfterReboot is flaky.
+  * [MESOS-9537] - SLRP sends inconsistent status updates for dropped operations.
+  * [MESOS-9544] - SLRP does not clean up destroyed persistent volumes.
+  * [MESOS-9554] - Allocator might skip allocations because a single framework is incapable of receiving certain resources.
+  * [MESOS-9555] - Allocator CHECK failure: reservationScalarQuantities.contains(role).
+
+** Improvement
+  * [MESOS-9340] - Log all socket errors in libprocess.
+
 
 Release Notes - Mesos - Version 1.7.1
 -------------------------------------
@@ -76,7 +86,6 @@ Release Notes - Mesos - Version 1.7.1
   * [MESOS-9305] - Create cgoup recursively to workaround systemd deleting cgroups_root.
   * [MESOS-9321] - Add an optional `vendor` field in `Resource.DiskInfo.Source`.
   * [MESOS-9325] - Optimize `Resources::filter` operation.
-  * [MESOS-9340] - Log all socket errors in libprocess.
   * [MESOS-9486] - Set up `object.value` for `CREATE_DISK` and `DESTROY_DISK` authorizations.
   * [MESOS-9510] - Disallowed nan, inf and so on in `Value::Scalar`.
   * [MESOS-9516] - Extend `min_allocatable_resources` flag to cover non-scalar resources.
@@ -437,16 +446,28 @@ All Resolved Issues:
   * [MESOS-9020] - Seccomp design doc
 
 
-Release Notes - Mesos - Version 1.6.2 (WIP)
+Release Notes - Mesos - Version 1.6.3 (WIP)
 -------------------------------------------
 * This is a bug fix release.
 
 ** Bug
+  * [MESOS-9507] - Agent could not recover due to empty docker volume checkpointed files.
+
+** Improvement
+
+
+Release Notes - Mesos - Version 1.6.2
+-------------------------------------------
+* This is a bug fix release.
+
+** Bug
+  * [MESOS-7042] - Send SIGKILL after SIGTERM to IOSwitchboard after container termination.
   * [MESOS-7474] - Mesos fetcher cache doesn't retry when missed.
   * [MESOS-8128] - Make os::pipe file descriptors O_CLOEXEC.
   * [MESOS-8418] - mesos-agent high cpu usage because of numerous /proc/mounts reads.
   * [MESOS-8545] - AgentAPIStreamingTest.AttachInputToNestedContainerSession is flaky.
   * [MESOS-8568] - Command checks should always call `WAIT_NESTED_CONTAINER` before `REMOVE_NESTED_CONTAINER`
+  * [MESOS-8887] - Unreachable tasks are not GC'ed when unreachable agent is GC'ed.
   * [MESOS-8907] - Docker image fetcher fails with HTTP/2.
   * [MESOS-8917] - Agent leaking file descriptors into forked processes
   * [MESOS-8921] - Autotools don't work with newer OpenJDK versions
@@ -473,6 +494,7 @@ Release Notes - Mesos - Version 1.6.2 (WIP)
   * [MESOS-9283] - Docker containerizer actor can get backlogged with large number of containers.
   * [MESOS-9308] - URI disk profile adaptor could deadlock.
   * [MESOS-9317] - Some master endpoints do not handle failed authorization properly.
+  * [MESOS-9324] - Resource fragmentation: frameworks may be starved of port resources in the presence of large number frameworks with quota.
   * [MESOS-9332] - Nested container should run as the same user of its parent container by default.
   * [MESOS-9334] - Container stuck at ISOLATING state due to libevent poll never returns.
   * [MESOS-9411] - Validation of JWT tokens using HS256 hashing algorithm is not thread safe.
@@ -480,12 +502,16 @@ Release Notes - Mesos - Version 1.6.2 (WIP)
   * [MESOS-9419] - Executor to framework message crashes master if framework has not re-registered.
   * [MESOS-9480] - Master may skip processing authorization results for `LAUNCH_GROUP`.
   * [MESOS-9492] - Persist CNI working directory across reboot.
+  * [MESOS-9501] - Mesos executor fails to terminate and gets stuck after agent host reboot.
+  * [MESOS-9502] - IOswitchboard cleanup could get stuck due to FD leak from a race.
   * [MESOS-9518] - CNI_NETNS should not be set for orphan containers that do not have network namespace.
   * [MESOS-9531] - chown error handling is incorrect in createSandboxDirectory.
   * [MESOS-9532] - ResourceOffersTest.ResourceOfferWithMultipleSlaves is flaky.
   * [MESOS-9533] - CniIsolatorTest.ROOT_CleanupAfterReboot is flaky.
+  * [MESOS-9555] - Allocator CHECK failure: reservationScalarQuantities.contains(role).
 
 ** Improvement
+  * [MESOS-8418] - mesos-agent high cpu usage because of numerous /proc/mounts reads
   * [MESOS-9305] - Create cgoup recursively to workaround systemd deleting cgroups_root.
   * [MESOS-9340] - Log all socket errors in libprocess.
   * [MESOS-9501] - Mesos executor fails to terminate and gets stuck after agent host reboot.
@@ -882,9 +908,12 @@ Release Notes - Mesos - Version 1.5.3 (WIP)
 * This is a bug fix release.
 
 ** Bug
+  * [MESOS-8887] - Unreachable tasks are not GC'ed when unreachable agent is GC'ed.
   * [MESOS-9210] - Mesos v1 scheduler library does not properly handle SUBSCRIBE retries.
+  * [MESOS-9507] - Agent could not recover due to empty docker volume checkpointed files.
   * [MESOS-9532] - ResourceOffersTest.ResourceOfferWithMultipleSlaves is flaky.
   * [MESOS-9533] - CniIsolatorTest.ROOT_CleanupAfterReboot is flaky.
+  * [MESOS-9555] - Allocator CHECK failure: reservationScalarQuantities.contains(role).
 
 
 Release Notes - Mesos - Version 1.5.2
@@ -1475,8 +1504,18 @@ All Resolved Issues:
   * [MESOS-8394] - Bump CSI to 0.1.0.
 
 
-Release Notes - Mesos - Version 1.4.3
+Release Notes - Mesos - Version 1.4.4 (WIP)
 -------------------------------------------
+* This is a bug fix release.
+
+** Bug
+  * [MESOS-9507] - Agent could not recover due to empty docker volume checkpointed files.
+
+** Improvement:
+
+
+Release Notes - Mesos - Version 1.4.3
+-------------------------------------
 * This is a bug fix release.
 
 ** Bug

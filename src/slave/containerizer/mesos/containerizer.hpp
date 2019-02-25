@@ -142,7 +142,9 @@ public:
       IOSwitchboard* _ioSwitchboard,
       const process::Owned<Launcher>& _launcher,
       const process::Shared<Provisioner>& _provisioner,
-      const std::vector<process::Owned<mesos::slave::Isolator>>& _isolators)
+      const std::vector<process::Owned<mesos::slave::Isolator>>& _isolators,
+      const Option<int_fd>& _initMemFd,
+      const Option<int_fd>& _commandExecutorMemFd)
     : ProcessBase(process::ID::generate("mesos-containerizer")),
       flags(_flags),
       fetcher(_fetcher),
@@ -150,9 +152,29 @@ public:
       ioSwitchboard(_ioSwitchboard),
       launcher(_launcher),
       provisioner(_provisioner),
-      isolators(_isolators) {}
+      isolators(_isolators),
+      initMemFd(_initMemFd),
+      commandExecutorMemFd(_commandExecutorMemFd) {}
 
-  ~MesosContainerizerProcess() override {}
+  ~MesosContainerizerProcess() override
+  {
+    if (initMemFd.isSome()) {
+      Try<Nothing> close = os::close(initMemFd.get());
+      if (close.isError()) {
+        LOG(WARNING) << "Failed to close memfd '" << stringify(initMemFd.get())
+                     << "': " << close.error();
+      }
+    }
+
+    if (commandExecutorMemFd.isSome()) {
+      Try<Nothing> close = os::close(commandExecutorMemFd.get());
+      if (close.isError()) {
+        LOG(WARNING) << "Failed to close memfd '"
+                     << stringify(commandExecutorMemFd.get())
+                     << "': " << close.error();
+      }
+    }
+  }
 
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state);
@@ -317,6 +339,8 @@ private:
   const process::Owned<Launcher> launcher;
   const process::Shared<Provisioner> provisioner;
   const std::vector<process::Owned<mesos::slave::Isolator>> isolators;
+  const Option<int_fd> initMemFd;
+  const Option<int_fd> commandExecutorMemFd;
 
   struct Container
   {

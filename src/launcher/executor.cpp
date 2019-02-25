@@ -82,6 +82,10 @@
 #include "internal/devolve.hpp"
 #include "internal/evolve.hpp"
 
+#ifdef ENABLE_LAUNCHER_SEALING
+#include "linux/memfd.hpp"
+#endif // ENABLE_LAUNCHER_SEALING
+
 #include "logging/logging.hpp"
 
 #include "messages/messages.hpp"
@@ -496,14 +500,20 @@ protected:
 
     launchFlags.launch_info = JSON::protobuf(launchInfo);
 
-    // TODO(tillt): Consider using a flag allowing / disallowing the
-    // log output of possibly sensitive data. See MESOS-7292.
-    string commandString = strings::format(
-        "%s %s <POSSIBLY-SENSITIVE-DATA>",
-        path::join(launcherDir, MESOS_CONTAINERIZER),
-        MesosContainerizerLaunch::NAME).get();
+    // Determine the mesos containerizer binary depends on whether we
+    // need to clone and seal it on linux.
+    string initPath = path::join(launcherDir, MESOS_CONTAINERIZER);
+#ifdef ENABLE_LAUNCHER_SEALING
+    // Clone the launcher binary in memory for security concerns.
+    Try<int_fd> memFd = memfd::cloneSealedFile(initPath);
+    if (memFd.isError()) {
+      ABORT(
+          "Failed to clone a sealed file '" + initPath + "' in memory: " +
+          memFd.error());
+    }
 
-    LOG(INFO) << "Running '" << commandString << "'";
+    initPath = "/proc/self/fd/" + stringify(memFd.get());
+#endif // ENABLE_LAUNCHER_SEALING
 
     // Fork the child using launcher.
     vector<string> argv(2);
@@ -526,7 +536,7 @@ protected:
     }
 
     Try<Subprocess> s = subprocess(
-        path::join(launcherDir, MESOS_CONTAINERIZER),
+        initPath,
         argv,
         Subprocess::FD(STDIN_FILENO),
         Subprocess::FD(STDOUT_FILENO),
@@ -538,7 +548,7 @@ protected:
         childHooks);
 
     if (s.isError()) {
-      ABORT("Failed to launch '" + commandString + "': " + s.error());
+      ABORT("Failed to launch task subprocess: " + s.error());
     }
 
     return s->pid();

@@ -92,7 +92,8 @@ Example:
   </td>
   <td>
 JSON representation of agent features to whitelist. We always require
-'MULTI_ROLE', 'HIERARCHICAL_ROLE', and 'RESERVATION_REFINEMENT'.
+'MULTI_ROLE', 'HIERARCHICAL_ROLE', 'RESERVATION_REFINEMENT', and
+'AGENT_OPERATION_FEEDBACK'.
 <p/>
 Example:
 <pre><code>
@@ -100,7 +101,8 @@ Example:
     "capabilities": [
         {"type": "MULTI_ROLE"},
         {"type": "HIERARCHICAL_ROLE"},
-        {"type": "RESERVATION_REFINEMENT"}
+        {"type": "RESERVATION_REFINEMENT"},
+        {"type": "AGENT_OPERATION_FEEDBACK"}
     ]
 }
 </pre></code>
@@ -953,6 +955,17 @@ Path to find Hadoop installed (for
 fetching framework executors from HDFS)
 (no default, look for <code>HADOOP_HOME</code> in
 environment or find hadoop on <code>PATH</code>)
+  </td>
+</tr>
+
+<tr id="host_path_volume_force_creation">
+  <td>
+    --host_path_volume_force_creation
+  </td>
+  <td>
+A colon-separated list of directories where descendant directories are
+allowed to be created by the <code>volume/host_path</code> isolator,
+if the directories do not exist.
   </td>
 </tr>
 

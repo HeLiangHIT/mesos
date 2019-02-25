@@ -15,7 +15,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """
 This script is used to build and test (verify) reviews that are posted
 to ReviewBoard. The script is intended for use by automated "ReviewBots"
@@ -53,29 +52,54 @@ REVIEW_SIZE = 1000000  # 1 MB in bytes.
 # Parse arguments.
 parser = argparse.ArgumentParser(
     description="Reviews that need verification from the Review Board")
-parser.add_argument("-u", "--user", type=str, required=True,
-                    help="Review Board user name")
-parser.add_argument("-p", "--password", type=str, required=True,
-                    help="Review Board user password")
-parser.add_argument("-r", "--reviews", type=int, required=False,
-                    default=-1, help="The number of reviews to fetch,"
-                                     " that will need verification")
+parser.add_argument(
+    "-u", "--user", type=str, required=True, help="Review Board user name")
+parser.add_argument(
+    "-p",
+    "--password",
+    type=str,
+    required=True,
+    help="Review Board user password")
+parser.add_argument(
+    "-r",
+    "--reviews",
+    type=int,
+    required=False,
+    default=-1,
+    help="The number of reviews to fetch,"
+    " that will need verification")
 
 # Unless otherwise specified consider pending review requests to Mesos updated
-# since 03/01/2014.
+# since 03/01/2014. Note that we need to explicitly set `max-results` query
+# parameter because the default is 25 (max allowed is 200).
+# TODO(vinod): Paginate through the API to get all pending review requests
+# instead of just getting the first 200.
 group = "mesos"
 last_updated = "2014-03-01T00:00:00"
-query_parameters = "?to-groups=%s&status=pending&last-updated-from=%s" \
+query_parameters = \
+    "?to-groups=%s&status=pending&last-updated-from=%s&max-results=200" \
     % (group, last_updated)
-parser.add_argument("-q", "--query", type=str, required=False,
-                    help="Query parameters", default=query_parameters)
+parser.add_argument(
+    "-q",
+    "--query",
+    type=str,
+    required=False,
+    help="Query parameters",
+    default=query_parameters)
 
-parser.add_argument("-o", "--out-file", type=str, required=False,
-                    help="The out file with the reviews IDs that"
-                         " need verification")
-parser.add_argument("--skip-verify", action='store_true', required=False,
-                    help="Skip the verification and just write the review"
-                         " ids that need verification")
+parser.add_argument(
+    "-o",
+    "--out-file",
+    type=str,
+    required=False,
+    help="The out file with the reviews IDs that"
+    " need verification")
+parser.add_argument(
+    "--skip-verify",
+    action='store_true',
+    required=False,
+    help="Skip the verification and just write the review"
+    " ids that need verification")
 
 parameters = parser.parse_args()
 USER = parameters.user
@@ -91,15 +115,15 @@ class ReviewError(Exception):
     pass
 
 
-def shell(command):
+def shell(command, working_dir=None):
     """Run a shell command."""
-    try:
-        out = subprocess.check_output(
-            command, stderr=subprocess.STDOUT, shell=True)
-    except subprocess.CalledProcessError as err:
-        print("Error running command '%s': %s" % (command, err.output))
-        exit(1)
+    out = subprocess.check_output(
+        command, stderr=subprocess.STDOUT, cwd=working_dir, shell=True)
     return out.decode(sys.stdout.encoding)
+
+
+SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
+HEAD = shell("git rev-parse HEAD", SCRIPT_PATH)
 
 
 def api(url, data=None):
@@ -130,7 +154,9 @@ def api(url, data=None):
 def apply_review(review_id):
     """Apply a review using the script apply-reviews.py."""
     print("Applying review %s" % review_id)
-    shell("%s support/apply-reviews.py -n -r %s" % (sys.executable, review_id))
+    shell(
+        "cd .. && %s support/apply-reviews.py -n -r %s" %
+        (sys.executable, review_id), SCRIPT_PATH)
 
 
 def apply_reviews(review_request, reviews):
@@ -142,9 +168,9 @@ def apply_reviews(review_request, reviews):
 
     # If there is a circular dependency throw an error.`
     if review_request["id"] in reviews:
-        raise ReviewError("Circular dependency detected for review %s."
-                          "Please fix the 'depends_on' field."
-                          % review_request["id"])
+        raise ReviewError(
+            "Circular dependency detected for review %s."
+            "Please fix the 'depends_on' field." % review_request["id"])
     else:
         reviews.append(review_request["id"])
 
@@ -156,7 +182,17 @@ def apply_reviews(review_request, reviews):
 
     # Now apply this review if not yet submitted.
     if review_request["status"] != "submitted":
-        apply_review(review_request["id"])
+        # If the patch does not apply we translate the error to a
+        # `ReviewError`; otherwise we let the original exception
+        # propagate.
+        try:
+            apply_review(review_request["id"])
+        except subprocess.CalledProcessError as err:
+            error = err.output.decode("utf-8")
+            if "patch does not apply" in error:
+                raise ReviewError(error)
+            else:
+                raise err
 
 
 def post_review(review_request, message):
@@ -164,7 +200,7 @@ def post_review(review_request, message):
     print("Posting review: %s" % message)
 
     review_url = review_request["links"]["reviews"]["href"]
-    data = urllib.parse.urlencode({'body_top': message, 'public': 'true'})
+    data = urllib.parse.urlencode({"body_top": message, "public": "true"})
     api(review_url, data)
 
 
@@ -172,10 +208,10 @@ def post_review(review_request, message):
 def cleanup():
     """Clean the git repository."""
     try:
-        shell("git clean -fd")
-        HEAD = shell("git rev-parse HEAD")
+        shell("git clean -fd", SCRIPT_PATH)
+
         print(HEAD)
-        shell("git checkout HEAD -- %s" % HEAD)
+        shell("git reset --hard %s" % HEAD, SCRIPT_PATH)
     except subprocess.CalledProcessError as err:
         print("Failed command: %s\n\nError: %s" % (err.cmd, err.output))
 
@@ -198,7 +234,8 @@ def verify_review(review_request):
 
             # There is no equivalent to `tee` on Windows.
             subprocess.check_call(
-                ['cmd', '/c', '%s 2>&1 > %s' % (command, build_output)])
+                ['cmd', '/c',
+                 '%s 2>&1 > %s' % (command, build_output)])
         else:
             # Launch docker build script.
 
@@ -218,15 +255,15 @@ def verify_review(review_request):
             # `tee` the output so that the console can log the whole build
             # output. `pipefail` ensures that the exit status of the build
             # command ispreserved even after tee'ing.
-            subprocess.check_call(['bash', '-c',
-                                   ('set -o pipefail; %s 2>&1 | tee %s')
-                                   % (command, build_output)])
+            subprocess.check_call([
+                'bash', '-c',
+                ('set -o pipefail; %s 2>&1 | tee %s') % (command, build_output)
+            ])
 
         # Success!
         post_review(
-            review_request,
-            "Patch looks great!\n\n" \
-            "Reviews applied: %s\n\n" \
+            review_request, "Patch looks great!\n\n"
+            "Reviews applied: %s\n\n"
             "Passed command: %s" % (reviews, command))
     except subprocess.CalledProcessError as err:
         # If we are here because the docker build command failed, read the
@@ -246,20 +283,19 @@ def verify_review(review_request):
         if len(output) > REVIEW_SIZE:
             output = "...<truncated>...\n" + output[-REVIEW_SIZE:]
 
-        output += "\nFull log: "
-        output += urllib.parse.urljoin(os.environ['BUILD_URL'], 'console')
+        if os.environ.get("BUILD_URL"):
+            output += "\nFull log: "
+            output += urllib.parse.urljoin(os.environ["BUILD_URL"], "console")
 
         post_review(
-            review_request,
-            "Bad patch!\n\n" \
-            "Reviews applied: %s\n\n" \
-            "Failed command: %s\n\n" \
+            review_request, "Bad patch!\n\n"
+            "Reviews applied: %s\n\n"
+            "Failed command: %s\n\n"
             "Error:\n%s" % (reviews, err.cmd, output))
     except ReviewError as err:
         post_review(
-            review_request,
-            "Bad review!\n\n" \
-            "Reviews applied: %s\n\n" \
+            review_request, "Bad review!\n\n"
+            "Reviews applied: %s\n\n"
             "Error:\n%s" % (reviews, err.args[0]))
 
     # Clean up.
@@ -310,8 +346,8 @@ def needs_verification(review_request):
             print("Latest dependency change timestamp: %s" % dependency_time)
             break
 
-    # Needs verification if there is a new diff, or if the dependencies changed,
-    # after the last time it was verified.
+    # Needs verification if there is a new diff, or if the
+    # dependencies changed, after the last time it was verified.
     return not review_time or review_time < diff_time or \
         (dependency_time and review_time < dependency_time)
 
@@ -341,6 +377,7 @@ def main():
             review_ids.append(str(review_request["id"]))
 
     write_review_ids(review_ids)
+
 
 if __name__ == '__main__':
     main()

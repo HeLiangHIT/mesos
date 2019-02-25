@@ -1409,6 +1409,8 @@ MESOS_LINUX_FILES =									\
   slave/containerizer/mesos/isolators/volume/image.hpp					\
   slave/containerizer/mesos/isolators/volume/secret.cpp					\
   slave/containerizer/mesos/isolators/volume/secret.hpp					\
+  slave/containerizer/mesos/isolators/volume/utils.cpp					\
+  slave/containerizer/mesos/isolators/volume/utils.hpp					\
   slave/containerizer/mesos/provisioner/backends/aufs.cpp				\
   slave/containerizer/mesos/provisioner/backends/aufs.hpp				\
   slave/containerizer/mesos/provisioner/backends/bind.cpp				\
@@ -1432,6 +1434,12 @@ MESOS_LINUX_FILES +=							\
   linux/seccomp/seccomp_parser.hpp					\
   slave/containerizer/mesos/isolators/linux/seccomp.cpp			\
   slave/containerizer/mesos/isolators/linux/seccomp.hpp
+endif
+
+if ENABLE_LAUNCHER_SEALING
+MESOS_LINUX_FILES +=							\
+  linux/memfd.cpp							\
+  linux/memfd.hpp
 endif
 
 if ENABLE_LINUX_ROUTING
@@ -2491,6 +2499,7 @@ mesos_tests_SOURCES =						\
   tests/active_user_test_helper.cpp				\
   tests/active_user_test_helper.hpp				\
   tests/agent_container_api_tests.cpp				\
+  tests/agent_operation_feedback_tests.cpp			\
   tests/allocator.cpp				    \
   tests/allocator.hpp						\
   tests/anonymous_tests.cpp					\
@@ -2714,6 +2723,11 @@ mesos_tests_SOURCES +=						\
   tests/containerizer/volume_host_path_isolator_tests.cpp	\
   tests/containerizer/volume_image_isolator_tests.cpp		\
   tests/containerizer/volume_secret_isolator_tests.cpp
+endif
+
+if ENABLE_LAUNCHER_SEALING
+mesos_tests_SOURCES +=						\
+  tests/containerizer/linux_memfd_tests.cpp
 endif
 
 if ENABLE_LINUX_ROUTING

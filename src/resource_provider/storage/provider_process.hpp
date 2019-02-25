@@ -295,7 +295,8 @@ private:
   // applied. Do nothing if the operation is already in a terminal state.
   process::Future<Nothing> _applyOperation(const id::UUID& operationUuid);
 
-  // Sends `OPERATION_DROPPED` without checkpointing the operation status.
+  // Sends `OPERATION_DROPPED` status update. The operation status will be
+  // checkpointed if `operation` is set.
   void dropOperation(
       const id::UUID& operationUuid,
       const Option<FrameworkID>& frameworkId,
@@ -307,8 +308,17 @@ private:
       const id::UUID& operationUuid,
       const Resource::DiskInfo::Source::Type& targetType,
       const Option<std::string>& targetProfile);
+
   process::Future<std::vector<ResourceConversion>> applyDestroyDisk(
       const Resource& resource);
+
+  // Synchronously creates persistent volumes.
+  Try<std::vector<ResourceConversion>> applyCreate(
+      const Offer::Operation& operation) const;
+
+  // Synchronously cleans up and destroys persistent volumes.
+  Try<std::vector<ResourceConversion>> applyDestroy(
+      const Offer::Operation& operation) const;
 
   // Synchronously updates `totalResources` and the operation status and
   // then asks the status update manager to send status updates.
@@ -323,8 +333,6 @@ private:
 
   void sendResourceProviderStateUpdate();
 
-  // NOTE: This is a callback for the status update manager and should
-  // not be called directly.
   void sendOperationStatusUpdate(
       const UpdateOperationStatusMessage& update);
 

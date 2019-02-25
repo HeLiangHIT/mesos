@@ -2128,9 +2128,13 @@ TEST(OperationValidationTest, DestroyDisk)
   Resource disk4 = createDiskResource(
       "40", "*", None(), None(), createDiskSourceMount());
 
+  Resource disk5 = createPersistentVolume(
+      Megabytes(50), "role", "id", "path", None(), createDiskSourceMount());
+
   disk1.mutable_provider_id()->set_value("provider1");
   disk2.mutable_provider_id()->set_value("provider2");
   disk3.mutable_provider_id()->set_value("provider3");
+  disk5.mutable_provider_id()->set_value("provider5");
 
   Offer::Operation::DestroyDisk destroyDisk;
   destroyDisk.mutable_source()->CopyFrom(disk1);
@@ -2158,6 +2162,14 @@ TEST(OperationValidationTest, DestroyDisk)
   EXPECT_TRUE(strings::contains(
       error->message,
       "'source' is not managed by a resource provider"));
+
+  destroyDisk.mutable_source()->CopyFrom(disk5);
+
+  error = operation::validate(destroyDisk);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "Please destroy the persistent volume first"));
 }
 
 
@@ -4703,6 +4715,32 @@ TEST_F(FrameworkInfoValidationTest, ValidateFrameworkID)
 
   frameworkInfo.mutable_id()->set_value("foo/..");
   EXPECT_SOME(::framework::validate(frameworkInfo));
+}
+
+
+// This test validates that framework cannot configure negative
+// resources in their minimal allocatable resources offer filters.
+TEST_F(FrameworkInfoValidationTest, ValidateOfferFilters)
+{
+  Value::Scalar scalar;
+  scalar.set_value(-2);
+
+  OfferFilters offerFilters;
+  offerFilters.mutable_min_allocatable_resources()
+    ->add_quantities()
+    ->mutable_quantities()
+    ->insert({"cpus", scalar});
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+
+  ASSERT_FALSE(frameworkInfo.roles().empty());
+
+  frameworkInfo.mutable_offer_filters()->insert(
+      {frameworkInfo.roles(0), offerFilters});
+
+  EXPECT_SOME_EQ(
+      Error("Negative resource quantities are not allowed"),
+      framework::validate(frameworkInfo));
 }
 
 
